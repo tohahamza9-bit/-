@@ -49,7 +49,8 @@ class Settings(BaseSettings):
     moneyado_post_store_wait: float = Field(default=2.0)   # بعد «تخزين» قبل فحص النافذة الطارئة
     moneyado_post_store_close_wait: float = Field(default=1.0)  # بعد Enter على النافذة الرئيسية حتى تظهر القائمة
     moneyado_connect_wait: float = Field(default=1.0)      # بعد move_window قبل أي تفاعل
-    moneyado_open_timeout: float = Field(default=10.0)     # فتح شاشة العملية من القائمة (زر + ظهور الفورم)
+    moneyado_open_timeout: float = Field(default=30.0)     # فتح شاشة العملية من القائمة (زر + ظهور الفورم) — جهاز بطيء
+    moneyado_open_settle_wait: float = Field(default=2.0)  # مهلة بعد ضغط الزر قبل انتظار ظهور الفورم (جهاز بطيء)
     moneyado_dry_run_wait: float = Field(default=3.0)      # DRY_RUN: مهلة معاينة بصرية (الشاشة مفتوحة) قبل ✅
 
     # ── التشغيل ──

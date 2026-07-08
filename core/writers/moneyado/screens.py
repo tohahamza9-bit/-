@@ -140,7 +140,8 @@ class MoneyadoScreen(ScreenController):
         timeout: float = 20.0,
         connect_wait: float = 1.0,
         step_delay: float = 0.3,
-        open_timeout: float = 10.0,
+        open_timeout: float = 30.0,
+        open_settle_wait: float = 2.0,
     ) -> None:
         self._config = config
         self._timeout = timeout
@@ -149,6 +150,8 @@ class MoneyadoScreen(ScreenController):
         self._step_delay = step_delay
         # مهلة فتح الشاشة من القائمة الرئيسية (ظهور الزر + ظهور الفورم بعد الضغط §11.3).
         self._open_timeout = open_timeout
+        # مهلة استقرار بعد ضغط زر القائمة قبل انتظار ظهور الفورم (الجهاز البطيء يحتاج وقتًا §11.3).
+        self._open_settle_wait = open_settle_wait
         self._app = None
         self._window = None
         self._form_rect = None  # يُلتقط مرة في connect؛ مرجع الإحداثيات النسبية
@@ -162,7 +165,8 @@ class MoneyadoScreen(ScreenController):
             config,
             connect_wait=getattr(settings, "moneyado_connect_wait", 1.0),
             step_delay=getattr(settings, "moneyado_step_delay", 0.3),
-            open_timeout=getattr(settings, "moneyado_open_timeout", 10.0),
+            open_timeout=getattr(settings, "moneyado_open_timeout", 30.0),
+            open_settle_wait=getattr(settings, "moneyado_open_settle_wait", 2.0),
         )
 
     # ── إعداد الحقول والأزرار ────────────────────────────────────────────────
@@ -283,16 +287,31 @@ class MoneyadoScreen(ScreenController):
         match.click()
         time.sleep(self._step_delay)  # مهلة استقرار حتى يفتح الفورم (جهاز بطيء §11.3)
 
+    def _form_open_and_visible(self, operation: OperationType) -> bool:
+        """هل فورم العملية (ThunderRT6FormDC) مفتوح ومرئي مسبقًا؟ (استئناف/إعادة معالجة §11.3)."""
+        form_class = self._screen(operation).get("form_class", self._DEFAULT_FORM_CLASS)
+        return any(w.is_visible() for w in self._app.windows(class_name=form_class))
+
     def _open_screen(self, operation: OperationType, label: str) -> None:
-        """يفتح فورم العملية من القائمة الرئيسية: اتصال بالتطبيق → تأكّد القائمة → ضغط الزر
-        بالنص → انتظار ظهور الفورم وربطه (§11.3). لا نفتح فورمًا فوق فورم (§0)."""
+        """يفتح فورم العملية من القائمة الرئيسية: اتصال بالتطبيق → (فورم مفتوح مسبقًا؟ استخدمه) →
+        تأكّد القائمة → ضغط الزر بالنص → مهلة استقرار → انتظار ظهور الفورم وربطه (§11.3)."""
         self._connect_app(operation)
+
+        # فورم العملية مفتوح ومرئي مسبقًا (استئناف/إعادة معالجة) → اربطه مباشرة بلا ضغط ولا فتح
+        # فوق فورم. حارس بصمة الحقول في _bind_form (§0) يكشف الشاشة الخطأ إن كان الفورم مختلفًا.
+        if self._form_open_and_visible(operation):
+            log.info("فورم «%s» مفتوح ومرئي مسبقًا → استخدامه مباشرة (بلا ضغط §11.3).", label)
+            self._bind_form(operation, timeout=self._open_timeout)
+            return
+
         if not self.is_main_screen():
             raise RuntimeError(
                 f"الشاشة الحالية ليست القائمة الرئيسية — لا نفتح «{label}» فوق فورم مفتوح (§0)."
             )
         log.info("فتح شاشة «%s» من القائمة الرئيسية بالنص (§11.3).", label)
         self.click_button(label)
+        # 🔴 الجهاز بطيء: امنحه مهلة لفتح الشاشة قبل انتظار ظهور الفورم (يتفادى timeout مبكّرًا §11.3).
+        time.sleep(self._open_settle_wait)
         self._bind_form(operation, timeout=self._open_timeout)  # انتظار ظهور الفورم بعد الضغط
 
     def open_sell_screen(self) -> None:
