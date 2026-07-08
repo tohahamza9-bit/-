@@ -72,6 +72,8 @@ class MoneyadoWriter(Writer):
         self._NAME_POLL_RETRIES = max(1, round(enter_wait / self._NAME_POLL_INTERVAL))
         # المهلة بعد «تخزين» قبل فحص نافذة طارئة (رصيد/خطأ/تأكيد §11.3).
         self._POST_STORE_WAIT = getattr(self.settings, "moneyado_post_store_wait", 2.0)
+        # المهلة بعد Enter على النافذة الرئيسية (إغلاق رسالة التأكيد) حتى تظهر القائمة الرئيسية.
+        self._POST_STORE_CLOSE_WAIT = getattr(self.settings, "moneyado_post_store_close_wait", 1.0)
         # DRY_RUN: مهلة معاينة بصرية بعد التعبئة (الشاشة تبقى مفتوحة بلا «تخزين»/«خروج»).
         self._DRY_RUN_WAIT = getattr(self.settings, "moneyado_dry_run_wait", 3.0)
 
@@ -178,13 +180,19 @@ class MoneyadoWriter(Writer):
             if do_store:
                 screen.press_store(op)
                 # 🔴 لا نثق بالنقر وحده (§11.3): مهلة ثم فحص نافذة طارئة بعد «تخزين»
-                # (رصيد غير كافٍ/خطأ/تأكيد). لو ظهرت → إغلاق آمن + تصعيد للمسؤول (RuntimeError).
+                # (رصيد غير كافٍ/خطأ). لو ظهرت → إغلاق آمن + تصعيد للمسؤول (RuntimeError).
                 time.sleep(self._POST_STORE_WAIT)
                 post = screen.check_unexpected_window()
                 if post:
                     self._try_stop(screen, op)   # أغلقها (STOP/رجوع) — best-effort
                     raise RuntimeError(f"نافذة غير متوقّعة بعد «تخزين»: {post}")
-                log.info("تم «تخزين» %s (job=%s).", op.value, job.job_id)
+                # لا نافذة طارئة → البرنامج يعرض رسالة تأكيد/تنبيه عاديّة بعد الحفظ. Enter على
+                # النافذة الرئيسية (خارج مربع البيع/الشراء) يغلق الشاشة ويعيد للقائمة الرئيسية
+                # قبل العملية التالية (زر «شراء عملة» للطرف الثاني §11.3).
+                screen.confirm_store_on_main()
+                time.sleep(self._POST_STORE_CLOSE_WAIT)  # حتى تُغلَق الشاشة وتظهر القائمة الرئيسية
+                log.info("تم «تخزين» %s وإغلاق الشاشة للعودة للقائمة الرئيسية (job=%s).",
+                         op.value, job.job_id)
                 return WriteResult(ok=True)
 
             # Kill Switch إيقاف (commit=False، بلا dry_run): عُبّئت الشاشة ثم STOP بلا حفظ (§2.3)

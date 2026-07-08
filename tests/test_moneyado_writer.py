@@ -99,6 +99,7 @@ def make_writer(screen, *, dry_run=False, tmp_path=None) -> MoneyadoWriter:
     w._NAME_POLL_INTERVAL = 0    # اختبارات سريعة: بلا انتظار فعلي
     w._ENTER_WAIT = 0            # مسار §11.2 المعطّل: بلا انتظار فعلي في الاختبار
     w._POST_STORE_WAIT = 0
+    w._POST_STORE_CLOSE_WAIT = 0  # بلا مهلة إغلاق فعلية في الاختبار
     w._DRY_RUN_WAIT = 0          # DRY_RUN: بلا مهلة معاينة فعلية في الاختبار
     return w
 
@@ -282,6 +283,30 @@ def test_press_enter_on_active_sends_enter_via_form_window():
     assert win.type_keys.call_args.args[0] == "{ENTER}"
 
 
+def test_confirm_store_on_main_presses_enter_on_top_window():
+    """confirm_store_on_main يضغط Enter على النافذة الرئيسية للتطبيق (top_window) لا على الفورم."""
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({}, step_delay=0)
+    app = MagicMock()
+    top = MagicMock()
+    app.top_window.return_value = top
+    scr._app = app
+    scr.confirm_store_on_main()
+    app.top_window.assert_called_once()
+    top.type_keys.assert_called_once()
+    assert top.type_keys.call_args.args[0] == "{ENTER}"
+
+
+def test_confirm_store_on_main_swallows_errors_after_store():
+    """فشل Enter على النافذة الرئيسية لا يرمي (الحفظ تمّ فعلاً) — best-effort مسجَّل (T5)."""
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({}, step_delay=0)
+    app = MagicMock()
+    app.top_window.side_effect = RuntimeError("no top window")
+    scr._app = app
+    scr.confirm_store_on_main()   # لا يرمي
+
+
 async def test_write_sell_commission_calls_press_enter_on_active(tmp_path):
     """التدفّق: عمولة → البوت يضغط Enter على «المخصوم» عبر press_enter_on_active (لا fill، لا رفض)."""
     screen = make_screen()                    # field_config لا يحوي amount_deducted (بلا إحداثي)
@@ -447,6 +472,7 @@ async def test_write_post_store_popup_stops_and_reviews(tmp_path):
     assert "تخزين" in result.error and "رصيد" in result.error
     screen.press_store.assert_called_once()
     screen.press_stop.assert_called()               # أُغلقت النافذة
+    screen.confirm_store_on_main.assert_not_called()  # نافذة طارئة → لا Enter تأكيد أعمى
 
 
 @pytest.mark.asyncio
@@ -457,6 +483,39 @@ async def test_write_no_post_store_popup_stores_ok(tmp_path):
     result = await writer.write(make_job(make_sell_leg()), commit=True)
     assert result.ok is True and result.needs_review is False
     screen.press_store.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_write_confirms_store_on_main_after_store(tmp_path):
+    # بعد «تخزين» بلا نافذة طارئة → Enter على النافذة الرئيسية لإغلاق التأكيد والعودة للقائمة (§11.3)
+    screen = make_screen()
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    result = await writer.write(make_job(make_sell_leg()), commit=True)
+    assert result.ok is True
+    screen.press_store.assert_called_once()
+    screen.confirm_store_on_main.assert_called_once()   # أُغلقت الشاشة بعد الحفظ
+
+
+@pytest.mark.asyncio
+async def test_write_buy_confirms_store_on_main(tmp_path):
+    # نفس السلوك على شاشة الشراء (طرف ثانٍ): Enter على النافذة الرئيسية بعد «تخزين»
+    screen = make_screen(name=None)   # الشراء لا يقرأ اسم زبون
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    result = await writer.write(make_job(make_buy_leg()), commit=True)
+    assert result.ok is True
+    screen.press_store.assert_called_once()
+    screen.confirm_store_on_main.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_does_not_confirm_store_on_main(tmp_path):
+    # DRY_RUN: بلا «تخزين» → بلا Enter تأكيد على النافذة الرئيسية (الشاشة تبقى مفتوحة للمعاينة)
+    screen = make_screen()
+    writer = make_writer(screen, dry_run=True, tmp_path=tmp_path)
+    result = await writer.write(make_job(make_sell_leg()), commit=True)
+    assert result.dry_run is True
+    screen.press_store.assert_not_called()
+    screen.confirm_store_on_main.assert_not_called()
 
 
 @pytest.mark.asyncio
