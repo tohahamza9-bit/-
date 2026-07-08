@@ -28,6 +28,14 @@ _BTN_TASHKEEL = re.compile(r"[ً-ْٰـ]")
 def _norm_btn(s: str) -> str:
     return re.sub(r"\s+", " ", _BTN_TASHKEEL.sub("", s or "")).strip()
 
+
+def _actionable(ctrl) -> bool:
+    """هل عنصر (wrapper) مرئي وفعّال للنقر؟ (يتسامح مع wrappers لا تدعم الفحص)."""
+    try:
+        return bool(ctrl.is_visible() and ctrl.is_enabled())
+    except Exception:
+        return True
+
 # ── استيراد محروس (§11.3): البيئة الاختبارية بلا pywinauto/برنامج MONEYADO ──
 try:
     from pywinauto import Application, Desktop  # type: ignore
@@ -141,17 +149,20 @@ class MoneyadoScreen(ScreenController):
         connect_wait: float = 1.0,
         step_delay: float = 0.3,
         open_timeout: float = 30.0,
-        open_settle_wait: float = 2.0,
+        open_retry_wait: float = 6.0,
+        open_click_retries: int = 3,
     ) -> None:
         self._config = config
         self._timeout = timeout
         # مهل الجهاز البطيء (§11.3): بعد تثبيت النافذة، وبعد تعبئة كل حقل — قابلة للضبط من .env.
         self._connect_wait = connect_wait
         self._step_delay = step_delay
-        # مهلة فتح الشاشة من القائمة الرئيسية (ظهور الزر + ظهور الفورم بعد الضغط §11.3).
+        # ربط فورم العملية بعد ظهوره (§11.3).
         self._open_timeout = open_timeout
-        # مهلة استقرار بعد ضغط زر القائمة قبل انتظار ظهور الفورم (الجهاز البطيء يحتاج وقتًا §11.3).
-        self._open_settle_wait = open_settle_wait
+        # فتح الشاشة من القائمة: انتظار ظهور الفورم بعد كل ضغطة، وعدد إعادات الضغط إن ابتُلع
+        # النقر (نقر زر VB6 يُبتلَع أحيانًا فلا يفتح الفورم — أُثبت على الجهاز الحيّ §11.3).
+        self._open_retry_wait = open_retry_wait
+        self._open_click_retries = max(1, int(open_click_retries))
         self._app = None
         self._window = None
         self._form_rect = None  # يُلتقط مرة في connect؛ مرجع الإحداثيات النسبية
@@ -166,7 +177,8 @@ class MoneyadoScreen(ScreenController):
             connect_wait=getattr(settings, "moneyado_connect_wait", 1.0),
             step_delay=getattr(settings, "moneyado_step_delay", 0.3),
             open_timeout=getattr(settings, "moneyado_open_timeout", 30.0),
-            open_settle_wait=getattr(settings, "moneyado_open_settle_wait", 2.0),
+            open_retry_wait=getattr(settings, "moneyado_open_retry_wait", 6.0),
+            open_click_retries=getattr(settings, "moneyado_open_click_retries", 3),
         )
 
     # ── إعداد الحقول والأزرار ────────────────────────────────────────────────
@@ -277,13 +289,16 @@ class MoneyadoScreen(ScreenController):
         log.debug("أزرار القائمة الرئيسية المتاحة (%d): %r", len(available), available)
 
         target = _norm_btn(label)
-        match = next((w for w, t in buttons if _norm_btn(t) == target), None)
-        if match is None:
+        candidates = [w for w, t in buttons if _norm_btn(t) == target]
+        if not candidates:
             raise RuntimeError(
                 f"زر «{label}» غير موجود في القائمة الرئيسية. الأزرار المتاحة: {available} — "
                 f'اضبط النص الصحيح في config["main_menu"] (§11.3).'
             )
-        match.wait("ready visible enabled", timeout=self._open_timeout)
+        # فضّل الزر المرئي القابل للنقر (قد يوجد زر بنفس النص لكنه مخفي/غير فعّال §11.3).
+        match = next((w for w in candidates if _actionable(w)), candidates[0])
+        # 🔴 wrappers من descendants لا تدعم .wait() (كحقول VB6 النصية) — لا نستدعيها؛
+        #    الزر مُعدَّد وموجود، والنقر المباشر (BM_CLICK) هو ما نجح على الجهاز الحيّ.
         match.click()
         time.sleep(self._step_delay)  # مهلة استقرار حتى يفتح الفورم (جهاز بطيء §11.3)
 
@@ -292,9 +307,18 @@ class MoneyadoScreen(ScreenController):
         form_class = self._screen(operation).get("form_class", self._DEFAULT_FORM_CLASS)
         return any(w.is_visible() for w in self._app.windows(class_name=form_class))
 
+    def _wait_form_open(self, operation: OperationType) -> bool:
+        """ينتظر ظهور فورم العملية حتى `_open_retry_wait` (سبر كل 0.25s). True إن ظهر."""
+        steps = max(1, int(self._open_retry_wait / 0.25))
+        for _ in range(steps):
+            if self._form_open_and_visible(operation):
+                return True
+            time.sleep(0.25)
+        return self._form_open_and_visible(operation)
+
     def _open_screen(self, operation: OperationType, label: str) -> None:
         """يفتح فورم العملية من القائمة الرئيسية: اتصال بالتطبيق → (فورم مفتوح مسبقًا؟ استخدمه) →
-        تأكّد القائمة → ضغط الزر بالنص → مهلة استقرار → انتظار ظهور الفورم وربطه (§11.3)."""
+        تأكّد القائمة → ضغط الزر بالنص مع إعادة إن ابتُلع النقر → ربط الفورم (§11.3)."""
         self._connect_app(operation)
 
         # فورم العملية مفتوح ومرئي مسبقًا (استئناف/إعادة معالجة) → اربطه مباشرة بلا ضغط ولا فتح
@@ -308,11 +332,27 @@ class MoneyadoScreen(ScreenController):
             raise RuntimeError(
                 f"الشاشة الحالية ليست القائمة الرئيسية — لا نفتح «{label}» فوق فورم مفتوح (§0)."
             )
-        log.info("فتح شاشة «%s» من القائمة الرئيسية بالنص (§11.3).", label)
-        self.click_button(label)
-        # 🔴 الجهاز بطيء: امنحه مهلة لفتح الشاشة قبل انتظار ظهور الفورم (يتفادى timeout مبكّرًا §11.3).
-        time.sleep(self._open_settle_wait)
-        self._bind_form(operation, timeout=self._open_timeout)  # انتظار ظهور الفورم بعد الضغط
+
+        # 🔴 نقر زر VB6 يُبتلَع أحيانًا فلا يفتح الفورم (أُثبت على الجهاز الحيّ §11.3): بدل انتظار
+        #    المهلة كاملة ثم الفشل، نعيد الضغط حتى يظهر الفورم — نعيد فقط إن لم يظهر أي فورم (لا
+        #    نفتح شاشتين §0). فحص «مفتوح مسبقًا» في رأس اللفّة يحمي من سباق فتح متأخّر.
+        for attempt in range(1, self._open_click_retries + 1):
+            if self._form_open_and_visible(operation):
+                break
+            log.info("فتح «%s» من القائمة بالنص (محاولة %d/%d §11.3).",
+                     label, attempt, self._open_click_retries)
+            self.click_button(label)
+            if self._wait_form_open(operation):
+                break
+            log.warning("شاشة «%s» لم تفتح بعد الضغط (محاولة %d/%d) — نقر VB6 مبتلَع، إعادة (§11.3).",
+                        label, attempt, self._open_click_retries)
+        else:
+            raise RuntimeError(
+                f"شاشة «{label}» لم تفتح بعد {self._open_click_retries} محاولات ضغط "
+                f"(نقر VB6 مبتلَع/تعذّر الفتح §11.3)."
+            )
+
+        self._bind_form(operation, timeout=self._open_timeout)  # الفورم ظاهر الآن → ربط فوري
 
     def open_sell_screen(self) -> None:
         label = self._main_menu_cfg().get("sell_button", self._DEFAULT_SELL_BUTTON)

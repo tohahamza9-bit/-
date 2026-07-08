@@ -392,12 +392,13 @@ def test_open_sell_screen_checks_main_clicks_then_binds():
     from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
     if not _PYWINAUTO_AVAILABLE:
         pytest.skip("pywinauto غير متاح")
-    scr = MoneyadoScreen({}, step_delay=0, open_settle_wait=0)
+    scr = MoneyadoScreen({}, step_delay=0)
     calls = []
     scr._connect_app = MagicMock(side_effect=lambda op: calls.append("connect"))
     scr._form_open_and_visible = MagicMock(return_value=False)   # لا فورم مفتوح مسبقًا
     scr.is_main_screen = MagicMock(side_effect=lambda: calls.append("is_main") or True)
     scr.click_button = MagicMock(side_effect=lambda label: calls.append(f"click:{label}"))
+    scr._wait_form_open = MagicMock(return_value=True)           # الفورم ظهر بعد الضغطة الأولى
     scr._bind_form = MagicMock(side_effect=lambda op, **kw: calls.append("bind"))
     scr.open_sell_screen()
     assert calls == ["connect", "is_main", "click:بيع عملة", "bind"]
@@ -408,7 +409,7 @@ def test_open_screen_uses_already_open_form_directly():
     from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
     if not _PYWINAUTO_AVAILABLE:
         pytest.skip("pywinauto غير متاح")
-    scr = MoneyadoScreen({}, step_delay=0, open_settle_wait=0)
+    scr = MoneyadoScreen({}, step_delay=0)
     scr._connect_app = MagicMock()
     scr._form_open_and_visible = MagicMock(return_value=True)    # الفورم مفتوح مسبقًا
     scr.is_main_screen = MagicMock()
@@ -424,11 +425,12 @@ def test_open_buy_screen_uses_buy_label():
     from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
     if not _PYWINAUTO_AVAILABLE:
         pytest.skip("pywinauto غير متاح")
-    scr = MoneyadoScreen({}, step_delay=0, open_settle_wait=0)
+    scr = MoneyadoScreen({}, step_delay=0)
     scr._connect_app = MagicMock()
     scr._form_open_and_visible = MagicMock(return_value=False)
     scr.is_main_screen = MagicMock(return_value=True)
     scr.click_button = MagicMock()
+    scr._wait_form_open = MagicMock(return_value=True)
     scr._bind_form = MagicMock()
     scr.open_buy_screen()
     scr.click_button.assert_called_once_with("شراء عملة")
@@ -439,7 +441,7 @@ def test_open_screen_raises_when_not_main():
     from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
     if not _PYWINAUTO_AVAILABLE:
         pytest.skip("pywinauto غير متاح")
-    scr = MoneyadoScreen({}, step_delay=0, open_settle_wait=0)
+    scr = MoneyadoScreen({}, step_delay=0)
     scr._connect_app = MagicMock()
     scr._form_open_and_visible = MagicMock(return_value=False)
     scr.is_main_screen = MagicMock(return_value=False)
@@ -456,14 +458,50 @@ def test_open_screen_uses_configured_labels():
     from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
     if not _PYWINAUTO_AVAILABLE:
         pytest.skip("pywinauto غير متاح")
-    scr = MoneyadoScreen({"main_menu": {"sell_button": "بيع"}}, step_delay=0, open_settle_wait=0)
+    scr = MoneyadoScreen({"main_menu": {"sell_button": "بيع"}}, step_delay=0)
     scr._connect_app = MagicMock()
     scr._form_open_and_visible = MagicMock(return_value=False)
     scr.is_main_screen = MagicMock(return_value=True)
     scr.click_button = MagicMock()
+    scr._wait_form_open = MagicMock(return_value=True)
     scr._bind_form = MagicMock()
     scr.open_sell_screen()
     scr.click_button.assert_called_once_with("بيع")
+
+
+def test_open_screen_retries_when_click_swallowed():
+    """نقر VB6 مبتلَع (الفورم لم يفتح) → إعادة الضغط حتى يظهر، ثم يربط (§11.3)."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0, open_click_retries=3)
+    scr._connect_app = MagicMock()
+    scr._form_open_and_visible = MagicMock(return_value=False)   # لا فورم مفتوح في رأس اللفّة
+    scr.is_main_screen = MagicMock(return_value=True)
+    scr.click_button = MagicMock()
+    scr._wait_form_open = MagicMock(side_effect=[False, True])   # الضغطة الأولى ابتُلعت، الثانية نجحت
+    scr._bind_form = MagicMock()
+    scr.open_sell_screen()
+    assert scr.click_button.call_count == 2         # أُعيد الضغط مرّة
+    scr._bind_form.assert_called_once()             # ثم رُبط الفورم
+
+
+def test_open_screen_raises_after_retries_exhausted():
+    """كل الضغطات ابتُلعت → RuntimeError صريح بعد استنفاد المحاولات، بلا ربط فورم (§11.3)."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0, open_click_retries=3)
+    scr._connect_app = MagicMock()
+    scr._form_open_and_visible = MagicMock(return_value=False)
+    scr.is_main_screen = MagicMock(return_value=True)
+    scr.click_button = MagicMock()
+    scr._wait_form_open = MagicMock(return_value=False)          # لا يظهر الفورم أبدًا
+    scr._bind_form = MagicMock()
+    with pytest.raises(RuntimeError, match="لم تفتح بعد 3 محاولات"):
+        scr.open_sell_screen()
+    assert scr.click_button.call_count == 3         # حاول 3 مرّات
+    scr._bind_form.assert_not_called()              # لم يُربَط فورم
 
 
 async def test_write_sell_commission_calls_press_enter_on_active(tmp_path):
