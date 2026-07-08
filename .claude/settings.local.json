@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pytest -q -p no:cacheprovider 2>&1 | Select-Object -Last 6)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"import json; c=json.load\\(open\\('config/moneyado_fields.json',encoding='utf-8'\\)\\); s=c['sell_screen']; print\\('process:', s['process_name'], '| form:', s['form_class'], '| expected:', s['expected_field_count']\\); print\\('sell foreign_account:', s['fields']['foreign_account']\\); import core.writers.moneyado.screens as m; print\\('screens import OK; pywinauto available =', m._PYWINAUTO_AVAILABLE\\)\")",
+      "PowerShell(Push-Location whatsapp; foreach \\($f in @\\('src/index.js','src/capture.js','src/db.js','src/config.js'\\)\\) { node --check $f; if \\($?\\) { Write-Output \"OK $f\" } }; Pop-Location)",
+      "Bash(.venv/Scripts/python.exe -m pytest -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest)",
+      "Bash(.venv/Scripts/python *)",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python *)",
+      "Bash(python -m pytest tests/test_incomplete_transfer_a.py tests/test_queue.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_incomplete_transfer_a.py tests/test_queue.py tests/test_second_message_fixes.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider -o asyncio_default_fixture_loop_scope=function)"
+    ]
+  }
+}

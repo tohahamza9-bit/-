@@ -1,0 +1,27 @@
+# أسرار وبيئة
+.env
+config/moneyado_fields.json
+config/sql_queries.json
+
+# جلسة Baileys (تحتوي مفاتيح الجهاز)
+whatsapp/auth_info*/
+whatsapp/session*/
+
+# مخرجات وقت التشغيل
+artifacts/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# نظام
+.DS_Store
+Thumbs.db

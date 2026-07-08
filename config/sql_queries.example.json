@@ -1,0 +1,20 @@
+{
+  "_ملاحظة": "المعلّق التقني (ملحق ب-2): أسماء جداول SQL Server. انسخ إلى sql_queries.json واملأ الأسماء الحقيقية. مستخدم قراءة فقط (§11.4). {placeholders} تُملأ وقت الاستعلام.",
+  "tables": {
+    "transactions": "dbo.Transactions",
+    "customers": "dbo.Customers"
+  },
+  "columns": {
+    "reference_number": "ReferenceNo",
+    "amount": "ForeignAmount",
+    "customer_code": "CustomerCode",
+    "treasury_code": "AccountCode",
+    "operation_type": "OperationType",
+    "transaction_ref": "TransactionNo",
+    "created_at": "CreatedDate"
+  },
+  "queries": {
+    "verify_transaction": "SELECT TOP 1 {transaction_ref} AS ref FROM {transactions} WHERE {reference_number} = ? AND {amount} = ? AND {customer_code} = ? AND {operation_type} = ? ORDER BY {created_at} DESC",
+    "last_pending": "SELECT TOP 1 {transaction_ref} AS ref, {reference_number} AS refnum, {amount} AS amount FROM {transactions} WHERE {reference_number} = ? ORDER BY {created_at} DESC"
+  }
+}

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>لوحة تحكّم MONEYADO</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2233; --line:#2c3853; --txt:#e7ecf5; --muted:#8a99b5;
+          --accent:#3b82f6; --ok:#22c55e; --warn:#ef4444; --chip:#243049; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",Tahoma,system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); font-size:15px; line-height:1.6; }
+  header { padding:16px 20px; background:var(--card); border-bottom:1px solid var(--line);
+           display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+  header h1 { margin:0; font-size:20px; }
+  .wrap { max-width:1000px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:16px; margin-bottom:18px; }
+  .card h2 { margin:0 0 12px; font-size:17px; border-bottom:1px solid var(--line); padding-bottom:8px; }
+  .card h2 .rooms-link { float:inline-start; font-size:13px; font-weight:600; text-decoration:none;
+          color:var(--accent); background:rgba(59,130,246,.12); border:1px solid var(--accent);
+          border-radius:8px; padding:3px 10px; }
+  .card h2 .rooms-link:hover { background:rgba(59,130,246,.22); }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  input, select, button { font-family:inherit; font-size:14px; padding:8px 10px; border-radius:8px;
+          border:1px solid var(--line); background:var(--bg); color:var(--txt); }
+  input, select { flex:1; min-width:120px; }
+  button { cursor:pointer; background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.ghost { background:transparent; color:var(--txt); }
+  button.danger { background:var(--warn); border-color:var(--warn); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  table { width:100%; border-collapse:collapse; margin-top:10px; }
+  th, td { text-align:right; padding:8px; border-bottom:1px solid var(--line); font-size:14px; }
+  th { color:var(--muted); font-weight:600; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:13px; }
+  .pill.on { background:rgba(34,197,94,.15); color:var(--ok); }
+  .pill.off { background:rgba(239,68,68,.15); color:var(--warn); }
+  .pill.err { background:rgba(234,179,8,.15); color:#eab308; }
+  /* ألوان أنواع الغرف */
+  .pill.central { background:rgba(59,130,246,.18); color:#3b82f6; }      /* أزرق */
+  .pill.admin { background:rgba(249,115,22,.18); color:#f97316; }        /* برتقالي */
+  .pill.customer { background:rgba(34,197,94,.18); color:#22c55e; }      /* أخضر */
+  .pill.treasury { background:rgba(168,85,247,.18); color:#a855f7; }     /* بنفسجي */
+  .pill.unclassified { background:rgba(138,153,181,.18); color:var(--muted); }
+  .pill.ignore { background:rgba(138,153,181,.1); color:#6b7280; }
+  code.jid { cursor:pointer; font-family:"Consolas",monospace; font-size:12.5px; color:var(--txt);
+             background:var(--chip); border:1px solid var(--line); border-radius:6px; padding:2px 8px;
+             direction:ltr; display:inline-block; max-width:100%; overflow-wrap:anywhere; }
+  code.jid:hover { border-color:var(--accent); }
+  .status-dot { width:12px; height:12px; border-radius:50%; display:inline-block; margin-inline-end:6px; }
+  .kill { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  .kill .big { font-size:16px; font-weight:700; }
+  .tok { display:flex; gap:8px; align-items:center; }
+  .tok input { max-width:180px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .inactive td { opacity:.5; }
+  #msg { position:fixed; bottom:16px; inset-inline-start:16px; background:var(--card);
+         border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:9; }
+  .aliases { font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>لوحة تحكّم MONEYADO</h1>
+  <div class="tok">
+    <span class="muted">رمز الأمان</span>
+    <input id="token" type="password" placeholder="X-Internal-Token" autocomplete="off">
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- تحكّم البوت (Kill Switch §13) -->
+  <div class="card">
+    <h2>تحكّم البوت — Kill Switch</h2>
+    <div class="kill">
+      <span><span id="dot" class="status-dot"></span><span id="stateTxt" class="big">…</span></span>
+      <span id="storeTxt" class="pill off">التخزين: …</span>
+      <button id="toggleBtn">تبديل التخزين</button>
+      <span class="muted">تفعيل = يخزّن تلقائيًا · إيقاف = يتوقف عند «تخزين» · الافتراضي: إيقاف</span>
+    </div>
+  </div>
+
+  <!-- الغرف — العضويات المكتشَفة/المصنّفة (§2.2) -->
+  <div class="card">
+    <h2>الغرف <span class="muted">(الغرف التي البوت عضو فيها · انقر JID لنسخه)</span>
+      <a class="rooms-link" href="/rooms" target="_blank" rel="noopener">إدارة الغرف ↗</a></h2>
+    <table><thead><tr><th>الاسم</th><th>JID</th><th>النوع</th><th>الحالة</th></tr></thead>
+      <tbody id="r_body"></tbody></table>
+  </div>
+
+  <!-- الخزائن §13 -->
+  <div class="card">
+    <h2>إدارة الخزائن</h2>
+    <div class="row">
+      <input id="t_name" placeholder="الاسم">
+      <input id="t_code" placeholder="الكود" style="max-width:100px">
+      <select id="t_type">
+        <option value="sell_only">بيع فقط</option>
+        <option value="sell_and_buy">بيع وشراء</option>
+      </select>
+      <select id="t_cur">
+        <option value="">عملة —</option>
+        <option value="EGP">مصري EGP</option>
+        <option value="TND">تونسي TND</option>
+      </select>
+      <input id="t_alias" placeholder="إملاءات بديلة (فاصلة)">
+      <button onclick="addTreasury()">حفظ</button>
+    </div>
+    <table><thead><tr><th>الاسم</th><th>الكود</th><th>النوع</th><th>العملة</th><th>البلد</th><th>إملاءات</th><th>الحالة</th><th></th></tr></thead>
+      <tbody id="t_body"></tbody></table>
+  </div>
+
+  <!-- الموردون §13 -->
+  <div class="card">
+    <h2>إدارة الموردين</h2>
+    <div class="row">
+      <input id="s_name" placeholder="الاسم">
+      <input id="s_code" placeholder="كود MONEYADO" style="max-width:130px">
+      <input id="s_alias" placeholder="إملاءات بديلة (فاصلة)">
+      <button onclick="addSupplier()">حفظ</button>
+    </div>
+    <table><thead><tr><th>الاسم</th><th>الكود</th><th>إملاءات</th><th>الحالة</th><th></th></tr></thead>
+      <tbody id="s_body"></tbody></table>
+  </div>
+
+  <!-- الموظفون المعتمدون §13 -->
+  <div class="card">
+    <h2>الموظفون المعتمدون <span class="muted">(«تم» تُقبل من هؤلاء فقط)</span></h2>
+    <div class="row">
+      <input id="e_num" placeholder="رقم واتساب">
+      <input id="e_name" placeholder="الاسم">
+      <button onclick="addEmployee()">إضافة</button>
+    </div>
+    <table><thead><tr><th>الاسم</th><th>رقم واتساب</th><th>الحالة</th><th></th></tr></thead>
+      <tbody id="e_body"></tbody></table>
+  </div>
+
+</div>
+<div id="msg"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const TOKEN_KEY = "moneyado_token";
+$("token").value = localStorage.getItem(TOKEN_KEY) || "";
+$("token").addEventListener("change", () => localStorage.setItem(TOKEN_KEY, $("token").value));
+
+function toast(t) { const m=$("msg"); m.textContent=t; m.style.display="block";
+  clearTimeout(window._tt); window._tt=setTimeout(()=>m.style.display="none", 3000); }
+
+async function api(path, method="GET", body=null) {
+  const opt = { method, headers:{} };
+  if (body) { opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
+  if (method !== "GET") opt.headers["X-Internal-Token"] = $("token").value;
+  const r = await fetch("/api"+path, opt);
+  if (!r.ok) {
+    let d = ""; try { d = (await r.json()).detail; } catch(e) {}
+    toast("خطأ "+r.status+(d?": "+d:"")); throw new Error(r.status);
+  }
+  return r.status === 204 ? null : r.json();
+}
+const csv = (s) => s.split(",").map(x=>x.trim()).filter(Boolean);
+
+// ── Kill Switch ──
+async function loadControl() {
+  const c = await api("/control");
+  $("stateTxt").textContent = {running:"شغّال", stopped:"موقوف", error:"خطأ"}[c.state] || c.state;
+  const dot = $("dot");
+  dot.style.background = c.state==="running" ? "var(--ok)" : c.state==="error" ? "#eab308" : "var(--warn)";
+  const st = $("storeTxt");
+  st.textContent = "التخزين: " + (c.storage_enabled ? "مُفعّل" : "موقوف");
+  st.className = "pill " + (c.storage_enabled ? "on" : "off");
+}
+$("toggleBtn").onclick = async () => { await api("/control/toggle","POST"); await loadControl(); };
+
+// ── الخزائن ──
+// عرض «البلد» من عملة الخزينة (db.treasuries مصدر الحقيقة) — عرض فقط، لا يؤثّر على التطبيع.
+const COUNTRY_BY_CURRENCY = { EGP: "🇪🇬 مصر", TND: "🇹🇳 تونس" };
+function countryCell(cur) { return COUNTRY_BY_CURRENCY[cur] || "—"; }
+async function loadTreasuries() {
+  const rows = await api("/treasuries");
+  $("t_body").innerHTML = rows.map(t => `<tr class="${t.active?'':'inactive'}">
+    <td>${t.name}</td><td>${t.code??'—'}</td>
+    <td>${t.type==='sell_and_buy'?'بيع وشراء':'بيع فقط'}</td>
+    <td>${t.currency??'—'}</td>
+    <td>${countryCell(t.currency)}</td>
+    <td class="aliases">${(t.aliases||[]).join('، ')}</td>
+    <td>${t.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
+    <td>${t.active?`<button class="ghost danger" onclick="disableTreasury('${encodeURIComponent(t.name)}')">إيقاف</button>`:''}</td>
+  </tr>`).join("");
+}
+async function addTreasury() {
+  if (!$("t_name").value) return toast("الاسم مطلوب");
+  await api("/treasuries","POST",{ name:$("t_name").value, code:$("t_code").value||null,
+    type:$("t_type").value, currency:$("t_cur").value||null, aliases:csv($("t_alias").value) });
+  ["t_name","t_code","t_alias"].forEach(i=>$(i).value=""); loadTreasuries();
+}
+async function disableTreasury(n) { await api(`/treasuries/${n}/disable`,"POST"); loadTreasuries(); }
+
+// ── الموردون ──
+async function loadSuppliers() {
+  const rows = await api("/suppliers");
+  $("s_body").innerHTML = rows.map(s => `<tr class="${s.active?'':'inactive'}">
+    <td>${s.name}</td><td>${s.code??'—'}</td>
+    <td class="aliases">${(s.aliases||[]).join('، ')}</td>
+    <td>${s.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
+    <td>${s.active?`<button class="ghost danger" onclick="disableSupplier('${encodeURIComponent(s.name)}')">إيقاف</button>`:''}</td>
+  </tr>`).join("");
+}
+async function addSupplier() {
+  if (!$("s_name").value) return toast("الاسم مطلوب");
+  await api("/suppliers","POST",{ name:$("s_name").value, code:$("s_code").value||null,
+    aliases:csv($("s_alias").value) });
+  ["s_name","s_code","s_alias"].forEach(i=>$(i).value=""); loadSuppliers();
+}
+async function disableSupplier(n) { await api(`/suppliers/${n}/disable`,"POST"); loadSuppliers(); }
+
+// ── الموظفون ──
+async function loadEmployees() {
+  const rows = await api("/employees");
+  $("e_body").innerHTML = rows.map(e => `<tr class="${e.active?'':'inactive'}">
+    <td>${e.name}</td><td>${e.whatsapp_number}</td>
+    <td>${e.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
+    <td><button class="ghost danger" onclick="delEmployee('${encodeURIComponent(e.whatsapp_number)}')">حذف</button></td>
+  </tr>`).join("");
+}
+async function addEmployee() {
+  if (!$("e_num").value || !$("e_name").value) return toast("الرقم والاسم مطلوبان");
+  await api("/employees","POST",{ whatsapp_number:$("e_num").value, name:$("e_name").value });
+  $("e_num").value=""; $("e_name").value=""; loadEmployees();
+}
+async function delEmployee(n) { await api(`/employees/${n}`,"DELETE"); loadEmployees(); }
+
+// ── الغرف ──
+const ROOM_TYPE_AR = { central:"مركزية", admin:"مسؤول", customer:"زبون",
+  treasury:"خزينة", unclassified:"غير مصنّفة", ignore:"متجاهَلة" };
+async function loadRooms() {
+  const rows = await api("/rooms");
+  $("r_body").innerHTML = rows.map(r => `<tr class="${r.active?'':'inactive'}">
+    <td>${r.name ?? '—'}</td>
+    <td><code class="jid" title="انقر للنسخ" onclick="copyJid(this)">${r.jid}</code></td>
+    <td><span class="pill ${r.type}">${ROOM_TYPE_AR[r.type] ?? r.type}</span></td>
+    <td>${r.active?'<span class="pill on">فعّالة</span>':'<span class="pill off">موقوفة</span>'}</td>
+  </tr>`).join("") || `<tr><td colspan="4" class="muted">لا غرف مكتشَفة بعد</td></tr>`;
+}
+function copyJid(el) {
+  const t = el.textContent;
+  const done = () => toast("تم نسخ JID");
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done).catch(() => fallbackCopy(t, done));
+  } else { fallbackCopy(t, done); }
+}
+function fallbackCopy(t, done) {
+  const ta = document.createElement("textarea");
+  ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand("copy"); done(); } catch (e) { toast("تعذّر النسخ"); }
+  document.body.removeChild(ta);
+}
+
+// تحميل أولي
+function refreshAll(){ loadControl(); loadRooms(); loadTreasuries(); loadSuppliers(); loadEmployees(); }
+refreshAll();
+setInterval(loadControl, 10000); // تحديث مؤشّر الحالة دوريًا
+setInterval(loadRooms, 30000);   // تحديث الغرف كل 30 ثانية (المطلوب)
+</script>
+</body>
+</html>

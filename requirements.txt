@@ -1,0 +1,24 @@
+# ── نواة Python (FastAPI + الفهم + الطابور + المطابقة) ──
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+motor==3.6.0                # سائق MongoDB غير المتزامن
+pymongo==4.9.2
+
+# ── التحقّق من SQL Server (قراءة فقط §11.4) ──
+pyodbc==5.2.0
+
+# ── أتمتة الشاشة RPA (§11.3) — Windows فقط ──
+pywinauto==0.6.9 ; sys_platform == "win32"
+pywin32==311; sys_platform == "win32"      # DPAPI لفكّ كلمة سرّ MONEYADO (§2.1)
+pillow==11.0.0                              # لقطات الشاشة عند النافذة الطارئة
+
+# ── أدوات ──
+python-dateutil==2.9.0.post0
+httpx==0.28.1                               # الاتصال بجسر WhatsApp
+
+# ── الاختبارات ──
+pytest==8.3.4
+pytest-asyncio==0.25.0
+mongomock-motor==0.0.34                     # MongoDB وهمي للاختبارات

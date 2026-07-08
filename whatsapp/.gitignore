@@ -1,0 +1,9 @@
+# تبعيات
+node_modules/
+
+# جلسة Baileys — تحوي بيانات اعتماد (§14.3: لا مفاتيح في git)
+session/
+*.session
+
+# سجلّات
+*.log

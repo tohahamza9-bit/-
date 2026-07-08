@@ -1,0 +1,59 @@
+{
+  "_ملاحظة": "إحداثيات نسبية للفورم [left, top]، مستخرجة ومؤكّدة بصريًا (draw_outline) على الجهاز ببايثون 32-bit. القيمة null في coord تمنع البوت من التعبئة. الأزرار تُطابق بالعنوان (ثابتة). لا تُدخل الحقول التي يحسبها البرنامج (رقم المعاملة/المبلغ المحلي/الصافي/المسلّم/الأرصدة).",
+
+  "sell_screen": {
+    "process_name": "stock.exe",
+    "form_class": "ThunderRT6FormDC",
+    "expected_field_count": 32,
+    "fields": {
+      "foreign_account":       {"coord": [441, 80],  "class": "ThunderRT6TextBox",  "order": 1,  "enter": true,  "note": "الحساب الأجنبي (الخزينة) ثم Enter"},
+      "reference_number":      {"coord": [11, 130],  "class": "ThunderRT6TextBox",  "order": 2,  "note": "الرقم الإشاري A6xxx"},
+      "customer":              {"coord": [361, 180], "class": "ThunderRT6TextBox",  "order": 3,  "enter": true,  "note": "كود الزبون فقط + Enter — الاسم يظهر تلقائيًا"},
+      "customer_name_display": {"coord": [451, 180], "class": "ThunderRT6TextBox",  "order": 3,  "read_only": true, "note": "اسم الزبون الظاهر — قراءة وتحقّق فقط، لا يُكتب"},
+      "foreign_amount":        {"coord": [581, 230], "class": "ThunderRT6TextBox",  "order": 4,  "note": "المبلغ قبل الخصم، فاصل الآلاف مُشال"},
+      "currency_type":         {"coord": [111, 230], "class": "ThunderRT6ComboBox", "order": 5,  "note": "3=تونسي، 4=مصري"},
+      "rate_multiply":         {"coord": [651, 280], "class": "ThunderRT6TextBox",  "order": 6,  "note": "الضارب × — 1 دائمًا"},
+      "rate_divide":           {"coord": [381, 280], "class": "ThunderRT6TextBox",  "order": 7,  "note": "القسمة / — السعر المطبَّع (§3.6): مصري كما هو، تونسي 0.xxxx"},
+      "commission_rate":       {"coord": [661, 330], "class": "ThunderRT6TextBox",  "order": 8,  "note": "نسبة العمولة — 0 دائمًا"},
+      "commission":            {"coord": [461, 330], "class": "ThunderRT6TextBox",  "order": 9,  "note": "العمولة — الفرق بالسالب (−35) أو فارغة"},
+      "country":               {"coord": [451, 380], "class": "ThunderRT6TextBox",  "order": 10, "note": "البلد — غير حرج"},
+      "payment_method":        {"coord": [361, 430], "class": "ThunderRT6TextBox",  "order": 11, "note": "رقم الهاتف"},
+      "notes":                 {"coord": [361, 480], "class": "ThunderRT6TextBox",  "order": 12, "note": "اسم المستلم إن وُجد"},
+      "date_field":            {"coord": null,       "class": "MSMaskWndClass",     "read_only": true, "note": "التاريخ تلقائي — لا يُلمس"}
+    },
+    "_computed_not_filled": "يحسبها/يولّدها البرنامج — البوت لا يكتبها (§11.1): رقم المعاملة، المبلغ المحلي، رمز الحساب، رمز العملة، المبلغ المخصوم، كود البلد، الأرصدة.",
+    "buttons": {
+      "store": {"title_re": "^تخزين$",        "class": "ThunderRT6CommandButton", "note": "زر «تخزين» فقط (§2.3)"},
+      "stop":  {"title_re": "STOP|رجوع|إلغاء", "class": "ThunderRT6CommandButton", "note": "صمّام الأمان — يلغي بلا حفظ"}
+    },
+    "forbidden_buttons": ["طباعة وتخزين", "معاينة وتخزين", "ايصال قبض", "ايصال صرف"]
+  },
+
+  "buy_screen": {
+    "process_name": "stock.exe",
+    "form_class": "ThunderRT6FormDC",
+    "expected_field_count": 28,
+    "fields": {
+      "foreign_account":   {"coord": [401, 90],  "class": "ThunderRT6TextBox",  "order": 1,  "enter": true, "note": "الحساب الأجنبي (الخزينة) ثم Enter"},
+      "reference_number":  {"coord": [21, 140],  "class": "ThunderRT6TextBox",  "order": 2,  "note": "الرقم الإشاري"},
+      "transaction_number":{"coord": [681, 140], "class": "ThunderRT6TextBox",  "order": 3,  "read_only": true, "note": "رقم المعاملة — يولّده البرنامج، لا يُلمس"},
+      "currency_type":     {"coord": [641, 190], "class": "ThunderRT6ComboBox", "order": 4,  "note": "3=تونسي، 4=مصري"},
+      "rate_multiply":     {"coord": [721, 240], "class": "ThunderRT6TextBox",  "order": 5,  "note": "الضارب × — 1 دائمًا"},
+      "rate_divide":       {"coord": [441, 240], "class": "ThunderRT6TextBox",  "order": 6,  "note": "القسمة / — السعر المطبَّع"},
+      "quantity":          {"coord": [21, 190],  "class": "ThunderRT6TextBox",  "order": 7,  "note": "الكمية = المبلغ الأجنبي"},
+      "customer":          {"coord": [461, 340], "class": "ThunderRT6TextBox",  "order": 8,  "enter": true, "note": "كود المورد + Enter — الاسم يظهر تلقائيًا"},
+      "country":           {"coord": [431, 390], "class": "ThunderRT6TextBox",  "order": 9,  "note": "البلد — غير حرج"},
+      "payment_method":    {"coord": [421, 440], "class": "ThunderRT6TextBox",  "order": 10, "note": "رقم الهاتف"},
+      "notes":             {"coord": [421, 490], "class": "ThunderRT6TextBox",  "order": 11, "note": "ملاحظات"},
+      "date_field":        {"coord": null,       "class": "MSMaskWndClass",     "read_only": true, "note": "التاريخ تلقائي — لا يُلمس"}
+    },
+    "_computed_not_filled": "يحسبها/يولّدها البرنامج — البوت لا يكتبها: رقم المعاملة، المبلغ الصافي، المبلغ المسلّم، رمز الحساب، رمز العملة، نسبة العمولة، كود البلد، الأرصدة. لا توجد خانة عمولة منفصلة في الشراء.",
+    "buttons": {
+      "store": {"title_re": "^تخزين$",        "class": "ThunderRT6CommandButton"},
+      "stop":  {"title_re": "STOP|رجوع|إلغاء", "class": "ThunderRT6CommandButton"}
+    },
+    "forbidden_buttons": ["طباعة وتخزين", "معاينة وتخزين", "ايصال قبض", "ايصال صرف"]
+  },
+
+  "unexpected_window_titles": ["رصيد", "خطأ", "تنبيه", "Crystal", "معاينة", "Print Preview", "غير موجود"]
+}

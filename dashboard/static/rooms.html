@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>إدارة الغرف — MONEYADO</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2233; --line:#2c3853; --txt:#e7ecf5; --muted:#8a99b5;
+          --accent:#3b82f6; --ok:#22c55e; --warn:#ef4444; --chip:#243049; --new:#eab308; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",Tahoma,system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); font-size:15px; line-height:1.6; }
+  header { padding:16px 20px; background:var(--card); border-bottom:1px solid var(--line);
+           display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+  header h1 { margin:0; font-size:20px; }
+  a.back { color:var(--muted); text-decoration:none; font-size:14px; }
+  a.back:hover { color:var(--txt); }
+  .wrap { max-width:820px; margin:0 auto; padding:16px; }
+  .tok { display:flex; gap:8px; align-items:center; }
+  .tok input { max-width:180px; font-family:inherit; font-size:14px; padding:8px 10px;
+               border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--txt); }
+  .muted { color:var(--muted); font-size:13px; }
+  .sec-title { margin:18px 0 8px; font-size:14px; color:var(--muted); font-weight:600;
+               display:flex; align-items:center; gap:8px; }
+  .sec-title::before { content:""; flex:1; height:1px; background:var(--line); }
+  .sec-title::after  { content:""; flex:1; height:1px; background:var(--line); }
+  /* بطاقة غرفة */
+  .room { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:14px 16px; margin-bottom:12px; display:flex; flex-wrap:wrap; gap:12px;
+          align-items:center; }
+  .room.new { border-color:var(--new); background:linear-gradient(0deg,rgba(234,179,8,.06),rgba(234,179,8,.06)),var(--card); }
+  .room.off { opacity:.55; }
+  .room .name { flex:1 1 200px; min-width:180px; font-weight:600; }
+  .room .name .tag { display:inline-block; margin-inline-start:8px; font-size:11px; font-weight:700;
+                     color:var(--new); background:rgba(234,179,8,.15); border-radius:999px; padding:1px 8px; }
+  select, button { font-family:inherit; font-size:14px; padding:8px 10px; border-radius:8px;
+                   border:1px solid var(--line); background:var(--bg); color:var(--txt); cursor:pointer; }
+  select { min-width:130px; }
+  select.treasury { min-width:190px; }
+  select[hidden] { display:none !important; }   /* قائمة الخزينة مخفيّة إلا لغرف الخزينة */
+  button.tgl { min-width:88px; }
+  button.tgl.on  { background:rgba(34,197,94,.15);  border-color:var(--ok);   color:var(--ok); }
+  button.tgl.off { background:rgba(239,68,68,.15);  border-color:var(--warn); color:var(--warn); }
+  #msg { position:fixed; bottom:16px; inset-inline-start:16px; background:var(--card);
+         border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:9; }
+  #empty { text-align:center; color:var(--muted); padding:40px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>إدارة الغرف</h1>
+    <a class="back" href="/">→ لوحة التحكّم الكاملة</a>
+  </div>
+  <div class="tok">
+    <span class="muted">رمز الأمان</span>
+    <input id="token" type="password" placeholder="X-Internal-Token" autocomplete="off">
+  </div>
+</header>
+
+<div class="wrap">
+  <p class="muted">البوت يكتشف الغرف تلقائيًا من واتساب. حدّد وظيفة كل غرفة — يُحفظ فورًا.</p>
+  <div id="list"></div>
+  <div id="empty" style="display:none">لا غرف مكتشَفة بعد.</div>
+</div>
+<div id="msg"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const TOKEN_KEY = "moneyado_token";
+$("token").value = localStorage.getItem(TOKEN_KEY) || "";
+$("token").addEventListener("change", () => localStorage.setItem(TOKEN_KEY, $("token").value));
+
+function toast(t) { const m=$("msg"); m.textContent=t; m.style.display="block";
+  clearTimeout(window._tt); window._tt=setTimeout(()=>m.style.display="none", 2500); }
+
+async function api(path, method="GET", body=null) {
+  const opt = { method, headers:{} };
+  if (body) { opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
+  if (method !== "GET") opt.headers["X-Internal-Token"] = $("token").value;
+  const r = await fetch("/api"+path, opt);
+  if (!r.ok) {
+    let d = ""; try { d = (await r.json()).detail; } catch(e) {}
+    toast("خطأ "+r.status+(d?": "+d:"")); throw new Error(r.status);
+  }
+  return r.status === 204 ? null : r.json();
+}
+
+// خيارات التصنيف (بلا «غير مصنّفة» — تلك حالة أولية فقط)
+const TYPES = [
+  ["central","مركزية"], ["admin","مسؤول"], ["customer","زبون"],
+  ["treasury","خزينة"], ["supplier","مورد"], ["ignore","تجاهل"],
+];
+const ROOM_TYPE_AR = { central:"مركزية", admin:"مسؤول", customer:"زبون",
+  treasury:"خزينة", supplier:"مورد", unclassified:"غير مصنّفة", ignore:"متجاهَلة" };
+// ترتيب المصنّفة (غير المصنّفة تُعالَج منفصلة بالأعلى)
+const TYPE_ORDER = { central:0, admin:1, customer:2, treasury:3, supplier:4, ignore:6 };
+const COUNTRY_BY_CURRENCY = { EGP:"🇪🇬 مصر", TND:"🇹🇳 تونس" };
+
+let TREASURIES = [];
+
+function esc(s){ return String(s??"").replace(/[&<>"']/g, c =>
+  ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+
+function treasuryOptions(selectedCode) {
+  const opts = ['<option value="">— اختر الخزينة —</option>'];
+  for (const t of TREASURIES) {
+    if (t.code == null) continue;                         // بلا كود = غير قابلة للربط
+    const country = COUNTRY_BY_CURRENCY[t.currency] || "";
+    const label = `${t.name} · ${t.code}${country ? " · "+country : ""}`;
+    const sel = String(t.code) === String(selectedCode) ? " selected" : "";
+    opts.push(`<option value="${esc(t.code)}"${sel}>${esc(label)}</option>`);
+  }
+  return opts.join("");
+}
+
+function roomCard(r) {
+  const isNew = r.type === "unclassified";
+  const div = document.createElement("div");
+  div.className = "room" + (isNew ? " new" : "") + (r.active ? "" : " off");
+  const typeOpts = [
+    isNew ? '<option value="unclassified" selected>— غير مصنّفة —</option>' : "",
+    ...TYPES.map(([v,l]) => `<option value="${v}"${r.type===v?" selected":""}>${l}</option>`),
+  ].join("");
+  const showTreasury = r.type === "treasury";
+  div.innerHTML = `
+    <div class="name">${esc(r.name || "بلا اسم")}${isNew?'<span class="tag">جديدة</span>':""}</div>
+    <select class="type">${typeOpts}</select>
+    <select class="treasury"${showTreasury?"":" hidden"}>${treasuryOptions(r.treasury_code)}</select>
+    <button class="tgl ${r.active?"on":"off"}">${r.active?"فعّالة":"موقوفة"}</button>`;
+
+  const typeSel = div.querySelector(".type");
+  const treSel  = div.querySelector(".treasury");
+  const tglBtn  = div.querySelector(".tgl");
+
+  typeSel.addEventListener("change", async () => {
+    const t = typeSel.value;
+    treSel.hidden = t !== "treasury";        // تظهر فقط عند اختيار «خزينة»
+    const patch = { type: t };
+    if (t !== "treasury") patch.treasury_code = null;
+    await save(r, patch);
+  });
+  treSel.addEventListener("change", () => save(r, { treasury_code: treSel.value || null }));
+  tglBtn.addEventListener("click", () => save(r, { active: !r.active }));
+  return div;
+}
+
+async function save(r, patch) {
+  if (!$("token").value) { toast("أدخل رمز الأمان أولًا"); load(); return; }
+  try {
+    const updated = await api(`/rooms/${encodeURIComponent(r.jid)}`, "PATCH", patch);
+    toast("تم الحفظ ✓");
+    Object.assign(r, updated);   // تحديث الحالة المحلية ثم إعادة الرسم للفرز/الألوان
+    load();
+  } catch (e) { load(); }        // فشل → أعد التحميل لاستعادة القيم الحقيقية
+}
+
+function render(rooms) {
+  const list = $("list"); list.innerHTML = "";
+  $("empty").style.display = rooms.length ? "none" : "block";
+
+  const unclassified = rooms.filter(r => r.type === "unclassified");
+  const classified   = rooms.filter(r => r.type !== "unclassified");
+  const byOrder = (a,b) =>
+    (TYPE_ORDER[a.type]??99) - (TYPE_ORDER[b.type]??99) ||
+    String(a.name||a.jid).localeCompare(String(b.name||b.jid), "ar");
+  unclassified.sort(byOrder);
+  classified.sort(byOrder);
+
+  if (unclassified.length) {
+    const h = document.createElement("div");
+    h.className = "sec-title"; h.textContent = `غرف جديدة تنتظر التصنيف (${unclassified.length})`;
+    list.appendChild(h);
+    unclassified.forEach(r => list.appendChild(roomCard(r)));
+  }
+  if (classified.length) {
+    const h = document.createElement("div");
+    h.className = "sec-title"; h.textContent = "الغرف المصنّفة";
+    list.appendChild(h);
+    classified.forEach(r => list.appendChild(roomCard(r)));
+  }
+}
+
+async function load() {
+  try {
+    TREASURIES = await api("/treasuries");
+    const rooms = await api("/rooms");
+    render(rooms);
+  } catch (e) { /* toast عُرض بالفعل */ }
+}
+
+load();
+setInterval(load, 30000);   // اكتشاف الغرف الجديدة دوريًا
+</script>
+</body>
+</html>

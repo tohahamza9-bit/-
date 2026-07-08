@@ -1,0 +1,23 @@
+{
+  "name": "moneyado-whatsapp",
+  "version": "1.0.0",
+  "description": "جسر WhatsApp (Baileys) لبوت MONEYADO — التقاط خام + إرسال مقيّد (whitelist §2.2) مع حمايات عدم الحظر (§14)",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "lint:pure": "node --check src/whitelist.js && node --check src/antiban.js && node --check src/keys.js && node --check src/messages.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "mongodb": "^6.10.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

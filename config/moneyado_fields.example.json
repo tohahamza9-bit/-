@@ -1,0 +1,50 @@
+{
+  "_ملاحظة": "المعلّق التقني (ملحق ب-1): auto_id/فهرس كل خانة. تُستخرج بـ print_control_identifiers وقت التنفيذ (§11.3). انسخ هذا إلى moneyado_fields.json واملأ القيم الحقيقية. القيم null تمنع البوت من التعبئة حتى تُستكمل.",
+  "sell_screen": {
+    "window_title_re": ".*بيع عملة.*",
+    "fields": {
+      "foreign_account": {"auto_id": null, "control_type": "Edit", "order": 1, "note": "الحساب الأجنبي (الخزينة) — type_keys ثم Enter (§11.3)"},
+      "reference_number": {"auto_id": null, "control_type": "Edit", "order": 2, "note": "الرقم الإشاري A6xxx"},
+      "customer": {"auto_id": null, "control_type": "Edit", "order": 3, "note": "الكود أولًا ثم Enter — الاسم يظهر تلقائيًا (§11.2)"},
+      "customer_name_display": {"auto_id": null, "control_type": "Static", "order": 3, "note": "الاسم الظاهر بعد إدخال الكود — للقراءة والتحقّق فقط"},
+      "foreign_amount": {"auto_id": null, "control_type": "Edit", "order": 4, "note": "المبلغ قبل الخصم، فاصل الآلاف مُشال"},
+      "currency_type": {"auto_id": null, "control_type": "ComboBox", "order": 5, "note": "3=تونسي، 4=مصري"},
+      "rate_multiply": {"auto_id": null, "control_type": "Edit", "order": 6, "note": "الضارب × — 1 دائمًا"},
+      "rate_divide": {"auto_id": null, "control_type": "Edit", "order": 7, "note": "القسمة / — السعر المطبَّع (§3.6)"},
+      "commission_rate": {"auto_id": null, "control_type": "Edit", "order": 8, "note": "نسبة العمولة — 0 دائمًا"},
+      "commission": {"auto_id": null, "control_type": "Edit", "order": 9, "note": "العمولة — الفرق بالسالب أو فارغة"},
+      "country": {"auto_id": null, "control_type": "Edit", "order": 10, "note": "البلد — غير حرج"},
+      "payment_method": {"auto_id": null, "control_type": "Edit", "order": 11, "note": "رقم الهاتف"},
+      "notes": {"auto_id": null, "control_type": "Edit", "order": 12, "note": "اسم المستلم إن وُجد"}
+    },
+    "buttons": {
+      "store": {"auto_id": null, "title_re": "تخزين", "note": "زر «تخزين» المسموح (§2.3)"},
+      "stop": {"auto_id": null, "title_re": "STOP|رجوع|إلغاء", "note": "صمام الأمان — يلغي بلا حفظ (§2.3)"}
+    },
+    "forbidden_buttons": ["طباعة وتخزين", "معاينة وتخزين", "إيصال قبض", "إيصال صرف"]
+  },
+  "buy_screen": {
+    "window_title_re": ".*شراء عملة.*",
+    "fields": {
+      "foreign_account": {"auto_id": null, "control_type": "Edit", "order": 1, "note": "الحساب الأجنبي (الخزينة)"},
+      "transaction_number": {"auto_id": null, "control_type": "Edit", "order": 2, "note": "رقم المعاملة — يولّده البرنامج، لا يُلمس"},
+      "currency_type": {"auto_id": null, "control_type": "ComboBox", "order": 3, "note": "3=تونسي، 4=مصري"},
+      "rate": {"auto_id": null, "control_type": "Edit", "order": 4, "note": "السعر المطبَّع"},
+      "quantity": {"auto_id": null, "control_type": "Edit", "order": 5, "note": "الكمية (المبلغ الأجنبي)"},
+      "net_amount": {"auto_id": null, "control_type": "Edit", "order": 6, "note": "المبلغ الصافي"},
+      "commission": {"auto_id": null, "control_type": "Edit", "order": 7, "note": "العمولة"},
+      "customer": {"auto_id": null, "control_type": "Edit", "order": 8, "note": "المورد — الكود أولًا ثم Enter"},
+      "country": {"auto_id": null, "control_type": "Edit", "order": 9},
+      "payment_method": {"auto_id": null, "control_type": "Edit", "order": 10, "note": "رقم الهاتف"},
+      "notes": {"auto_id": null, "control_type": "Edit", "order": 11}
+    },
+    "buttons": {
+      "store": {"auto_id": null, "title_re": "تخزين"},
+      "stop": {"auto_id": null, "title_re": "STOP|رجوع|إلغاء"}
+    },
+    "forbidden_buttons": ["طباعة وتخزين", "معاينة وتخزين", "إيصال قبض", "إيصال صرف"]
+  },
+  "unexpected_window_titles": [
+    "رصيد", "خطأ", "تنبيه", "Crystal", "معاينة", "Print Preview", "غير موجود"
+  ]
+}
