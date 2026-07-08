@@ -332,20 +332,59 @@ def test_is_main_screen_true_when_no_form_open():
     assert scr.is_main_screen() is True
 
 
-def test_click_button_clicks_by_title_on_top_window():
-    """click_button يضغط زرًّا بالنص (title) على النافذة العليا للتطبيق — لا بإحداثي."""
+def _fake_button(text: str) -> MagicMock:
+    b = MagicMock()
+    b.window_text.return_value = text
+    return b
+
+
+def test_click_button_matches_by_text_among_enumerated_buttons():
+    """click_button يعدّد الأزرار ويطابق بالنص (بعد تطبيع خفيف) ثم يضغط الزر الصحيح."""
     from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
     if not _PYWINAUTO_AVAILABLE:
         pytest.skip("pywinauto غير متاح")
     scr = MoneyadoScreen({}, step_delay=0)
-    app, top, btn = MagicMock(), MagicMock(), MagicMock()
+    app, top = MagicMock(), MagicMock()
+    sell_btn, buy_btn = _fake_button("بيع عملة "), _fake_button("شراء عملة")  # مسافة زائدة مقصودة
     app.top_window.return_value = top
-    top.child_window.return_value = btn
+    top.descendants.return_value = [buy_btn, sell_btn]
     scr._app = app
     scr.click_button("بيع عملة")
-    top.child_window.assert_called_once()
-    assert top.child_window.call_args.kwargs["title"] == "بيع عملة"
-    btn.click.assert_called_once()
+    sell_btn.click.assert_called_once()             # طُوبق رغم المسافة الزائدة (تطبيع)
+    buy_btn.click.assert_not_called()
+
+
+def test_click_button_missing_lists_available_buttons():
+    """زر غير موجود → RuntimeError صريح يسرد الأزرار المتاحة (لا timeout غامض §11.3)."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0)
+    app, top = MagicMock(), MagicMock()
+    app.top_window.return_value = top
+    top.descendants.return_value = [_fake_button("بيع"), _fake_button("شراء")]   # النص الفعلي مختصر
+    scr._app = app
+    with pytest.raises(RuntimeError, match="غير موجود"):
+        scr.click_button("بيع عملة")
+    # رسالة الخطأ تسرد المتاح للمعايرة
+    try:
+        scr.click_button("بيع عملة")
+    except RuntimeError as exc:
+        assert "بيع" in str(exc) and "شراء" in str(exc)
+
+
+def test_click_button_uses_configured_button_class():
+    """صنف زر القائمة الرئيسية قابل للضبط عبر config["main_menu"]["button_class"]."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({"main_menu": {"button_class": "CustomBtn"}}, step_delay=0)
+    app, top = MagicMock(), MagicMock()
+    app.top_window.return_value = top
+    top.descendants.return_value = [_fake_button("بيع عملة")]
+    scr._app = app
+    scr.click_button("بيع عملة")
+    assert top.descendants.call_args.kwargs["class_name"] == "CustomBtn"
 
 
 def test_open_sell_screen_checks_main_clicks_then_binds():
@@ -358,7 +397,7 @@ def test_open_sell_screen_checks_main_clicks_then_binds():
     scr._connect_app = MagicMock(side_effect=lambda op: calls.append("connect"))
     scr.is_main_screen = MagicMock(side_effect=lambda: calls.append("is_main") or True)
     scr.click_button = MagicMock(side_effect=lambda label: calls.append(f"click:{label}"))
-    scr._bind_form = MagicMock(side_effect=lambda op: calls.append("bind"))
+    scr._bind_form = MagicMock(side_effect=lambda op, **kw: calls.append("bind"))
     scr.open_sell_screen()
     assert calls == ["connect", "is_main", "click:بيع عملة", "bind"]
 

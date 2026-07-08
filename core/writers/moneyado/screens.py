@@ -7,6 +7,7 @@ pywinauto قد لا يكون مثبّتًا (بيئة اختبار بلا برن
 """
 from __future__ import annotations
 
+import re
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -18,6 +19,14 @@ from ...logging_setup import get_logger
 from .fields import SELECT, FieldOp
 
 log = get_logger(__name__)
+
+# تطبيع نصّ زرّ القائمة الرئيسية للمطابقة: يشيل التشكيل ويضغط المسافات ويشذّبها (نص الزر
+# الفعلي قد يحمل مسافة زائدة/تشكيلًا مختلفًا عن الإعداد §11.3).
+_BTN_TASHKEEL = re.compile(r"[ً-ْٰـ]")
+
+
+def _norm_btn(s: str) -> str:
+    return re.sub(r"\s+", " ", _BTN_TASHKEEL.sub("", s or "")).strip()
 
 # ── استيراد محروس (§11.3): البيئة الاختبارية بلا pywinauto/برنامج MONEYADO ──
 try:
@@ -131,12 +140,15 @@ class MoneyadoScreen(ScreenController):
         timeout: float = 20.0,
         connect_wait: float = 1.0,
         step_delay: float = 0.3,
+        open_timeout: float = 10.0,
     ) -> None:
         self._config = config
         self._timeout = timeout
         # مهل الجهاز البطيء (§11.3): بعد تثبيت النافذة، وبعد تعبئة كل حقل — قابلة للضبط من .env.
         self._connect_wait = connect_wait
         self._step_delay = step_delay
+        # مهلة فتح الشاشة من القائمة الرئيسية (ظهور الزر + ظهور الفورم بعد الضغط §11.3).
+        self._open_timeout = open_timeout
         self._app = None
         self._window = None
         self._form_rect = None  # يُلتقط مرة في connect؛ مرجع الإحداثيات النسبية
@@ -150,6 +162,7 @@ class MoneyadoScreen(ScreenController):
             config,
             connect_wait=getattr(settings, "moneyado_connect_wait", 1.0),
             step_delay=getattr(settings, "moneyado_step_delay", 0.3),
+            open_timeout=getattr(settings, "moneyado_open_timeout", 10.0),
         )
 
     # ── إعداد الحقول والأزرار ────────────────────────────────────────────────
@@ -185,16 +198,21 @@ class MoneyadoScreen(ScreenController):
         connect_kwargs = {"process": pid} if pid is not None else {"path": process_name}
         self._app = Application(backend="win32").connect(timeout=self._timeout, **connect_kwargs)
 
-    def _bind_form(self, operation: OperationType) -> None:
-        """يلتقط فورم العملية (بيع/شراء) المفتوح وينتظر جاهزيته + مرجع الإحداثيات + حارس الشاشة."""
+    def _bind_form(self, operation: OperationType, *, timeout: Optional[float] = None) -> None:
+        """يلتقط فورم العملية (بيع/شراء) المفتوح وينتظر جاهزيته + مرجع الإحداثيات + حارس الشاشة.
+
+        `timeout`: مهلة انتظار ظهور الفورم — None تعني self._timeout (فورم مفتوح مسبقًا)؛ يمرّر
+        مسار الفتح self._open_timeout (انتظار ظهوره بعد ضغط الزر §11.3).
+        """
         if self._app is None:
             raise RuntimeError("الاتصال بالتطبيق غير مُهيّأ (_connect_app لم يُستدعَ).")
         screen = self._screen(operation)
         form_class = screen.get("form_class", self._DEFAULT_FORM_CLASS)
+        wait_timeout = self._timeout if timeout is None else timeout
 
         # التقط الفورم النشط من صنفه (بلا عنوان) وانتظر جاهزيته — لا sleep ثابت (§11.3).
         self._window = self._app.window(class_name=form_class)
-        self._window.wait("ready visible enabled", timeout=self._timeout)
+        self._window.wait("ready visible enabled", timeout=wait_timeout)
 
         # 🔴 لا نحرّك النافذة (move_window كان يُغلق MONEYADO على الجهاز): الإحداثيات نسبية
         # للفورم (rel = rect - form_rect) فتعمل عند أي موضع للنافذة — لا حاجة لتثبيت الموضع (§11.3).
@@ -232,17 +250,37 @@ class MoneyadoScreen(ScreenController):
         open_forms = [w for w in self._app.windows(class_name=form_class) if w.is_visible()]
         return not open_forms
 
+    def _main_menu_buttons(self) -> list:
+        """كل أزرار القائمة الرئيسية (صنفها) مع نصوصها — للتشخيص واختيار الزر بالنص (§11.3)."""
+        btn_class = self._main_menu_cfg().get("button_class", self._DEFAULT_MAIN_BUTTON_CLASS)
+        main = self._app.top_window()
+        return [(b, (b.window_text() or "")) for b in main.descendants(class_name=btn_class)]
+
     def click_button(self, label: str) -> None:
-        """يضغط زرًّا في القائمة الرئيسية بنصّه (label) — أكثر استقرارًا من الإحداثي (§11.3)."""
+        """يضغط زرًّا في القائمة الرئيسية بنصّه (label) — أكثر استقرارًا من الإحداثي (§11.3).
+
+        يعدّد أزرار القائمة أولًا ويطبع نصوصها (تشخيص: النص الفعلي قد يخالف الإعداد)، ثم يطابق
+        بالنص (تام بعد تطبيع خفيف). زر غير موجود → خطأ صريح يسرد الأزرار المتاحة، لا timeout غامض.
+        """
         if not _PYWINAUTO_AVAILABLE:
             raise RuntimeError("pywinauto غير متاح — تعذّر الضغط على زر القائمة الرئيسية.")
         if self._app is None:
             raise RuntimeError("الاتصال بالتطبيق غير مُهيّأ (connect/_connect_app لم يُستدعَ).")
-        btn_class = self._main_menu_cfg().get("button_class", self._DEFAULT_MAIN_BUTTON_CLASS)
-        main = self._app.top_window()
-        btn = main.child_window(title=label, class_name=btn_class)
-        btn.wait("ready visible enabled", timeout=self._timeout)
-        btn.click()
+
+        buttons = self._main_menu_buttons()
+        available = [t for _, t in buttons]
+        # 🔍 تشخيص (§11.3): اطبع كل أزرار القائمة الرئيسية المتاحة قبل الضغط.
+        log.debug("أزرار القائمة الرئيسية المتاحة (%d): %r", len(available), available)
+
+        target = _norm_btn(label)
+        match = next((w for w, t in buttons if _norm_btn(t) == target), None)
+        if match is None:
+            raise RuntimeError(
+                f"زر «{label}» غير موجود في القائمة الرئيسية. الأزرار المتاحة: {available} — "
+                f'اضبط النص الصحيح في config["main_menu"] (§11.3).'
+            )
+        match.wait("ready visible enabled", timeout=self._open_timeout)
+        match.click()
         time.sleep(self._step_delay)  # مهلة استقرار حتى يفتح الفورم (جهاز بطيء §11.3)
 
     def _open_screen(self, operation: OperationType, label: str) -> None:
@@ -255,7 +293,7 @@ class MoneyadoScreen(ScreenController):
             )
         log.info("فتح شاشة «%s» من القائمة الرئيسية بالنص (§11.3).", label)
         self.click_button(label)
-        self._bind_form(operation)
+        self._bind_form(operation, timeout=self._open_timeout)  # انتظار ظهور الفورم بعد الضغط
 
     def open_sell_screen(self) -> None:
         label = self._main_menu_cfg().get("sell_button", self._DEFAULT_SELL_BUTTON)
