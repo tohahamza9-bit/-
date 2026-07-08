@@ -110,8 +110,13 @@ class MoneyadoWriter(Writer):
                 log.error("رفض تعبئة %s (job=%s): %s", op.value, job.job_id, msg)
                 return WriteResult(ok=False, needs_review=True, error=msg)
 
-            # (3) الاتصال بالشاشة (wait لا sleep §11.3)
-            screen.connect(op)
+            # (3) فتح شاشة العملية من القائمة الرئيسية بنفس البوت (بالنص، أكثر استقرارًا §11.3).
+            #     البيع يفتح «بيع عملة»؛ الشراء يفتح «شراء عملة» (بعد أن يكون البيع قد خُزّن
+            #     وأُغلقت شاشته بـ confirm_store_on_main، فالبوت الآن على القائمة الرئيسية).
+            if op == OperationType.SELL:
+                screen.open_sell_screen()
+            else:
+                screen.open_buy_screen()
             unexpected = screen.check_unexpected_window()
             if unexpected:
                 return self._unexpected(screen, op, job, unexpected)

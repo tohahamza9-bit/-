@@ -307,6 +307,105 @@ def test_confirm_store_on_main_swallows_errors_after_store():
     scr.confirm_store_on_main()   # لا يرمي
 
 
+# ── فتح شاشة العملية من القائمة الرئيسية (§11.3) ─────────────────────────────
+def _visible_form(visible=True) -> MagicMock:
+    w = MagicMock()
+    w.is_visible.return_value = visible
+    return w
+
+
+def test_is_main_screen_true_when_no_form_open():
+    """القائمة الرئيسية = لا فورم ThunderRT6FormDC مرئي مفتوح."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0)
+    app = MagicMock()
+    app.windows.return_value = []                     # لا فورم مفتوح
+    scr._app = app
+    assert scr.is_main_screen() is True
+    # فورم مرئي مفتوح → ليست القائمة الرئيسية
+    app.windows.return_value = [_visible_form(True)]
+    assert scr.is_main_screen() is False
+    # فورم موجود لكنه غير مرئي → ما زلنا على القائمة الرئيسية
+    app.windows.return_value = [_visible_form(False)]
+    assert scr.is_main_screen() is True
+
+
+def test_click_button_clicks_by_title_on_top_window():
+    """click_button يضغط زرًّا بالنص (title) على النافذة العليا للتطبيق — لا بإحداثي."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0)
+    app, top, btn = MagicMock(), MagicMock(), MagicMock()
+    app.top_window.return_value = top
+    top.child_window.return_value = btn
+    scr._app = app
+    scr.click_button("بيع عملة")
+    top.child_window.assert_called_once()
+    assert top.child_window.call_args.kwargs["title"] == "بيع عملة"
+    btn.click.assert_called_once()
+
+
+def test_open_sell_screen_checks_main_clicks_then_binds():
+    """open_sell_screen: يتصل → يتأكّد القائمة → يضغط «بيع عملة» بالنص → يربط الفورم — بالترتيب."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0)
+    calls = []
+    scr._connect_app = MagicMock(side_effect=lambda op: calls.append("connect"))
+    scr.is_main_screen = MagicMock(side_effect=lambda: calls.append("is_main") or True)
+    scr.click_button = MagicMock(side_effect=lambda label: calls.append(f"click:{label}"))
+    scr._bind_form = MagicMock(side_effect=lambda op: calls.append("bind"))
+    scr.open_sell_screen()
+    assert calls == ["connect", "is_main", "click:بيع عملة", "bind"]
+
+
+def test_open_buy_screen_uses_buy_label():
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0)
+    scr._connect_app = MagicMock()
+    scr.is_main_screen = MagicMock(return_value=True)
+    scr.click_button = MagicMock()
+    scr._bind_form = MagicMock()
+    scr.open_buy_screen()
+    scr.click_button.assert_called_once_with("شراء عملة")
+
+
+def test_open_screen_raises_when_not_main():
+    """لا نفتح فورمًا فوق فورم مفتوح (§0): is_main_screen=False → استثناء صريح، بلا ضغط زر."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0)
+    scr._connect_app = MagicMock()
+    scr.is_main_screen = MagicMock(return_value=False)
+    scr.click_button = MagicMock()
+    scr._bind_form = MagicMock()
+    with pytest.raises(RuntimeError, match="القائمة الرئيسية"):
+        scr.open_sell_screen()
+    scr.click_button.assert_not_called()
+    scr._bind_form.assert_not_called()
+
+
+def test_open_screen_uses_configured_labels():
+    """نصوص الأزرار قابلة للضبط عبر config["main_menu"] (اختلاف النص على الجهاز §11.3)."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({"main_menu": {"sell_button": "بيع"}}, step_delay=0)
+    scr._connect_app = MagicMock()
+    scr.is_main_screen = MagicMock(return_value=True)
+    scr.click_button = MagicMock()
+    scr._bind_form = MagicMock()
+    scr.open_sell_screen()
+    scr.click_button.assert_called_once_with("بيع")
+
+
 async def test_write_sell_commission_calls_press_enter_on_active(tmp_path):
     """التدفّق: عمولة → البوت يضغط Enter على «المخصوم» عبر press_enter_on_active (لا fill، لا رفض)."""
     screen = make_screen()                    # field_config لا يحوي amount_deducted (بلا إحداثي)
@@ -519,6 +618,28 @@ async def test_dry_run_does_not_confirm_store_on_main(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_write_sell_opens_sell_screen_from_main(tmp_path):
+    # البيع يفتح «بيع عملة» من القائمة الرئيسية (لا الشراء)
+    screen = make_screen()
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    result = await writer.write(make_job(make_sell_leg()), commit=True)
+    assert result.ok is True
+    screen.open_sell_screen.assert_called_once()
+    screen.open_buy_screen.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_write_buy_opens_buy_screen_from_main(tmp_path):
+    # الشراء يفتح «شراء عملة» من القائمة الرئيسية (لا البيع)
+    screen = make_screen(name=None)
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    result = await writer.write(make_job(make_buy_leg()), commit=True)
+    assert result.ok is True
+    screen.open_buy_screen.assert_called_once()
+    screen.open_sell_screen.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_write_weird_customer_name_needs_review(tmp_path):
     # اسم مختلف تمامًا عن المتوقّع (ليس خطأ إملاء) → ⚠️
     screen = make_screen(name="عبدالله البعيد المختلف")
@@ -549,6 +670,7 @@ async def test_write_null_coord_rejected(tmp_path):
     assert result.needs_review is True
     assert "coord" in result.error
     screen.connect.assert_not_called()              # لا نتصل أصلًا قبل استكمال الحقول
+    screen.open_sell_screen.assert_not_called()     # ولا نفتح الشاشة قبل استكمال الحقول
     screen.press_store.assert_not_called()
 
 

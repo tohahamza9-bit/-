@@ -1,5 +1,12 @@
 {
   "_ملاحظة": "المعلّق التقني (ملحق ب-1): auto_id/فهرس كل خانة. تُستخرج بـ print_control_identifiers وقت التنفيذ (§11.3). انسخ هذا إلى moneyado_fields.json واملأ القيم الحقيقية. القيم null تمنع البوت من التعبئة حتى تُستكمل.",
+  "main_menu": {
+    "_ملاحظة": "أزرار القائمة الرئيسية — البوت يفتح شاشة العملية بالنص (أكثر استقرارًا من الإحداثي §11.3). عدّل النص/الصنف فقط إن اختلف على الجهاز؛ القيم الافتراضية «بيع عملة»/«شراء عملة» وصنف ThunderRT6CommandButton.",
+    "sell_button": "بيع عملة",
+    "buy_button": "شراء عملة",
+    "button_class": "ThunderRT6CommandButton",
+    "form_class": "ThunderRT6FormDC"
+  },
   "sell_screen": {
     "window_title_re": ".*بيع عملة.*",
     "fields": {

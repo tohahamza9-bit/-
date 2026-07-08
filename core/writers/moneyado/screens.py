@@ -53,6 +53,22 @@ class ScreenController(ABC):
         """يتصل بنافذة «بيع/شراء عملة» وينتظر جاهزيتها (wait لا sleep §11.3)."""
 
     @abstractmethod
+    def is_main_screen(self) -> bool:
+        """هل الشاشة الحالية هي القائمة الرئيسية؟ (لا فورم بيع/شراء ThunderRT6FormDC مفتوح §11.3)."""
+
+    @abstractmethod
+    def click_button(self, label: str) -> None:
+        """يضغط زرًّا في القائمة الرئيسية بنصّه (label) — أكثر استقرارًا من الإحداثيات (§11.3)."""
+
+    @abstractmethod
+    def open_sell_screen(self) -> None:
+        """يفتح شاشة «بيع عملة» من القائمة الرئيسية (نص الزر) وينتظر ظهور الفورم (§11.3)."""
+
+    @abstractmethod
+    def open_buy_screen(self) -> None:
+        """يفتح شاشة «شراء عملة» من القائمة الرئيسية (نص الزر) وينتظر ظهور الفورم (§11.3)."""
+
+    @abstractmethod
     def check_unexpected_window(self) -> Optional[str]:
         """يُرجع عنوان أي نافذة طارئة (رصيد/خطأ/معاينة §11.3) أو None."""
 
@@ -102,6 +118,11 @@ class MoneyadoScreen(ScreenController):
     # نعود لأول حقل ثم نضغط Tab بعدد tab_index. مفتاح «العودة لأول حقل» قابل للضبط على الجهاز
     # عبر "tab_home_keys" في الإعداد (VB6: قد لا يعمل Ctrl+Home داخل حقل نصّي؛ يُعاير بحوالة تجريبية).
     _DEFAULT_TAB_HOME_KEYS = "^{HOME}"
+    # أزرار القائمة الرئيسية (نص عربي) — نفتح شاشة العملية بالنص لا بالإحداثي (§11.3، أكثر
+    # استقرارًا). قابلة للضبط عبر config["main_menu"] إن اختلف النص/الصنف على الجهاز.
+    _DEFAULT_SELL_BUTTON = "بيع عملة"
+    _DEFAULT_BUY_BUTTON = "شراء عملة"
+    _DEFAULT_MAIN_BUTTON_CLASS = "ThunderRT6CommandButton"
 
     def __init__(
         self,
@@ -146,16 +167,30 @@ class MoneyadoScreen(ScreenController):
 
     # ── الاتصال بلا عنوان: بالعملية + صنف الفورم (§11.3) ─────────────────────────
     def connect(self, operation: OperationType, *, pid: Optional[int] = None) -> None:
+        """يتصل بالتطبيق ثم يربط فورم العملية المفتوح (يفترض الفورم مفتوحًا مسبقًا).
+
+        لفتح الفورم من القائمة الرئيسية بنفس البوت استخدم open_sell_screen/open_buy_screen.
+        """
+        self._connect_app(operation, pid=pid)
+        self._bind_form(operation)
+
+    def _connect_app(self, operation: OperationType, *, pid: Optional[int] = None) -> None:
+        """يتصل بعملية MONEYADO (بلا عنوان — VB6) ويهيّئ self._app. لا يربط فورمًا بعد."""
         if not _PYWINAUTO_AVAILABLE:
             raise RuntimeError("pywinauto غير متاح — لا يمكن الاتصال بشاشة MONEYADO.")
         screen = self._screen(operation)
         # نوافذ MONEYADO (VB6/ThunderRT6FormDC) بلا عنوان → نتصل بالعملية لا بالعنوان.
         process_name = screen.get("process_name", self._DEFAULT_PROCESS)
-        form_class = screen.get("form_class", self._DEFAULT_FORM_CLASS)
-
         # لو تعدّدت النسخ، مرِّر PID صريحًا؛ وإلا pywinauto يتصل بأحدث عملية بالاسم.
         connect_kwargs = {"process": pid} if pid is not None else {"path": process_name}
         self._app = Application(backend="win32").connect(timeout=self._timeout, **connect_kwargs)
+
+    def _bind_form(self, operation: OperationType) -> None:
+        """يلتقط فورم العملية (بيع/شراء) المفتوح وينتظر جاهزيته + مرجع الإحداثيات + حارس الشاشة."""
+        if self._app is None:
+            raise RuntimeError("الاتصال بالتطبيق غير مُهيّأ (_connect_app لم يُستدعَ).")
+        screen = self._screen(operation)
+        form_class = screen.get("form_class", self._DEFAULT_FORM_CLASS)
 
         # التقط الفورم النشط من صنفه (بلا عنوان) وانتظر جاهزيته — لا sleep ثابت (§11.3).
         self._window = self._app.window(class_name=form_class)
@@ -179,6 +214,56 @@ class MoneyadoScreen(ScreenController):
                     f"عدد حقول النص {actual} خارج المدى المتوقّع (~{expected}) — "
                     "قد تكون الشاشة الخطأ (§0)."
                 )
+
+    # ── فتح شاشة العملية من القائمة الرئيسية (بالنص §11.3) ───────────────────────
+    def _main_menu_cfg(self) -> dict:
+        return self._config.get("main_menu", {})
+
+    def is_main_screen(self) -> bool:
+        """القائمة الرئيسية = لا فورم بيع/شراء (ThunderRT6FormDC) مفتوح ومرئي (§11.3).
+
+        يتطلّب اتصالًا سابقًا بالتطبيق (self._app). يُستدعى داخل open_sell/open_buy_screen.
+        """
+        if not _PYWINAUTO_AVAILABLE:
+            raise RuntimeError("pywinauto غير متاح — تعذّر فحص القائمة الرئيسية.")
+        if self._app is None:
+            raise RuntimeError("الاتصال بالتطبيق غير مُهيّأ (connect/_connect_app لم يُستدعَ).")
+        form_class = self._main_menu_cfg().get("form_class", self._DEFAULT_FORM_CLASS)
+        open_forms = [w for w in self._app.windows(class_name=form_class) if w.is_visible()]
+        return not open_forms
+
+    def click_button(self, label: str) -> None:
+        """يضغط زرًّا في القائمة الرئيسية بنصّه (label) — أكثر استقرارًا من الإحداثي (§11.3)."""
+        if not _PYWINAUTO_AVAILABLE:
+            raise RuntimeError("pywinauto غير متاح — تعذّر الضغط على زر القائمة الرئيسية.")
+        if self._app is None:
+            raise RuntimeError("الاتصال بالتطبيق غير مُهيّأ (connect/_connect_app لم يُستدعَ).")
+        btn_class = self._main_menu_cfg().get("button_class", self._DEFAULT_MAIN_BUTTON_CLASS)
+        main = self._app.top_window()
+        btn = main.child_window(title=label, class_name=btn_class)
+        btn.wait("ready visible enabled", timeout=self._timeout)
+        btn.click()
+        time.sleep(self._step_delay)  # مهلة استقرار حتى يفتح الفورم (جهاز بطيء §11.3)
+
+    def _open_screen(self, operation: OperationType, label: str) -> None:
+        """يفتح فورم العملية من القائمة الرئيسية: اتصال بالتطبيق → تأكّد القائمة → ضغط الزر
+        بالنص → انتظار ظهور الفورم وربطه (§11.3). لا نفتح فورمًا فوق فورم (§0)."""
+        self._connect_app(operation)
+        if not self.is_main_screen():
+            raise RuntimeError(
+                f"الشاشة الحالية ليست القائمة الرئيسية — لا نفتح «{label}» فوق فورم مفتوح (§0)."
+            )
+        log.info("فتح شاشة «%s» من القائمة الرئيسية بالنص (§11.3).", label)
+        self.click_button(label)
+        self._bind_form(operation)
+
+    def open_sell_screen(self) -> None:
+        label = self._main_menu_cfg().get("sell_button", self._DEFAULT_SELL_BUTTON)
+        self._open_screen(OperationType.SELL, label)
+
+    def open_buy_screen(self) -> None:
+        label = self._main_menu_cfg().get("buy_button", self._DEFAULT_BUY_BUTTON)
+        self._open_screen(OperationType.BUY, label)
 
     def _tab_to(self, tab_index: int):
         """
