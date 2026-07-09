@@ -32,7 +32,7 @@ from .guard import Guard, build_reversal, is_out_of_active_window
 from .logging_setup import get_logger
 from .matching.service import MatchingService
 from .models import Deal, LedgerEntry, ParsedLeg, RawMessage, WriteJob
-from .parsing import detect_control, parse_message
+from .parsing import detect_control, parse_completion_fragment, parse_message
 from .parsing.normalize import normalize_price
 from .parsing.resolve import resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
@@ -174,8 +174,11 @@ class Pipeline:
             # رد خزينة/مورد بلا رقم إشاري («بلس»/«صافي» وحدها) — ليس هدرزة بل جزء مكمّل
             # لحوالة معلّقة (§7.3): يُربَط بالمعلّقة (قرب زمني/نفس الغرفة) أو يُحفَظ ردًّا معلّقًا.
             if is_completion_fragment(result.leg):
+                # 🔴 الرسالة الثانية تُعاد قراءتها بـ pattern-fishing (لا سطرًا-بسطر) — أمتن
+                #    للصيغ المتنوّعة (الكود آخر السطر، السعر بسطر مستقلّ…) — تلتقط كود/اسم/سعر/خزينة.
+                frag = parse_completion_fragment(raw.text, treasuries, suppliers)
                 return await self.queue.absorb_fragment(
-                    result.leg, raw.chat_jid, raw.message_key, now
+                    frag, raw.chat_jid, raw.message_key, now
                 )
             log.info("هدرزة — تجاهل صامت: %s", raw.message_key)
             return None

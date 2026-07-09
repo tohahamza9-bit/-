@@ -381,6 +381,124 @@ def _extract_code_name(val: str) -> tuple[Optional[str], Optional[str]]:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# الرسالة الثانية (completion_fragment) — منهج pattern-fishing (§7.3)
+# ═════════════════════════════════════════════════════════════════════════════
+# بدل التحليل سطرًا-بسطر (يفشل حين يختلف الترتيب: الكود آخر السطر، السعر بسطر مستقلّ…)
+# نُفتّش النصّ كلّه عن الأنماط بلا اعتماد على الترتيب.
+_FRAGMENT_CURRENCY = {"تونس": Currency.TND, "تونسي": Currency.TND,
+                      "مصر": Currency.EGP, "مصري": Currency.EGP}
+_DECIMAL_RE = re.compile(r"^\d+[.,،]\d+$")     # رقم عشري (سعر): فيه فاصلة عشرية
+_CODE_RE = re.compile(r"^\d{2,4}$")            # كود الزبون: صحيح 2-4 خانات
+
+
+def _fish_treasury_from_tokens(
+    tokens: list[str], treasuries: list[TreasuryRecord]
+) -> tuple[Optional[TreasuryRecord], list[str]]:
+    """خزينة متعدّدة الكلمات مدموجة مع بيانات: نوافذ متجاورة (3 ثم 2 كلمة) بلا أرقام، مطابقة
+    تامّة (§0). يُرجع (السجلّ أو None، والرموز بعد إزالة المطابقة)."""
+    for size in (3, 2):
+        for i in range(len(tokens) - size + 1):
+            window = tokens[i:i + size]
+            if any(_NUMERIC_TOKEN_RE.match(t) for t in window):
+                continue
+            rec = resolve_treasury(" ".join(window), treasuries)
+            if rec is not None:
+                return rec, tokens[:i] + tokens[i + size:]
+    return None, tokens
+
+
+def parse_completion_fragment(
+    text: str, treasuries: list[TreasuryRecord], suppliers: list[SupplierRecord],
+) -> ParsedLeg:
+    """يحلّل الرسالة الثانية (completion_fragment §7.3) بـ **pattern-fishing**: تفتيش كامل النصّ
+    عن الأنماط بلا اعتماد على ترتيب الأسطر — أمتن للصيغ المتنوّعة من التحليل سطرًا-بسطر.
+
+    يلتقط: كود الزبون (2-4 خانات مستقلّة)، الاسم (كلمات عربية متبقّية)، السعر (أصغر رقم عشري —
+    السعر لا المبلغ)، الخزينة (resolve_treasury التامّة على المقاطع)، الهاتف، والعملة
+    (تونس/تونسي→TND، مصر/مصري→EGP). وكلّ ما لا يُطابِق (فودافون كاش/بنك/إنستا باي/صافي…) يُتجاهَل.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    currency: Optional[Currency] = None
+    treasury_rec: Optional[TreasuryRecord] = None
+    residual: list[str] = []                    # سطور غير مصنّفة → تُفتَّش على مستوى الرمز
+
+    for ln in lines:
+        n = normalize_ar(ln)
+        if normalize_payment(ln) or _is_discount_indicator(n) or "بنك" in n:
+            continue                             # وسيلة دفع/مؤشّر خصم/بنك → يُتجاهَل
+        if n in _FRAGMENT_CURRENCY:              # «تونس/مصر» سطرًا كاملًا → عملة
+            currency = currency or _FRAGMENT_CURRENCY[n]
+            continue
+        if treasury_rec is None:                 # خزينة سطر-كامل (مطابقة تامّة — آمنة §0)
+            rec = resolve_treasury(ln, treasuries)
+            if rec is not None:
+                treasury_rec = rec
+                continue
+        residual.append(ln)
+
+    tokens = " ".join(residual).split()
+    if treasury_rec is None:                     # خزينة inline مدموجة (احتياطي)
+        treasury_rec, tokens = _fish_treasury_from_tokens(tokens, treasuries)
+
+    prices: list[str] = []
+    code: Optional[str] = None
+    phone: Optional[str] = None
+    name_tokens: list[str] = []
+    for tok in tokens:
+        digits = re.sub(r"\D", "", tok)
+        if len(digits) >= 9:                     # مجرى أرقام طويل = هاتف
+            phone = phone or extract_phone(tok)
+        elif _DECIMAL_RE.match(tok):             # رقم عشري = سعر
+            prices.append(tok)
+        elif _CODE_RE.match(tok):                # 2-4 خانات = كود الزبون
+            code = code or tok
+        elif _NUMERIC_TOKEN_RE.match(tok):       # عدد آخر (مبلغ/رقم طويل) → يُتجاهَل
+            continue
+        else:
+            ntok = normalize_ar(tok)
+            if ntok in _FRAGMENT_CURRENCY:
+                currency = currency or _FRAGMENT_CURRENCY[ntok]
+            elif "بنك" not in ntok and _ARABIC_RE.search(tok):
+                name_tokens.append(tok)          # كلمة عربية = جزء من الاسم
+
+    # السعر = أصغر رقم عشري (السعر لا المبلغ)
+    price_raw = (
+        min(prices, key=lambda p: float(p.replace("،", ".").replace(",", ".")))
+        if prices else None
+    )
+    name = " ".join(name_tokens).strip() or None
+    if currency is None and treasury_rec is not None:
+        currency = treasury_rec.currency
+    _raw, price_norm = normalize_price(price_raw, currency or Currency.EGP)
+
+    tref: Optional[TreasuryRef] = None
+    if treasury_rec is not None:
+        tref = TreasuryRef(code=treasury_rec.code, name=treasury_rec.name,
+                           type=treasury_rec.type, currency=treasury_rec.currency or currency)
+
+    supplier_ref: Optional[SupplierRef] = None   # مورد؟ (نحافظ على مسار رد المورد §5.3)
+    is_supplier = False
+    if name:
+        srec = resolve_supplier(name, suppliers)
+        if srec is not None:
+            supplier_ref = SupplierRef(code=srec.code, name=srec.name)
+            is_supplier = True
+
+    return ParsedLeg(
+        operation=OperationType.SELL,
+        customer_code=code,
+        customer_name=name,
+        supplier=supplier_ref,
+        is_supplier_counterpart=is_supplier,
+        price_raw=price_raw,
+        price_normalized=price_norm,
+        treasury=tref,
+        phone=phone,
+        currency=currency,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # بناء الطرف (leg) — نوع العملية §5، السعر §3.6، الخزينة §4
 # ═════════════════════════════════════════════════════════════════════════════
 def _build_leg(

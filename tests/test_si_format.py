@@ -66,6 +66,26 @@ async def test_si_saafi_treasury_is_ignored(db):
     assert leg.customer_code == "1284"              # باقي الحقول سليمة
 
 
+@pytest.mark.parametrize("text, code, name, price, treasury_code", [
+    # أ) كود+اسم+سعر في سطر، ثم وسيلة دفع (تُتجاهَل)، ثم خزينة
+    ("750 ايهاب ابو حميد 5.70\nفودافون كاش\nابو يوسف", "750", "ايهاب ابو حميد", "5.70", "77"),
+    # ب) الخزينة أولًا ثم كود+اسم+سعر
+    ("ابو يوسف\n750 ايهاب 5.70", "750", "ايهاب", "5.70", "77"),
+    # ج) السعر أولًا والكود آخر السطر (يفشل مع التحليل سطرًا-بسطر)
+    ("5.70 ايهاب ابو حميد 750\nبلاس فون", "750", "ايهاب ابو حميد", "5.70", "74"),
+    # د) كود+اسم، عملة تونس، سعر بسطر مستقلّ، خزينة تونسية
+    ("750 ايهاب\nتونس\n35.25\nوليد", "750", "ايهاب", "35.25", "51"),
+])
+async def test_completion_fragment_fishing(db, text, code, name, price, treasury_code):
+    """الرسالة الثانية بمنهج pattern-fishing: تُستخرج code/name/price/treasury مهما اختلف الترتيب."""
+    from core.parsing import parse_completion_fragment
+    leg = parse_completion_fragment(text, await _treas(db), [])
+    assert leg.customer_code == code
+    assert leg.customer_name == name
+    assert leg.price_raw == price
+    assert leg.treasury is not None and leg.treasury.code == treasury_code
+
+
 @pytest.mark.parametrize("val", [
     "793 حميد بن غارات",          # أ: الكود في البداية بلا «كود»
     "حميد بن غارات كود.793",      # ب: الكود في النهاية مع «كود.»
