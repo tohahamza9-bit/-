@@ -279,31 +279,40 @@ class MoneyadoScreen(ScreenController):
     def _connect_app(self, operation: OperationType, *, pid: Optional[int] = None) -> None:
         """يتصل بعملية MONEYADO (بلا عنوان — VB6) ويهيّئ self._app. لا يربط فورمًا بعد.
 
-        🔴 لا اتصال عشوائي عند تعدّد النسخ (§0): إن ضُبِط PID (وسيط صريح أو MONEYADO_PID) نتصل
-        به حصريًا؛ وإلا نعدّ نسخ stock.exe — أكثر من واحدة = التباس → RuntimeError واضح (لا نخمّن
-        أيّها هي الصحيحة، كي لا نُدخِل حوالة في نافذة نسخة خطأ). صفر نسخة → خطأ «شغّل MONEYADO».
+        اكتشاف ذكيّ (بلا تدخّل يدوي عند إعادة تشغيل MONEYADO §0):
+          1) PID مثبّت (وسيط صريح أو MONEYADO_PID) **وحيّ** (ضمن نسخ stock.exe العاملة) → يُستخدم.
+          2) PID مثبّت لكنه مات، أو غير مضبوط → اكتشاف تلقائي لنسخ stock.exe العاملة:
+             نسخة واحدة → تُستخدم (ويُحدَّث self._pid منها)؛ أكثر من واحدة → RuntimeError «حدّد
+             MONEYADO_PID» (لا اتصال عشوائي كي لا نُدخِل في نافذة نسخة خطأ)؛ صفر → «MONEYADO غير مشغّل».
         """
         if not _PYWINAUTO_AVAILABLE:
             raise RuntimeError("pywinauto غير متاح — لا يمكن الاتصال بشاشة MONEYADO.")
         screen = self._screen(operation)
         process_name = screen.get("process_name", self._DEFAULT_PROCESS)
+        pids = self._list_stock_pids(process_name)   # النسخ العاملة الآن
 
-        # (1) PID مثبّت (وسيط صريح أو MONEYADO_PID من الإعداد) → اتصال حصري به.
+        # (1) PID مثبّت وحيّ → استخدمه (يفضّ الالتباس حتى مع وجود نسخ أخرى).
         target_pid = pid if pid is not None else self._pid
-        if target_pid is not None:
-            self._app = Application(backend="win32").connect(timeout=self._timeout, process=target_pid)
+        if target_pid is not None and target_pid in pids:
+            self._connect_pid(target_pid)
             return
+        if target_pid is not None:
+            log.warning("MONEYADO_PID=%s غير عامل — بحث تلقائي عن نسخة %s.", target_pid, process_name)
 
-        # (2) بلا PID مثبّت → عدّ النسخ. أكثر من واحدة = التباس صريح (لا اتصال عشوائي §0).
-        pids = self._list_stock_pids(process_name)
+        # (2) اكتشاف تلقائي من النسخ العاملة.
         if len(pids) > 1:
             raise RuntimeError(
                 f"وُجد {len(pids)} نسخ من {process_name} (PIDs={sorted(pids)}) — التباس اتصال. "
-                f"أغلِق الزائد وأبقِ نسخة واحدة، أو ثبّت MONEYADO_PID في .env (§0)."
+                f"أغلِق الزائد وأبقِ نسخة واحدة، أو حدّد MONEYADO_PID في .env (§0)."
             )
         if not pids:
-            raise RuntimeError(f"لا نسخة عاملة من {process_name} — شغّل MONEYADO أولًا.")
-        self._app = Application(backend="win32").connect(timeout=self._timeout, process=pids[0])
+            raise RuntimeError(f"MONEYADO غير مشغّل (لا نسخة {process_name}) — شغّله أولًا.")
+        self._connect_pid(pids[0])   # (3) يُحدَّث self._pid من النسخة المكتشَفة
+
+    def _connect_pid(self, pid: int) -> None:
+        """يتصل بنسخة MONEYADO المعطاة ويثبّت self._pid عليها."""
+        self._app = Application(backend="win32").connect(timeout=self._timeout, process=pid)
+        self._pid = pid
 
     def _bind_form(self, operation: OperationType, *, timeout: Optional[float] = None) -> None:
         """يلتقط فورم العملية (بيع/شراء) المفتوح وينتظر جاهزيته + مرجع الإحداثيات + حارس الشاشة.
