@@ -581,15 +581,17 @@ class MoneyadoScreen(ScreenController):
         return ctrl
 
     # ── التعبئة ──────────────────────────────────────────────────────────────
+    # حقول غير حرجة (§11.1): تعذّر إدخالها لا يُفشِل العملية — تُترك فارغة وتُسجَّل. «البلد» (كود
+    # الدفع) و«وسيلة الدفع» (الهاتف) اختياريان: زر «تخزين» يُفعَّل بدونهما، فلا يُبطلان الحفظ.
+    _NON_CRITICAL_FIELDS = {"country", "payment_method"}
+
     def fill(self, field_op: FieldOp, field_cfg: dict) -> None:
         try:
             self._fill(field_op, field_cfg)
         except Exception as exc:
-            # 🔴 البلد «غير حرج» (§11.1): تعذّر تحديد القائمة أو اختيار العنصر لا يُفشِل البيع —
-            #    يُسجَّل ويُتخطّى (تبقى الخانة فارغة). باقي الحقول حرجة → يُعاد رفع الخطأ.
-            if field_op.key == "country":
-                log.warning("تعذّر إدخال البلد «%s» (%s) — تُركت فارغة (غير حرج §11.1).",
-                            field_op.value, exc)
+            if field_op.key in self._NON_CRITICAL_FIELDS:
+                log.warning("تعذّر إدخال %s «%s» (%s) — تُركت فارغة (غير حرج §11.1).",
+                            field_op.key, field_op.value, exc)
                 return
             raise
 

@@ -243,6 +243,19 @@ def test_fill_no_enter_when_enter_false():
     assert "{ENTER}" not in sent
 
 
+def test_fill_non_critical_fields_swallow_errors():
+    """«البلد» و«وسيلة الدفع» (الهاتف) غير حرجين: تعذّر إدخالهما لا يرمي (لا يُبطل الحفظ §11.1)؛
+    الحقول الحرجة (الحساب) ترمي."""
+    from core.writers.moneyado.fields import FieldOp
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({}, step_delay=0)
+    scr._control = MagicMock(side_effect=RuntimeError("ElementNotEnabled"))
+    scr.fill(FieldOp("country", "17", TYPE_KEYS), {})                       # لا يرمي
+    scr.fill(FieldOp("payment_method", "01037354643", TYPE_KEYS, enter=True), {})  # لا يرمي
+    with pytest.raises(RuntimeError):
+        scr.fill(FieldOp("foreign_account", "85", TYPE_KEYS), {})           # حرج → يرمي
+
+
 def test_sell_commission_fieldop_carries_enter():
     """fields.py يُصدر commission_rate وcommission بـ enter=True (تفعيل متسلسل للخانات)."""
     ops = build_sell_fields(make_sell_leg(commission=-35.0))
