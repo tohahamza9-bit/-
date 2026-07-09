@@ -308,56 +308,45 @@ class Pipeline:
 
     def _maybe_synthesize_buy_leg(self, deal: Deal) -> None:
         """
-        خزينة الصفقة من نوع «بيع وشراء» (sell_and_buy: خصم1%/صافي/تونسي خارجي §6) → البوت يُسجّل
-        عمليتين لنفس الخزينة الخارجية: بيع ثم شراء. طرف الشراء **مشتقّ من البيع** (لا رسالة ثانية):
+        خزينة sell_and_buy (خصم1%/صافي/تونسي خارجي §6) **مع مورد مذكور صراحةً** في الرسالة
+        («المورد: طه 5.72» §5/§6) → البوت يشتقّ طرف شراء من المورد (بيع ثم شراء):
 
-          - amount = المبلغ بعد الخصم (amount_after_discount) أو المبلغ نفسه بلا خصم.
+          - amount = المبلغ الصافي (بعد الخصم أو المبلغ نفسه بلا خصم).
+          - الحساب = كود المورد، والسعر = سعر المورد (لا سعر البيع)، ويُعلَّم طرف مورد
+            (is_supplier_counterpart) ليأخذ كود المورد في شاشة الشراء (§5.3، build_buy_fields).
           - بلا عمولة (commission=None) — العمولة على طرف البيع وحده (§6.2).
-          - نفس الخزينة والهاتف والرقم الإشاري والعملة والزبون (نسخة من البيع).
 
-        يُخلَّق فقط إن لم يوجد طرف شراء (لا يمسّ مسار الطرفين بمورد §5.3). طرف مشتقّ بلا مورد
-        فلا يُعاد حساب عمولته في _resolve_two_leg (محصور بالمورد أعلاه).
-
-        🔴 مورد مذكور في البيع (SI «المورد: طه 5.72» §5/§6): طرف الشراء يُبنى **من المورد** لا
-        نسخةً صرفة من البيع — الحساب = كود المورد، والسعر = سعر المورد (لا سعر البيع)، ويُعلَّم
-        طرف مورد (is_supplier_counterpart) ليأخذ كود المورد في شاشة الشراء (§5.3، build_buy_fields).
+        🔴 بلا «المورد:» (sell.supplier is None) → **لا تخليق**: بيع فقط حتى لو نوع الخزينة
+        sell_and_buy (قرار صاحب العمل). ويُخلَّق فقط إن لم يوجد طرف شراء بعد (لا يمسّ مسار
+        الطرفين برسالتين §5.3).
         """
         sell = deal.sell_leg
         if deal.buy_leg is not None or sell is None or sell.treasury is None:
             return
-        if sell.treasury.type != TreasuryType.SELL_AND_BUY:
+        # 🔴 تخليق الشراء محصور بـ sell_and_buy **مع مورد صريح**؛ بلا مورد = بيع فقط.
+        if sell.treasury.type != TreasuryType.SELL_AND_BUY or sell.supplier is None:
             return
         net = sell.amount_after_discount if sell.amount_after_discount is not None else sell.amount
-        update = {
+        # سعر المورد → سعر طرف الشراء (مطبَّع حسب العملة §3.6)؛ الحساب = كود المورد.
+        _raw, pnorm = normalize_price(sell.supplier_price_raw, sell.currency or Currency.EGP)
+        deal.buy_leg = sell.model_copy(update={
             "operation": OperationType.BUY,
             "amount": net,
             "amount_after_discount": None,
             "commission": None,
             "commission_rate": 0.0,
-        }
-        if sell.supplier is not None:
-            # سعر المورد → سعر طرف الشراء (مطبَّع حسب العملة §3.6)؛ الحساب = كود المورد.
-            _raw, pnorm = normalize_price(sell.supplier_price_raw, sell.currency or Currency.EGP)
-            update.update({
-                "customer_code": sell.supplier.code,
-                "customer_name": sell.supplier.name,
-                "price_raw": sell.supplier_price_raw,
-                "price_normalized": pnorm,
-                "is_supplier_counterpart": True,
-                "supplier_price_raw": None,          # استُهلك في بناء طرف الشراء
-            })
-        else:
-            # مشتقّ بلا مورد (صافي/خصم1%): شراء إلى الخزينة الخارجية بلا حساب زبون — نُصفّر
-            # customer_code كي تُتخطّى خانة الزبون في شاشة الشراء (§5.3، build_buy_fields)، فلا
-            # يُكتب كود زبون البيع خطأً على العملية الداخلية.
-            update.update({"customer_code": None, "customer_name": None})
-        deal.buy_leg = sell.model_copy(update=update)
+            "customer_code": sell.supplier.code,
+            "customer_name": sell.supplier.name,
+            "price_raw": sell.supplier_price_raw,
+            "price_normalized": pnorm,
+            "is_supplier_counterpart": True,
+            "supplier_price_raw": None,          # استُهلك في بناء طرف الشراء
+        })
         deal.is_two_legged = True
         log.info(
-            "صفقة %s: خزينة sell_and_buy «%s» → تخليق طرف شراء (مبلغ=%s، مورد=%s، سعر=%s، ref=%s)",
-            deal.deal_id, sell.treasury.name, net,
-            sell.supplier.name if sell.supplier else "—",
-            sell.supplier_price_raw if sell.supplier else "—", sell.reference_number,
+            "صفقة %s: خزينة sell_and_buy «%s» مع مورد «%s» → تخليق طرف شراء (مبلغ=%s، سعر=%s، ref=%s)",
+            deal.deal_id, sell.treasury.name, sell.supplier.name, net,
+            sell.supplier_price_raw, sell.reference_number,
         )
 
     async def _resolve_two_leg(self, deal: Deal) -> None:

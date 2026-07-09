@@ -134,9 +134,11 @@ def _sab_deal(leg):
                created_at=PAST, updated_at=PAST, source_message_keys=["sab-1"])
 
 
-async def test_synthesize_buy_leg_for_sell_and_buy(db):
+async def test_synthesize_buy_leg_for_sell_and_buy_with_supplier(db):
+    # sell_and_buy **مع مورد** → تخليق طرف شراء (المبلغ الصافي، نفس الخزينة/الرقم/الهاتف)
+    from core.models import SupplierRef
     pipe = _make_pipeline(db)
-    deal = _sab_deal(_sab_sell_leg())
+    deal = _sab_deal(_sab_sell_leg(supplier=SupplierRef(code="760", name="طه"), supplier_price_raw="5.72"))
     pipe._maybe_synthesize_buy_leg(deal)
 
     assert deal.is_two_legged is True
@@ -191,24 +193,22 @@ async def test_synthesized_supplier_buy_leg_screen_fields(db):
     assert ops["quantity"] == "20271"               # الكمية = الصافي
 
 
-async def test_synthesize_no_supplier_clears_customer_code(db):
-    # sell_and_buy بلا مورد (صافي/خصم1%): لا حساب زبون على الشراء الداخلي → customer_code مُصفّر
+async def test_no_synthesize_without_supplier(db):
+    # 🔴 sell_and_buy **بلا «المورد:»** → لا تخليق طرف شراء (بيع فقط، قرار صاحب العمل)
     pipe = _make_pipeline(db)
-    deal = _sab_deal(_sab_sell_leg())               # بلا supplier، كود البيع 570
+    deal = _sab_deal(_sab_sell_leg())               # بلا supplier
     pipe._maybe_synthesize_buy_leg(deal)
-    buy = deal.buy_leg
-    assert buy.customer_code is None                # مُصفّر → خانة الزبون تُتخطّى في شاشة الشراء
-    assert buy.customer_name is None
-    assert buy.price_normalized == "5.9"            # سعر البيع كما هو (لا مورد)
-    assert buy.is_supplier_counterpart is False
-    assert buy.supplier is None
-    # طرف البيع لم يتغيّر (كوده 570 كما هو)
-    assert deal.sell_leg.customer_code == "570"
+    assert deal.buy_leg is None                     # لا طرف شراء
+    assert deal.is_two_legged is False
+    # طرف البيع لم يتغيّر
+    assert deal.sell_leg.customer_code == "570" and deal.sell_leg.amount == 20475
 
 
 async def test_synthesize_uses_amount_when_no_discount(db):
+    from core.models import SupplierRef
     pipe = _make_pipeline(db)
-    deal = _sab_deal(_sab_sell_leg(amount=5000.0, amount_after_discount=None, commission=None))
+    deal = _sab_deal(_sab_sell_leg(amount=5000.0, amount_after_discount=None, commission=None,
+                                   supplier=SupplierRef(code="760", name="طه")))
     pipe._maybe_synthesize_buy_leg(deal)
     assert deal.buy_leg.amount == 5000.0       # بلا خصم → المبلغ نفسه
 
@@ -237,9 +237,10 @@ async def test_no_synthesis_when_supplier_buy_leg_exists(db):
 
 
 async def test_sell_and_buy_produces_ordered_sell_then_buy_jobs(db):
-    # المرحلة ٣: بعد التخليق، أوامر الكتابة = بيع (order=0) ثم شراء (order=1)
+    # المرحلة ٣: بعد التخليق (مع مورد)، أوامر الكتابة = بيع (order=0) ثم شراء (order=1)
+    from core.models import SupplierRef
     pipe = _make_pipeline(db)
-    deal = _sab_deal(_sab_sell_leg())
+    deal = _sab_deal(_sab_sell_leg(supplier=SupplierRef(code="760", name="طه"), supplier_price_raw="5.72"))
     await db.deals.upsert(deal)
     pipe._maybe_synthesize_buy_leg(deal)
     jobs = sorted(await pipe.queue.build_write_jobs(deal), key=lambda j: j.order_index)
