@@ -188,6 +188,13 @@ class MoneyadoScreen(ScreenController):
     _DEFAULT_SELL_BUTTON = "بيع عملة"
     _DEFAULT_BUY_BUTTON = "شراء عملة"
     _DEFAULT_MAIN_BUTTON_CLASS = "ThunderRT6CommandButton"
+    # مميّز فورم العملية: عنوان ThunderRT6FormDC فارغ على الجهاز فلا يميّز بيع/شراء (مؤكَّد حيًّا)؛
+    # نميّز بزرّ خاصّ بكل عملية — البيع فيه «ايصال قبض»، الشراء فيه «ايصال صرف». قابل للضبط عبر
+    # config[screen]["form_marker"] إن اختلف على الجهاز.
+    _DEFAULT_FORM_MARKER = {
+        OperationType.SELL: "ايصال قبض",
+        OperationType.BUY: "ايصال صرف",
+    }
 
     def __init__(
         self,
@@ -390,10 +397,54 @@ class MoneyadoScreen(ScreenController):
         match.click()
         time.sleep(self._step_delay)  # مهلة استقرار حتى يفتح الفورم (جهاز بطيء §11.3)
 
+    def _form_marker(self, operation: OperationType) -> str:
+        """نصّ الزرّ المميّز لفورم العملية (بيع «ايصال قبض» / شراء «ايصال صرف»)."""
+        return self._screen(operation).get("form_marker", self._DEFAULT_FORM_MARKER[operation])
+
     def _form_open_and_visible(self, operation: OperationType) -> bool:
-        """هل فورم العملية (ThunderRT6FormDC) مفتوح ومرئي مسبقًا؟ (استئناف/إعادة معالجة §11.3)."""
+        """هل فورم العملية **المطلوبة** (بيع/شراء) مفتوح ومرئي مسبقًا؟
+
+        🔴 عنوان ThunderRT6FormDC فارغ على الجهاز فلا يميّز بيع/شراء (مؤكَّد حيًّا)؛ نميّز بزرّ
+        خاصّ بكل عملية (بيع «ايصال قبض» / شراء «ايصال صرف»). هكذا فورم بيع متبقٍّ **لا** يُعامَل
+        كأنه شاشة شراء (فيُتخطّى ضغط «شراء عملة»)، والعكس — منعًا لربط الشاشة الخطأ (§0).
+        """
         form_class = self._screen(operation).get("form_class", self._DEFAULT_FORM_CLASS)
-        return any(w.is_visible() for w in self._app.windows(class_name=form_class))
+        btn_class = self._main_menu_cfg().get("button_class", self._DEFAULT_MAIN_BUTTON_CLASS)
+        marker = _norm_btn(self._form_marker(operation))
+        for w in self._app.windows(class_name=form_class):
+            try:
+                if not w.is_visible():
+                    continue
+                texts = {_norm_btn(b.window_text() or "")
+                         for b in w.descendants(class_name=btn_class)}
+                if marker in texts:
+                    return True
+            except Exception:  # نافذة أُغلقت أثناء الفحص — تجاهل
+                continue
+        return False
+
+    def _close_stray_forms(self) -> None:
+        """يغلق أي فورم ThunderRT6FormDC مرئي (رجوع) للعودة للقائمة الرئيسية (§11.3).
+
+        يُستدعى قبل فتح عملية جديدة حين يتبقّى فورم عملية أخرى (مثل فورم بيع بعد تخزينه فيبقى
+        مرئيًا): «رجوع» آمن هنا لأن الطرف السابق خُزّن فعلًا قبل هذه المرحلة — فلا يحجب فورم متبقٍّ
+        فتح الشاشة التالية («شراء عملة») ولا يُعاد استخدامه خطأً.
+        """
+        form_class = self._DEFAULT_FORM_CLASS
+        btn_class = self._main_menu_cfg().get("button_class", self._DEFAULT_MAIN_BUTTON_CLASS)
+        for _ in range(self._open_click_retries + 1):
+            forms = [w for w in self._app.windows(class_name=form_class) if w.is_visible()]
+            if not forms:
+                return
+            for w in forms:
+                back = next((b for b in w.descendants(class_name=btn_class)
+                             if _norm_btn(b.window_text() or "") == "رجوع" and _actionable(b)), None)
+                if back is not None:
+                    try:
+                        back.click()
+                    except Exception as exc:
+                        log.warning("تعذّر إغلاق فورم متبقٍّ (رجوع): %s", exc)
+            time.sleep(self._step_delay)
 
     def _wait_form_open(self, operation: OperationType) -> bool:
         """ينتظر ظهور فورم العملية حتى `_open_retry_wait` (سبر كل 0.25s). True إن ظهر."""
@@ -409,17 +460,21 @@ class MoneyadoScreen(ScreenController):
         تأكّد القائمة → ضغط الزر بالنص مع إعادة إن ابتُلع النقر → ربط الفورم (§11.3)."""
         self._connect_app(operation)
 
-        # فورم العملية مفتوح ومرئي مسبقًا (استئناف/إعادة معالجة) → اربطه مباشرة بلا ضغط ولا فتح
-        # فوق فورم. حارس بصمة الحقول في _bind_form (§0) يكشف الشاشة الخطأ إن كان الفورم مختلفًا.
+        # فورم العملية **نفسها** مفتوح ومرئي مسبقًا (استئناف) → اربطه مباشرة بلا ضغط.
         if self._form_open_and_visible(operation):
-            log.info("فورم «%s» مفتوح ومرئي مسبقًا → استخدامه مباشرة (بلا ضغط §11.3).", label)
+            log.info("فورم «%s» مفتوح ومطابق للعملية → استخدامه مباشرة (بلا ضغط §11.3).", label)
             self._bind_form(operation, timeout=self._open_timeout)
             return
 
+        # فورم عملية **أخرى** متبقٍّ (مثل فورم بيع بعد تخزينه يبقى مرئيًا) يحجب القائمة → أغلقه
+        # للعودة للقائمة قبل ضغط زر العملية المطلوبة (يمنع تخطّي الضغط أو ربط الشاشة الخطأ §0).
         if not self.is_main_screen():
-            raise RuntimeError(
-                f"الشاشة الحالية ليست القائمة الرئيسية — لا نفتح «{label}» فوق فورم مفتوح (§0)."
-            )
+            log.info("فورم عملية أخرى متبقٍّ → إغلاقه (رجوع) قبل فتح «%s» (§11.3).", label)
+            self._close_stray_forms()
+            if not self.is_main_screen():      # ما زال محجوبًا رغم الإغلاق → خطأ صريح
+                raise RuntimeError(
+                    f"الشاشة الحالية ليست القائمة الرئيسية — لا نفتح «{label}» فوق فورم مفتوح (§0)."
+                )
 
         # 🔴 نقر زر VB6 يُبتلَع أحيانًا فلا يفتح الفورم (أُثبت على الجهاز الحيّ §11.3): بدل انتظار
         #    المهلة كاملة ثم الفشل، نعيد الضغط حتى يظهر الفورم — نعيد فقط إن لم يظهر أي فورم (لا

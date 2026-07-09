@@ -570,6 +570,68 @@ def test_open_buy_screen_uses_buy_label():
     scr.click_button.assert_called_once_with("شراء عملة")
 
 
+def test_form_open_and_visible_matches_operation_marker():
+    """يُميّز فورم البيع (ايصال قبض) من الشراء (ايصال صرف) — لا يُعامَل بيع متبقٍّ كشاشة شراء."""
+    from core.constants import OperationType
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({"sell_screen": {}, "buy_screen": {}})
+    app = MagicMock()
+    scr._app = app
+
+    sell_form = MagicMock()
+    sell_form.is_visible.return_value = True
+    sell_form.descendants.return_value = [_fake_button("ايصال قبض"), _fake_button("تخزين"), _fake_button("رجوع")]
+    app.windows.return_value = [sell_form]
+    assert scr._form_open_and_visible(OperationType.SELL) is True    # فيه «ايصال قبض»
+    assert scr._form_open_and_visible(OperationType.BUY) is False    # لا «ايصال صرف»
+
+    buy_form = MagicMock()
+    buy_form.is_visible.return_value = True
+    buy_form.descendants.return_value = [_fake_button("ايصال صرف"), _fake_button("تخزين"), _fake_button("رجوع")]
+    app.windows.return_value = [buy_form]
+    assert scr._form_open_and_visible(OperationType.BUY) is True
+    assert scr._form_open_and_visible(OperationType.SELL) is False
+
+
+def test_close_stray_forms_clicks_back_until_gone():
+    """يغلق الفورم المتبقّي بـ«رجوع» حتى يختفي (يعود للقائمة قبل فتح العملية التالية)."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0)
+    app = MagicMock()
+    form, back = MagicMock(), _fake_button("رجوع")
+    form.is_visible.return_value = True
+    form.descendants.return_value = [back, _fake_button("تخزين")]
+    app.windows.side_effect = [[form], []]   # بعد النقر: لا فورم
+    scr._app = app
+    scr._close_stray_forms()
+    back.click.assert_called_once()
+
+
+def test_open_buy_closes_stray_sell_form_then_clicks():
+    """فورم بيع متبقٍّ عند فتح الشراء → يُغلق (رجوع) ثم يُضغط «شراء عملة» (لا يُعاد استخدام البيع)."""
+    from core.constants import OperationType
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({}, step_delay=0)
+    scr._connect_app = MagicMock()
+    scr._form_open_and_visible = MagicMock(return_value=False)   # لا فورم شراء مطابق
+    # القائمة محجوبة أولًا (فورم بيع متبقٍّ) ثم تُصبح متاحة بعد الإغلاق
+    scr.is_main_screen = MagicMock(side_effect=[False, True])
+    scr._close_stray_forms = MagicMock()
+    scr.click_button = MagicMock()
+    scr._wait_form_open = MagicMock(return_value=True)
+    scr._bind_form = MagicMock()
+    scr.open_buy_screen()
+    scr._close_stray_forms.assert_called_once()          # أُغلق فورم البيع المتبقّي
+    scr.click_button.assert_called_once_with("شراء عملة")  # ثم ضُغط «شراء عملة»
+    scr._bind_form.assert_called_once()
+
+
 def test_open_screen_raises_when_not_main():
     """لا نفتح فورمًا فوق فورم مفتوح (§0): is_main_screen=False → استثناء صريح، بلا ضغط زر."""
     from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
@@ -578,11 +640,13 @@ def test_open_screen_raises_when_not_main():
     scr = MoneyadoScreen({}, step_delay=0)
     scr._connect_app = MagicMock()
     scr._form_open_and_visible = MagicMock(return_value=False)
-    scr.is_main_screen = MagicMock(return_value=False)
+    scr.is_main_screen = MagicMock(return_value=False)   # يبقى محجوبًا حتى بعد محاولة الإغلاق
+    scr._close_stray_forms = MagicMock()
     scr.click_button = MagicMock()
     scr._bind_form = MagicMock()
     with pytest.raises(RuntimeError, match="القائمة الرئيسية"):
         scr.open_sell_screen()
+    scr._close_stray_forms.assert_called_once()          # حاول إغلاق الفورم المتبقّي أولًا
     scr.click_button.assert_not_called()
     scr._bind_form.assert_not_called()
 
