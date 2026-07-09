@@ -346,6 +346,11 @@ class Pipeline:
                 "is_supplier_counterpart": True,
                 "supplier_price_raw": None,          # استُهلك في بناء طرف الشراء
             })
+        else:
+            # مشتقّ بلا مورد (صافي/خصم1%): شراء إلى الخزينة الخارجية بلا حساب زبون — نُصفّر
+            # customer_code كي تُتخطّى خانة الزبون في شاشة الشراء (§5.3، build_buy_fields)، فلا
+            # يُكتب كود زبون البيع خطأً على العملية الداخلية.
+            update.update({"customer_code": None, "customer_name": None})
         deal.buy_leg = sell.model_copy(update=update)
         deal.is_two_legged = True
         log.info(

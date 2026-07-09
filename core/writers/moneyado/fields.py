@@ -198,11 +198,11 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
     #     مسح كي لا نُفسد القيمة المحسوبة §0) — نظير «المبلغ المخصوم» في البيع. لا يحتاج إحداثيًا.
     ops.append(FieldOp("amount_delivered", "", ENTER_ONLY))
 
-    # (10) الزبون: للطرف **بمورد** فقط (كود المورد + Enter §5.3). الطرف المشتقّ لخزينة sell_and_buy
-    #      (بلا مورد) **يُتخطّى** — البرنامج لا يشترط الزبون في شراء sell_and_buy، وإحداثيه null
-    #      في الإعداد (فإصداره سيُرفض لعدم قابلية التحديد §11.1).
-    if leg.supplier is not None:
-        ops.append(FieldOp("customer", leg.supplier.code or "", TYPE_KEYS, enter=True))
+    # (10) الزبون/الحساب: يُكتب كود المورد حين وُجد طرف مورد حقيقي (buy_leg.customer_code مضبوط:
+    #      طرفان بمورد «760 طه»، أو SI مع مورد مشتقّ). الطرف المشتقّ لخزينة sell_and_buy بلا مورد
+    #      يترك customer_code فارغًا → **يُتخطّى** (البرنامج لا يشترط الزبون في شراء sell_and_buy §5.3).
+    if leg.customer_code:
+        ops.append(FieldOp("customer", leg.customer_code, TYPE_KEYS, enter=True))
 
     # (11) البلد — في شاشة الشراء يُعاد استخدام الحقل لكود **وسيلة الدفع** (فودافون=17، قرار
     #      صاحب العمل من الشاشة الحقيقية): يُكتب رمزًا من MONEYADO_PAYMENT_CODE حسب وسيلة دفع

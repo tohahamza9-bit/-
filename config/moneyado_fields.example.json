@@ -40,7 +40,7 @@
       "quantity": {"auto_id": null, "control_type": "Edit", "order": 5, "note": "الكمية (المبلغ الأجنبي)"},
       "net_amount": {"auto_id": null, "control_type": "Edit", "order": 6, "note": "المبلغ الصافي"},
       "commission": {"auto_id": null, "control_type": "Edit", "order": 7, "note": "العمولة"},
-      "customer": {"auto_id": null, "control_type": "Edit", "order": 8, "note": "المورد — الكود أولًا ثم Enter"},
+      "customer": {"auto_id": null, "control_type": "Edit", "order": 8, "note": "الحساب/المورد — كود المورد للطرف بمورد (buy_leg.customer_code) ثم Enter. يلزم إحداثيه (coord/tab_index مضبوط) وإلا رُفض طرف المورد؛ يُتخطّى إن كان customer_code فارغًا"},
       "country": {"auto_id": null, "control_type": "Edit", "order": 9},
       "payment_method": {"auto_id": null, "control_type": "Edit", "order": 10, "note": "رقم الهاتف"},
       "notes": {"auto_id": null, "control_type": "Edit", "order": 11}

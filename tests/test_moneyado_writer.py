@@ -57,6 +57,7 @@ def make_sell_leg(**over) -> ParsedLeg:
 def make_buy_leg(**over) -> ParsedLeg:
     base = dict(
         operation=OperationType.BUY,
+        customer_code="760",                  # كود المورد كحساب (طرفان بمورد «760 طه»)
         supplier=SupplierRef(code="760", name="طه"),
         amount=8391.0,
         currency=Currency.EGP,
@@ -566,16 +567,26 @@ def test_buy_fields_commission_value_when_present():
     assert comm.value == "-12"
 
 
-def test_buy_fields_customer_skipped_for_synthesized_sell_and_buy():
-    """الطرف المشتقّ (sell_and_buy بلا مورد): خانة الزبون تُتخطّى (البرنامج لا يشترطها)."""
-    leg = make_buy_leg(supplier=None)     # خزينة make_buy_leg = «خصم 1%» sell_and_buy، بلا مورد
+def test_buy_fields_customer_skipped_when_no_customer_code():
+    """بلا customer_code (مشتقّ sell_and_buy بلا مورد) → خانة الزبون تُتخطّى (لا FieldOp)."""
+    leg = make_buy_leg(customer_code=None, supplier=None)
     assert "customer" not in keys(build_buy_fields(leg))
 
 
-def test_buy_fields_customer_kept_for_supplier_leg():
-    """الطرف بمورد: خانة الزبون = كود المورد + Enter (يبقى كما هو)."""
-    cust = by_key(build_buy_fields(make_buy_leg()), "customer")   # make_buy_leg فيه مورد 760
+def test_buy_fields_customer_written_from_customer_code():
+    """مورد حقيقي (customer_code مضبوط) → خانة الزبون = كود المورد + Enter."""
+    cust = by_key(build_buy_fields(make_buy_leg()), "customer")   # customer_code = 760
     assert (cust.value, cust.enter) == ("760", True)
+
+
+def test_buy_screen_customer_field_locatable_in_real_config():
+    """إعداد buy_screen الحقيقي: خانة customer لها إحداثي (لا null) — فلا يرفض الكاتب طرف المورد."""
+    import json
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    cfg = json.loads((root / "config" / "moneyado_fields.json").read_text(encoding="utf-8"))
+    customer = cfg["buy_screen"]["fields"]["customer"]
+    assert customer.get("coord") is not None or customer.get("tab_index") is not None
 
 
 # ── اختبارات MoneyadoWriter.write ─────────────────────────────────────────────
