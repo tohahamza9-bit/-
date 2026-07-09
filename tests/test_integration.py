@@ -294,6 +294,38 @@ async def test_golden_path_simple_egp_sell(db):
     assert any(o.get("reaction") == Mark.DONE.value and o["chat_jid"] == CENTRAL for o in outs)
 
 
+async def test_auto_trust_skips_room_matching_and_completes(db):
+    """وضع التلقائي (auto_trust): غرف مُصنّفة بلا رسالة غرفة → تُتخطّى المطابقة وتكتمل عبر بوابة الثقة."""
+    await db.control.set(BotControl(storage_enabled=True, auto_trust=True, state="running"), "test")
+    writer = FakeWriter()
+    pipe = _make_pipeline(db, writer, StubVerifier())                  # غرف مُصنّفة (rooms=True)
+    await db.rooms.upsert(Room(jid=TREAS_ROOM, type=RoomType.TREASURY, treasury_code="74", active=True))
+    # حوالة المركزية فقط — بلا أي رسالة في غرفة الخزينة/الزبون (لن تتطابق عادةً)
+    text = "1208 فداء شاكونه 5.84\nبلاس\nA5169\n010954227116\n1600 ج م\nفودافون\nبدون خصم"
+    await pipe.capture(_raw("m1", text, jid=CENTRAL))
+    now = PAST + timedelta(seconds=120)
+    await pipe.process_inbox(now)
+    await pipe.tick(now)
+    completed = await db.deals.by_status(Status.COMPLETED)
+    assert len(completed) == 1, "auto_trust يكمل بلا مطابقة غرف"
+    assert writer.calls == [("sell", 0, True)]
+
+
+async def test_without_auto_trust_waits_for_room_match(db):
+    """بلا وضع التلقائي: نفس الحالة (غرف مُصنّفة بلا رسالة غرفة) → لا تكتمل (تنتظر المطابقة §8.1)."""
+    await db.control.set(BotControl(storage_enabled=True, auto_trust=False, state="running"), "test")
+    writer = FakeWriter()
+    pipe = _make_pipeline(db, writer, StubVerifier())
+    await db.rooms.upsert(Room(jid=TREAS_ROOM, type=RoomType.TREASURY, treasury_code="74", active=True))
+    text = "1208 فداء شاكونه 5.84\nبلاس\nA5169\n010954227116\n1600 ج م\nفودافون\nبدون خصم"
+    await pipe.capture(_raw("m1", text, jid=CENTRAL))
+    now = PAST + timedelta(seconds=120)
+    await pipe.process_inbox(now)
+    await pipe.tick(now)
+    assert len(await db.deals.by_status(Status.COMPLETED)) == 0, "بلا auto_trust لا تكتمل قبل المطابقة"
+    assert writer.calls == []
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 1ب) DRY_RUN — عُبّئت الشاشة، لا «تخزين» ولا دفتر، لكن ✅ «تمّ — DRY_RUN» على المركزية
 # ═════════════════════════════════════════════════════════════════════════════

@@ -63,7 +63,7 @@ class RoomType(str, Enum):
 # ── الخزائن الافتراضية (seed) — §4.2 §4.3 §4.4 ──────────────────────────────
 # البنية: code, name, currency(None=كلاهما), type, aliases
 # ملاحظة: أكواد «هادم مصر» و«صافي» و«تونسي خارجي» معلّقة (ملحق ب-3) → None، تُستكمل من
-#         Dashboard. البوت لا يُنزّل خزينة بلا كود. «خصم 1%» كودها مستكمَل = 85 (مؤقّت، كان 72).
+#         Dashboard. البوت لا يُنزّل خزينة بلا كود. «خصم 1%» كودها = 72 (الافتراضية لـ SI مع مورد).
 SEED_TREASURIES: list[dict] = [
     # مصر — بيع فقط (§4.2)
     {"code": "77", "name": "أبو يوسف جديد", "currency": "EGP", "type": "sell_only", "aliases": ["أبو يوسف", "ابو يوسف"]},
@@ -81,7 +81,7 @@ SEED_TREASURIES: list[dict] = [
     {"code": "78", "name": "محمود صفاقس", "currency": "TND", "type": "sell_only", "aliases": ["محمود"]},
     {"code": "79", "name": "محمد حمامات", "currency": "TND", "type": "sell_only", "aliases": ["محمد"]},
     # بيع وشراء (§4.4) — الأكواد معلّقة، تُستكمل من Dashboard
-    {"code": "85", "name": "خصم 1%", "currency": "EGP", "type": "sell_and_buy", "aliases": ["خصم", "خصم1", "خصم 1", "خصم 1%", "خصم1%"]},  # 🔴 مؤقّت: 72→85
+    {"code": "72", "name": "خصم 1%", "currency": "EGP", "type": "sell_and_buy", "aliases": ["خصم", "خصم1", "خصم 1", "خصم 1%", "خصم1%"]},  # الخزينة الافتراضية لـ SI مع مورد
     {"code": None, "name": "صافي", "currency": None, "type": "sell_and_buy", "aliases": ["صافى"]},
     {"code": None, "name": "تونسي خارجي", "currency": "TND", "type": "sell_and_buy", "aliases": ["تونسي خارجى", "خارجي"]},
 ]

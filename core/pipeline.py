@@ -263,8 +263,14 @@ class Pipeline:
             ):
                 await self._resolve_two_leg(deal)
 
-            # (6ب) مطابقة الغرف (§8.1) — إن كانت الغرف مُصنّفة (DB مصدر الحقيقة، hot-reload)
-            if await self._matching_rooms_configured():
+            # (6ب) مطابقة الغرف (§8.1) — إن كانت الغرف مُصنّفة (DB مصدر الحقيقة، hot-reload).
+            # 🔴 «وضع التلقائي» (auto_trust §13، قابل للتبديل من اللوحة): يتخطّى مطابقة الغرف
+            #    ويذهب لبوابة الثقة مباشرة — لا انتظار ظهور الحوالة في غرفة الخزينة/الزبون.
+            control = await self.db.control.get()
+            if control.auto_trust:
+                log.info("وضع التلقائي (auto_trust): تخطّي مطابقة الغرف → بوابة الثقة مباشرة (صفقة %s).",
+                         deal.deal_id)
+            elif await self._matching_rooms_configured():
                 deal = await self.matcher.match_in_rooms(deal, now)
                 if deal.status != Status.MATCHED:
                     # لم تتطابق بعد → تبقى للتذكير/التصعيد (§8.1) — لا تُكتب الآن

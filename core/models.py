@@ -220,6 +220,7 @@ class EmployeeRecord(BaseModel):
 class BotControl(BaseModel):
     """حالة التحكّم — Kill Switch (§13). الافتراضي عند التشغيل: إيقاف."""
     storage_enabled: bool = False               # False = يعبّئ ويتوقف عند «تخزين»
+    auto_trust: bool = False                     # True = «وضع تلقائي»: تخطّي مطابقة الغرف → بوابة الثقة مباشرة (§8.1)
     state: str = "stopped"                       # running | stopped | error
     updated_at: Optional[datetime] = None
     updated_by: Optional[str] = None

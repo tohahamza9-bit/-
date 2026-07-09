@@ -148,6 +148,15 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         log.info("Kill Switch: storage_enabled=%s state=%s", ctrl.storage_enabled, ctrl.state)
         return ctrl.model_dump(mode="json")
 
+    @router.post("/control/auto_trust", dependencies=[guard])
+    async def toggle_auto_trust() -> dict:
+        """تبديل «وضع التلقائي»: تفعيل = يتخطّى مطابقة الغرف → بوابة الثقة مباشرة (§8.1)."""
+        ctrl = await db.control.get()
+        ctrl.auto_trust = not ctrl.auto_trust
+        await db.control.set(ctrl, updated_by="dashboard")
+        log.info("وضع التلقائي: auto_trust=%s", ctrl.auto_trust)
+        return ctrl.model_dump(mode="json")
+
     # ── إدارة الخزائن (§13) — إيقاف بلا حذف، تفعيل فوري ───────────────────────
     @router.get("/treasuries")
     async def list_treasuries() -> list[dict]:

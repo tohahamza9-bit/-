@@ -79,6 +79,11 @@
       <button id="toggleBtn">تبديل التخزين</button>
       <span class="muted">تفعيل = يخزّن تلقائيًا · إيقاف = يتوقف عند «تخزين» · الافتراضي: إيقاف</span>
     </div>
+    <div class="kill">
+      <span id="autoTrustTxt" class="pill off">وضع التلقائي: …</span>
+      <button id="autoTrustBtn" class="ghost">تبديل الوضع التلقائي</button>
+      <span class="muted">مُفعّل = يتخطّى مطابقة الغرف → بوابة الثقة مباشرة · الافتراضي: مُعطّل</span>
+    </div>
   </div>
 
   <!-- الغرف — العضويات المكتشَفة/المصنّفة (§2.2) -->
@@ -170,8 +175,12 @@ async function loadControl() {
   const st = $("storeTxt");
   st.textContent = "التخزين: " + (c.storage_enabled ? "مُفعّل" : "موقوف");
   st.className = "pill " + (c.storage_enabled ? "on" : "off");
+  const at = $("autoTrustTxt");
+  at.textContent = "وضع التلقائي: " + (c.auto_trust ? "مُفعّل" : "مُعطّل");
+  at.className = "pill " + (c.auto_trust ? "on" : "off");
 }
 $("toggleBtn").onclick = async () => { await api("/control/toggle","POST"); await loadControl(); };
+$("autoTrustBtn").onclick = async () => { await api("/control/auto_trust","POST"); await loadControl(); };
 
 // ── الخزائن ──
 // عرض «البلد» من عملة الخزينة (db.treasuries مصدر الحقيقة) — عرض فقط، لا يؤثّر على التطبيع.

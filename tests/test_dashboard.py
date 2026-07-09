@@ -182,6 +182,23 @@ async def test_control_toggle_endpoint(db):
         assert r.json()["state"] == "running"
 
 
+async def test_auto_trust_toggle_endpoint(db):
+    """نقطة auto_trust تبدّل «وضع التلقائي» وتُرجعه (الافتراضي مُعطّل)."""
+    pytest.importorskip("fastapi")
+    async with await _client(db, "s3cret") as ac:
+        r = await ac.get("/api/control")
+        assert r.json()["auto_trust"] is False                       # الافتراضي
+        r = await ac.post("/api/control/auto_trust", headers={"X-Internal-Token": "s3cret"})
+        assert r.status_code == 200 and r.json()["auto_trust"] is True
+        # لا يمسّ التخزين (مستقلّ عن Kill Switch)
+        assert r.json()["storage_enabled"] is False
+        r = await ac.post("/api/control/auto_trust", headers={"X-Internal-Token": "s3cret"})
+        assert r.json()["auto_trust"] is False                       # تبديل ثانٍ يعيده
+        # يتطلّب المصادقة (SEC-002): بلا رمز → 401
+        r = await ac.post("/api/control/auto_trust")
+        assert r.status_code == 401
+
+
 async def test_treasuries_expose_currency_for_country_column(db):
     """عمود «البلد» في اللوحة يُشتقّ من currency الخزينة (db.treasuries مصدر الحقيقة، عرض فقط).
 
