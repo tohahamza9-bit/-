@@ -186,7 +186,9 @@ async function loadTreasuries() {
     <td>${countryCell(t.currency)}</td>
     <td class="aliases">${(t.aliases||[]).join('، ')}</td>
     <td>${t.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
-    <td>${t.active?`<button class="ghost danger" onclick="disableTreasury('${encodeURIComponent(t.name)}')">إيقاف</button>`:''}</td>
+    <td>${t.active
+      ? `<button class="ghost danger" onclick="disableTreasury('${encodeURIComponent(t.name)}')">إيقاف</button>`
+      : `<button class="ghost" onclick="enableTreasury('${encodeURIComponent(t.name)}')">تفعيل</button>`}</td>
   </tr>`).join("");
 }
 async function addTreasury() {
@@ -196,6 +198,7 @@ async function addTreasury() {
   ["t_name","t_code","t_alias"].forEach(i=>$(i).value=""); loadTreasuries();
 }
 async function disableTreasury(n) { await api(`/treasuries/${n}/disable`,"POST"); loadTreasuries(); }
+async function enableTreasury(n) { await api(`/treasuries/${n}/enable`,"POST"); loadTreasuries(); }
 
 // ── الموردون ──
 async function loadSuppliers() {

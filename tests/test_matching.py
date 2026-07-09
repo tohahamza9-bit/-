@@ -338,7 +338,7 @@ async def test_sell_and_buy_treasury_auto_matches_without_room(db):
     svc = MatchingService(db, bus, customer_room_jids=[CUST_ROOM])
     await _seed_room(db, CUST_ROOM, "c1", "احمد العكاري 8475")
     leg = make_leg(treasury=TreasuryRef(
-        code="72", name="خصم 1%", type=TreasuryType.SELL_AND_BUY, currency=Currency.EGP))
+        code="85", name="خصم 1%", type=TreasuryType.SELL_AND_BUY, currency=Currency.EGP))
     deal = await svc.match_in_rooms(make_deal(leg), now=T0 + timedelta(seconds=12))
     assert deal.matched_treasury_room is True    # اعتماد تلقائي
     assert deal.treasury_no_room is False        # لا «تم» يدوي
@@ -352,7 +352,7 @@ async def test_sell_and_buy_treasury_no_manual_confirm_alert(db):
     svc = MatchingService(db, bus, customer_room_jids=[CUST_ROOM])
     await _seed_room(db, CUST_ROOM, "c1", "احمد العكاري 8475")
     leg = make_leg(treasury=TreasuryRef(
-        code="72", name="خصم 1%", type=TreasuryType.SELL_AND_BUY, currency=Currency.EGP))
+        code="85", name="خصم 1%", type=TreasuryType.SELL_AND_BUY, currency=Currency.EGP))
     deal = await svc.match_in_rooms(make_deal(leg), now=T0 + timedelta(seconds=12))
     deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=20))
     # MATCHED نهائية → لا تذكير/تصعيد، ولا رسالة «تم»

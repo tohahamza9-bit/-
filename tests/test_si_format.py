@@ -169,7 +169,7 @@ async def test_si_supplier_default_sell_and_buy_treasury(db):
     assert leg.is_si_format is True
     assert leg.treasury is not None
     assert leg.treasury.type == TreasuryType.SELL_AND_BUY
-    assert leg.treasury.code == "72"            # «خصم 1%»
+    assert leg.treasury.code == "85"            # «خصم 1%» (مؤقّت، كان 72)
     # الزبون يبقى طرف بيع (لا يُحوَّل لشراء بسبب المورد)
     from core.constants import OperationType
     assert leg.operation == OperationType.SELL

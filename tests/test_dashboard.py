@@ -146,6 +146,30 @@ async def test_write_requires_internal_token(db):
         assert any(t["name"] == "خ1" for t in r.json())
 
 
+async def test_enable_treasury_reactivates(db):
+    """POST /treasuries/{name}/enable يعيد التفعيل (active=true) — عكس الإيقاف (§13)."""
+    pytest.importorskip("fastapi")
+    async with await _client(db, "s3cret") as ac:
+        h = {"X-Internal-Token": "s3cret"}
+        r = await ac.post("/api/treasuries/بلاس فون/disable", headers=h)
+        assert r.status_code == 200 and r.json()["active"] is False
+        assert "بلاس فون" not in {t.name for t in await db.treasuries.all_active()}
+        # التفعيل يعيدها
+        r = await ac.post("/api/treasuries/بلاس فون/enable", headers=h)
+        assert r.status_code == 200 and r.json()["active"] is True
+        assert "بلاس فون" in {t.name for t in await db.treasuries.all_active()}
+
+
+async def test_enable_treasury_requires_token_and_404(db):
+    """التفعيل مَحروس (401 بلا رمز) و 404 لخزينة غير موجودة."""
+    pytest.importorskip("fastapi")
+    async with await _client(db, "s3cret") as ac:
+        r = await ac.post("/api/treasuries/بلاس فون/enable")   # بلا رمز
+        assert r.status_code == 401
+        r = await ac.post("/api/treasuries/لا-توجد/enable", headers={"X-Internal-Token": "s3cret"})
+        assert r.status_code == 404
+
+
 async def test_control_toggle_endpoint(db):
     """نقطة toggle تبدّل الحالة وتُرجعها (§13)."""
     pytest.importorskip("fastapi")

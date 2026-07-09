@@ -182,6 +182,15 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         log.info("إيقاف خزينة (بلا حذف): %s", name)
         return {"name": name, "active": False}
 
+    @router.post("/treasuries/{name}/enable", dependencies=[guard])
+    async def enable_treasury(name: str) -> dict:
+        """تفعيل خزينة موقوفة (active=true) — عكس الإيقاف (§13)."""
+        res = await db.treasuries.col.update_one({"name": name}, {"$set": {"active": True}})
+        if res.matched_count == 0:
+            raise HTTPException(status_code=404, detail=f"خزينة غير موجودة: {name}")
+        log.info("تفعيل خزينة: %s", name)
+        return {"name": name, "active": True}
+
     # ── إدارة الموردين (§5.4 §13) — مثل الخزائن ───────────────────────────────
     @router.get("/suppliers")
     async def list_suppliers() -> list[dict]:
