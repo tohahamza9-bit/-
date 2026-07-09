@@ -442,10 +442,22 @@ def test_confirm_store_on_main_presses_enter_on_top_window():
     top = MagicMock()
     app.top_window.return_value = top
     scr._app = app
+    scr.is_main_screen = MagicMock(return_value=True)   # الشاشة أُغلقت بعد Enter
     scr.confirm_store_on_main()
-    app.top_window.assert_called_once()
     top.type_keys.assert_called_once()
     assert top.type_keys.call_args.args[0] == "{ENTER}"
+
+
+def test_confirm_store_on_main_retries_until_screen_closed():
+    """يعيد Enter حتى تُغلَق شاشة العملية (is_main_screen) قبل المتابعة (§11.3)."""
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({}, step_delay=0)
+    app, top = MagicMock(), MagicMock()
+    app.top_window.return_value = top
+    scr._app = app
+    scr.is_main_screen = MagicMock(side_effect=[False, True])   # ما زالت مفتوحة ثم أُغلقت
+    scr.confirm_store_on_main()
+    assert top.type_keys.call_count == 2                        # ضُغط Enter مرّتين حتى الإغلاق
 
 
 def test_bind_form_pins_concrete_window_and_recaptures_form_rect():
@@ -518,6 +530,7 @@ def test_confirm_store_on_main_swallows_errors_after_store():
     app = MagicMock()
     app.top_window.side_effect = RuntimeError("no top window")
     scr._app = app
+    scr.is_main_screen = MagicMock(return_value=True)   # نعتبرها أُغلقت (نتفادى حلقة طويلة)
     scr.confirm_store_on_main()   # لا يرمي
 
 
@@ -1013,6 +1026,21 @@ async def test_write_buy_confirms_store_on_main(tmp_path):
     assert result.ok is True
     screen.press_store.assert_called_once()
     screen.confirm_store_on_main.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_write_store_sequence_order(tmp_path):
+    """الترتيب المؤكَّد: press_store → check_unexpected_window → confirm_store_on_main
+    (الفحص قبل التأكيد الأعمى؛ الرجوع للقائمة بعد الفحص، ثم POST_STORE_WAIT قبل العملية التالية §11.3)."""
+    screen = make_screen()
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    await writer.write(make_job(make_sell_leg()), commit=True)
+    names = [c[0] for c in screen.method_calls]
+    i_store = names.index("press_store")
+    i_confirm = names.index("confirm_store_on_main")
+    assert i_store < i_confirm                              # التخزين ثم الرجوع للقائمة
+    # فحص النافذة الطارئة يقع **بين** التخزين والتأكيد (لا تأكيد أعمى قبل الفحص)
+    assert "check_unexpected_window" in names[i_store:i_confirm]
 
 
 @pytest.mark.asyncio

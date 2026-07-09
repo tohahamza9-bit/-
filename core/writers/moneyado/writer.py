@@ -184,19 +184,20 @@ class MoneyadoWriter(Writer):
 
             if do_store:
                 screen.press_store(op)
-                # 🔴 لا نثق بالنقر وحده (§11.3): مهلة ثم فحص نافذة طارئة بعد «تخزين»
-                # (رصيد غير كافٍ/خطأ). لو ظهرت → إغلاق آمن + تصعيد للمسؤول (RuntimeError).
-                time.sleep(self._POST_STORE_WAIT)
+                # (1) مهلة قصيرة لظهور رسالة التأكيد/نافذة طارئة، ثم فحص النافذة الطارئة **قبل**
+                #     تأكيدها بـ Enter (رصيد غير كافٍ/خطأ) — لو ظهرت → إغلاق آمن + تصعيد (RuntimeError).
+                time.sleep(self._POST_STORE_CLOSE_WAIT)
                 post = screen.check_unexpected_window()
                 if post:
                     self._try_stop(screen, op)   # أغلقها (STOP/رجوع) — best-effort
                     raise RuntimeError(f"نافذة غير متوقّعة بعد «تخزين»: {post}")
-                # لا نافذة طارئة → البرنامج يعرض رسالة تأكيد/تنبيه عاديّة بعد الحفظ. Enter على
-                # النافذة الرئيسية (خارج مربع البيع/الشراء) يغلق الشاشة ويعيد للقائمة الرئيسية
-                # قبل العملية التالية (زر «شراء عملة» للطرف الثاني §11.3).
+                # (2) «رجوع»/Enter على النافذة الرئيسية → إغلاق الشاشة والعودة للقائمة، **مع التحقّق
+                #     من إغلاق الشاشة فعلًا** (confirm_store_on_main يعيد الضغط حتى is_main_screen §11.3).
                 screen.confirm_store_on_main()
-                time.sleep(self._POST_STORE_CLOSE_WAIT)  # حتى تُغلَق الشاشة وتظهر القائمة الرئيسية
-                log.info("تم «تخزين» %s وإغلاق الشاشة للعودة للقائمة الرئيسية (job=%s).",
+                # (3) انتظار POST_STORE_WAIT (5s) بعد العودة للقائمة **قبل** أي عملية كتابة تالية (buy)
+                #     — كي يستقرّ البرنامج تمامًا قبل فتح «شراء عملة» للطرف الثاني (§11.3).
+                time.sleep(self._POST_STORE_WAIT)
+                log.info("تم «تخزين» %s والعودة للقائمة الرئيسية بعد التحقّق (job=%s).",
                          op.value, job.job_id)
                 return WriteResult(ok=True)
 

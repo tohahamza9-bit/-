@@ -722,19 +722,25 @@ class MoneyadoScreen(ScreenController):
         btn.click()
 
     def confirm_store_on_main(self) -> None:
-        """Enter على النافذة الرئيسية للتطبيق (top_window) لإغلاق رسالة التأكيد/التنبيه التي
-        يعرضها البرنامج بعد «تخزين» والعودة للقائمة الرئيسية (§11.3).
+        """Enter على النافذة الرئيسية للتطبيق (top_window) لإغلاق رسالة التأكيد بعد «تخزين»
+        والعودة للقائمة الرئيسية، **مع التحقّق فعليًا من إغلاق شاشة العملية** قبل المتابعة (§11.3).
 
-        🔴 لا نضغط داخل مربع البيع/الشراء (self._window) بل على النافذة النشطة الأعلى للتطبيق:
-        رسالة التأكيد/القائمة الرئيسية تكون فوق الفورم بعد الحفظ. best-effort: تعذّر الضغط
-        لا يُبطل حفظًا تمّ فعلاً — يُسجَّل ويُكمل (T5 لا نبتلع بصمت).
+        🔴 لا نضغط داخل مربع البيع/الشراء (self._window) بل على النافذة النشطة الأعلى للتطبيق.
+        نعيد الضغط حتى يُغلَق فورم العملية (is_main_screen) أو نستنفد المحاولات — كي لا تبدأ
+        عملية الكتابة التالية وشاشة السابقة ما زالت مفتوحة. best-effort: تعذّر الضغط لا يُبطل
+        حفظًا تمّ فعلاً — يُسجَّل ويُكمل (T5 لا نبتلع بصمت).
         """
         if self._app is None:
             raise RuntimeError("الاتصال بالتطبيق غير مُهيّأ (connect لم يُستدعَ).")
-        try:
-            self._app.top_window().type_keys("{ENTER}", set_foreground=True)
-        except Exception as exc:
-            log.warning("تعذّر Enter على النافذة الرئيسية بعد «تخزين» (%s) — الحفظ تمّ، متابعة.", exc)
+        for _ in range(self._open_click_retries + 1):
+            try:
+                self._app.top_window().type_keys("{ENTER}", set_foreground=True)
+            except Exception as exc:
+                log.warning("تعذّر Enter على النافذة الرئيسية بعد «تخزين» (%s) — الحفظ تمّ، متابعة.", exc)
+            if self.is_main_screen():          # لا فورم عملية مفتوح → عُدنا للقائمة الرئيسية
+                return
+            time.sleep(self._step_delay)
+        log.warning("لم تُغلَق شاشة العملية بعد «تخزين» رغم Enter المتكرّر — متابعة (الحفظ تمّ).")
 
     def press_stop(self, operation: OperationType) -> None:
         btn = self._button(self.button_config(operation)["stop"])
