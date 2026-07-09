@@ -167,7 +167,12 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
     # (1) الحساب الأجنبي (الخزينة) → type_keys ثم Enter
     ops.append(FieldOp("foreign_account", _treasury_value(leg), TYPE_KEYS, enter=True))
 
-    # (2) الرقم الإشاري (نفس رقم البيع للطرف المشتقّ) — يُملأ إن وُجد + Enter. رقم المعاملة يولّده البرنامج.
+    # (2) رقم المعاملة، (3) التاريخ — يملؤهما البرنامج تلقائيًا (AO): Enter فقط للمرور بهما بترتيب
+    #     التركيز قبل الرقم الإشاري (§11.3). لا كتابة ولا إحداثي (ENTER_ONLY على الحقل النشط).
+    ops.append(FieldOp("transaction_number", "", ENTER_ONLY))
+    ops.append(FieldOp("date_field", "", ENTER_ONLY))
+
+    # (4) الرقم الإشاري (نفس رقم البيع للطرف المشتقّ) — يُملأ إن وُجد + Enter.
     if leg.reference_number:
         ops.append(FieldOp("reference_number", leg.reference_number, TYPE_KEYS, enter=True))
 
@@ -177,16 +182,21 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
     if leg.currency in MONEYADO_CURRENCY_CODE:
         ops.append(FieldOp("currency_type", MONEYADO_CURRENCY_CODE[leg.currency], TYPE_KEYS, enter=True))
 
-    # (4) السعر × الضارب = 1 دائمًا (ثابت §11.1) — مطابقة شاشة الشراء الفعلية (× و/) + Enter
-    ops.append(FieldOp("rate_multiply", "1", TYPE_KEYS, enter=True))
-
-    # (5) السعر / القسمة = السعر المطبَّع (§3.6). Enter بعدها يفعّل «المبلغ الصافي» (تسلسل §11.3).
-    ops.append(FieldOp("rate_divide", leg.price_normalized or "", TYPE_KEYS, enter=True))
-
-    # (6) الكمية (المبلغ الأجنبي)، فاصل الآلاف مُشال + Enter
+    # (4) الكمية (المبلغ الأجنبي) **قبل السعر** — 🔴 حاسم: البرنامج يحسب «المبلغ الصافي» عند Enter
+    #     على السعر (rate_divide) على أساس الكمية المُدخَلة؛ فلو جاء السعر قبل الكمية يُحسب الصافي
+    #     على كمية فارغة = 0.000 ولا يُعاد حسابه عند إدخال الكمية (مؤكَّد بتعبئة حيّة §11.3).
     ops.append(FieldOp("quantity", _num(leg.amount), TYPE_KEYS, enter=True))
 
-    # (7) نسبة العمولة = "0" + Enter (كشاشة البيع §6.2): لا تُترك فارغة، ثم Enter يفعّل تسلسل
+    # (5) السعر × الضارب = 1 دائمًا (ثابت §11.1) — مطابقة شاشة الشراء الفعلية (× و/) + Enter
+    ops.append(FieldOp("rate_multiply", "1", TYPE_KEYS, enter=True))
+
+    # (8) السعر / القسمة = السعر المطبَّع (§3.6). Enter بعده يحسب «المبلغ الصافي» (الكمية مُدخَلة مسبقًا §11.3).
+    ops.append(FieldOp("rate_divide", leg.price_normalized or "", TYPE_KEYS, enter=True))
+
+    # (9) المبلغ الصافي — يحسبه البرنامج (AO) بعد السعر: Enter فقط للمرور به (§11.3).
+    ops.append(FieldOp("net_amount", "", ENTER_ONLY))
+
+    # (10) نسبة العمولة = "0" + Enter (كشاشة البيع §6.2): لا تُترك فارغة، ثم Enter يفعّل تسلسل
     #     «العمولة» ثم «المبلغ المسلّم» (خانات متسلسلة التفعيل §11.3).
     ops.append(FieldOp("commission_rate", "0", TYPE_KEYS, enter=True))
 

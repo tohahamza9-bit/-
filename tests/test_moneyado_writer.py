@@ -256,6 +256,41 @@ def test_fill_non_critical_fields_swallow_errors():
         scr.fill(FieldOp("foreign_account", "85", TYPE_KEYS), {})           # حرج → يرمي
 
 
+def test_fill_settle_wait_after_rate_divide(monkeypatch):
+    """rate_divide خانة حاسبة: مهلة enter_wait إضافية بعد Enter كي يحسب البرنامج «المبلغ الصافي»."""
+    from core.writers.moneyado.fields import FieldOp
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({}, step_delay=0, enter_wait=5.0)
+    scr._control = lambda cfg, method="": MagicMock()
+    slept = []
+    monkeypatch.setattr(screens_mod.time, "sleep", lambda s: slept.append(s))
+    scr.fill(FieldOp("rate_divide", "5.72", TYPE_KEYS, enter=True), {})
+    assert 5.0 in slept                        # طُبِّقت مهلة الحساب
+    slept.clear()
+    scr.fill(FieldOp("quantity", "20271", TYPE_KEYS, enter=True), {})       # خانة عادية
+    assert 5.0 not in slept                    # لا مهلة حساب لغير rate_divide
+
+
+def test_fill_extra_step_delay_before_store(monkeypatch):
+    """الهاتف والملاحظات (آخر الحقول) → مهلة step_delay إضافية لتثبيت القيمة قبل «تخزين»."""
+    from core.writers.moneyado.fields import FieldOp
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({}, step_delay=0.3)
+    scr._control = lambda cfg, method="": MagicMock()
+    slept = []
+    monkeypatch.setattr(screens_mod.time, "sleep", lambda s: slept.append(s))
+    for key in ("payment_method", "notes"):
+        slept.clear()
+        scr.fill(FieldOp(key, "x", TYPE_KEYS, enter=True), {})
+        assert slept.count(0.3) == 2, f"{key}: متوقّع مهلتَي step_delay (عادية + إضافية)"
+    # خانة عادية → مهلة step_delay واحدة فقط
+    slept.clear()
+    scr.fill(FieldOp("customer", "760", TYPE_KEYS, enter=True), {})
+    assert slept.count(0.3) == 1
+
+
 def test_sell_commission_fieldop_carries_enter():
     """fields.py يُصدر commission_rate وcommission بـ enter=True (تفعيل متسلسل للخانات)."""
     ops = build_sell_fields(make_sell_leg(commission=-35.0))
@@ -737,15 +772,16 @@ def test_sell_fields_commission_zero_with_enter_when_none():
 # ── اختبارات build_buy_fields ─────────────────────────────────────────────────
 def test_buy_fields_order_and_supplier():
     ops = build_buy_fields(make_buy_leg())
-    # يطابق شاشة الشراء الفعلية: الرقم الإشاري، × و/ للسعر، نسبة العمولة+العمولة، ثم «المبلغ المسلّم»
+    # الترتيب الدقيق لشاشة الشراء: الحساب، (رقم المعاملة+التاريخ AO)، الرقم الإشاري، العملة،
+    # الكمية قبل السعر، ×و/، (المبلغ الصافي AO)، العمولة، (المسلّم AO)، الزبون، الهاتف.
     assert keys(ops) == [
-        "foreign_account", "reference_number", "currency_type", "rate_multiply",
-        "rate_divide", "quantity", "commission_rate", "commission", "amount_delivered",
-        "customer", "payment_method",
+        "foreign_account", "transaction_number", "date_field", "reference_number",
+        "currency_type", "quantity", "rate_multiply", "rate_divide", "net_amount",
+        "commission_rate", "commission", "amount_delivered", "customer", "payment_method",
     ]
-    # رقم المعاملة/المبلغ الصافي يحسبهما البرنامج → لا يُلمسان
-    assert "transaction_number" not in keys(ops)
-    assert "net_amount" not in keys(ops)
+    # حقول AO يحسبها/يملؤها البرنامج → ENTER_ONLY (Enter فقط، بلا كتابة)
+    for ao in ("transaction_number", "date_field", "net_amount", "amount_delivered"):
+        assert by_key(ops, ao).method == ENTER_ONLY, ao
     # الرقم الإشاري (نفس رقم البيع)
     assert by_key(ops, "reference_number").value == "A6779"
     # المورد في خانة الزبون: كوده + Enter (أولوية المورد)
@@ -772,10 +808,11 @@ def test_buy_fields_commission_sequence_and_delivered():
 
 
 def test_buy_fields_every_typed_field_has_enter():
-    """كل خانة تُكتب فيها قيمة في شاشة الشراء بـ enter=True؛ «المبلغ المسلّم» = ENTER_ONLY."""
+    """كل خانة تُكتب فيها قيمة في شاشة الشراء بـ enter=True؛ حقول AO = ENTER_ONLY."""
+    ao = {"transaction_number", "date_field", "net_amount", "amount_delivered"}
     ops = build_buy_fields(make_buy_leg(payment_method="فودافون كاش", recipient_name="محمد"))
     for op in ops:
-        if op.key == "amount_delivered":
+        if op.key in ao:
             assert op.method == ENTER_ONLY, op.key
         else:
             assert op.enter is True, f"{op.key} بلا enter=True"

@@ -16,7 +16,7 @@ from typing import Optional
 from ...config import load_json_config
 from ...constants import OperationType
 from ...logging_setup import get_logger
-from .fields import SELECT, FieldOp
+from .fields import ENTER_ONLY, SELECT, FieldOp
 
 log = get_logger(__name__)
 
@@ -195,6 +195,12 @@ class MoneyadoScreen(ScreenController):
         OperationType.SELL: "ايصال قبض",
         OperationType.BUY: "ايصال صرف",
     }
+    # خانات يحسب البرنامج قيمةً تابعة بعد Enter عليها (المبلغ الصافي بعد السعر في شاشة الشراء
+    # §11.3) → مهلة إضافية (moneyado_enter_wait) بعد Enter قبل الحقل التالي كي يتمّ الحساب.
+    _SETTLE_AFTER_ENTER = {"rate_divide"}
+    # الخانات الأخيرة قبل «تخزين» (الهاتف/الملاحظات) → مهلة step_delay إضافية لتثبيت القيمة قبل
+    # الضغط على «تخزين» في شاشتَي البيع والشراء (§11.3).
+    _EXTRA_SETTLE_BEFORE_STORE = {"payment_method", "notes"}
 
     def __init__(
         self,
@@ -206,6 +212,7 @@ class MoneyadoScreen(ScreenController):
         open_timeout: float = 30.0,
         open_retry_wait: float = 6.0,
         open_click_retries: int = 3,
+        enter_wait: float = 3.0,
         pid: Optional[int] = None,
     ) -> None:
         self._config = config
@@ -215,6 +222,8 @@ class MoneyadoScreen(ScreenController):
         # مهل الجهاز البطيء (§11.3): بعد تثبيت النافذة، وبعد تعبئة كل حقل — قابلة للضبط من .env.
         self._connect_wait = connect_wait
         self._step_delay = step_delay
+        # مهلة انتظار حساب البرنامج بعد Enter على خانة حاسبة (المبلغ الصافي §11.3) = MONEYADO_ENTER_WAIT.
+        self._enter_wait = enter_wait
         # ربط فورم العملية بعد ظهوره (§11.3).
         self._open_timeout = open_timeout
         # فتح الشاشة من القائمة: انتظار ظهور الفورم بعد كل ضغطة، وعدد إعادات الضغط إن ابتُلع
@@ -237,6 +246,7 @@ class MoneyadoScreen(ScreenController):
             open_timeout=getattr(settings, "moneyado_open_timeout", 30.0),
             open_retry_wait=getattr(settings, "moneyado_open_retry_wait", 6.0),
             open_click_retries=getattr(settings, "moneyado_open_click_retries", 3),
+            enter_wait=getattr(settings, "moneyado_enter_wait", 3.0),
             pid=getattr(settings, "moneyado_pid", None),
         )
 
@@ -586,6 +596,8 @@ class MoneyadoScreen(ScreenController):
     _NON_CRITICAL_FIELDS = {"country", "payment_method"}
 
     def fill(self, field_op: FieldOp, field_cfg: dict) -> None:
+        log.debug("fill: %s = %r enter=%s enter_only=%s",
+                  field_op.key, field_op.value, field_op.enter, field_op.method == ENTER_ONLY)
         try:
             self._fill(field_op, field_cfg)
         except Exception as exc:
@@ -634,7 +646,14 @@ class MoneyadoScreen(ScreenController):
             ctrl.type_keys(field_op.value, with_spaces=True, set_foreground=True)
         if field_op.enter:
             ctrl.type_keys("{ENTER}", set_foreground=True)
+            # خانة حاسبة (السعر → المبلغ الصافي §11.3): مهلة إضافية بعد Enter كي يُتمّ البرنامج
+            # الحساب قبل الانتقال للحقل التالي (وإلا يبقى «المبلغ الصافي» غير محسوب).
+            if field_op.key in self._SETTLE_AFTER_ENTER:
+                time.sleep(self._enter_wait)
         time.sleep(self._step_delay)  # مهلة استقرار بعد كل حقل (جهاز بطيء §11.3)
+        # الحقول الأخيرة (الهاتف/الملاحظات) → مهلة step_delay إضافية لتثبيت القيمة قبل «تخزين».
+        if field_op.key in self._EXTRA_SETTLE_BEFORE_STORE:
+            time.sleep(self._step_delay)
 
     def read_text(self, field_cfg: dict) -> str:
         ctrl = self._control(field_cfg, "read")
