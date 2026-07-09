@@ -308,6 +308,14 @@ class MoneyadoScreen(ScreenController):
         self._window = self._app.window(class_name=form_class).wait(
             "ready visible enabled", timeout=wait_timeout
         )
+        # تحقّق دفاعي (§0): الكائن المربوط فورم العملية الصحيح (ThunderRT6FormDC) لا نافذة أخرى.
+        # (wait() يُرجع DialogWrapper يلفّ الفورم — نتحقّق بالصنف لا بوجود child_window، فالـ
+        #  wrappers لا تملك child_window أصلًا؛ الأزرار تُحدَّد عبر descendants في _button.)
+        actual_class = self._window.class_name()
+        if actual_class != form_class:
+            raise RuntimeError(
+                f"فورم خاطئ مربوط لعملية {operation.value}: {actual_class!r} بدل {form_class!r} (§0)."
+            )
 
         # 🔴 لا نحرّك النافذة (move_window كان يُغلق MONEYADO على الجهاز): الإحداثيات نسبية
         # للفورم (rel = rect - form_rect) فتعمل عند أي موضع للنافذة — لا حاجة لتثبيت الموضع (§11.3).
@@ -599,17 +607,24 @@ class MoneyadoScreen(ScreenController):
 
     # ── الأزرار المسموحة فقط (§2.3) ──────────────────────────────────────────
     def _button(self, cfg: dict):
-        # الأزرار لها عناوين ثابتة («تخزين»/«رجوع») → تبقى المطابقة بالعنوان (§11.3).
+        """يحدّد زرًّا على الفورم بعنوانه (title_re) + صنفه.
+
+        🔴 self._window كائن ملموس (DialogWrapper) لا يدعم child_window؛ و descendants على
+        backend=win32 **تتجاهل title_re** (تُرجع كل أزرار الصنف). لذا نعدّد بالصنف ونطابق النصّ
+        بالـ regex يدويًا (نظير click_button)، ونفضّل الزر المرئي الفعّال (§0/§11.3).
+        """
         if self._window is None:
             raise RuntimeError("الاتصال بالشاشة غير مُهيّأ (connect لم يُستدعَ).")
         title_re = cfg["title_re"]
-        btn_class = cfg.get("class")
-        # صنف VB6 (ThunderRT6CommandButton) أضمن من control_type على backend=win32.
-        if btn_class:
-            btn = self._window.child_window(title_re=title_re, class_name=btn_class)
-        else:
-            btn = self._window.child_window(title_re=title_re, control_type="Button")
-        btn.wait("ready visible enabled", timeout=self._timeout)
+        btn_class = cfg.get("class") or self._DEFAULT_MAIN_BUTTON_CLASS  # صنف VB6 (أضمن من control_type)
+        pattern = re.compile(title_re)
+        matches = [b for b in self._window.descendants(class_name=btn_class)
+                   if pattern.search(b.window_text() or "")]
+        btn = next((b for b in matches if _actionable(b)), matches[0] if matches else None)
+        if btn is None:
+            raise RuntimeError(
+                f"زر غير موجود على الفورم: title_re={title_re!r} class={btn_class!r} (§11.3)."
+            )
         return btn
 
     def press_store(self, operation: OperationType) -> None:

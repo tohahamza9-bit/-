@@ -377,6 +377,7 @@ def test_bind_form_pins_concrete_window_and_recaptures_form_rect():
     scr = MoneyadoScreen({"buy_screen": {"form_class": "ThunderRT6FormDC"}}, connect_wait=0)
     app, spec, concrete = MagicMock(), MagicMock(), MagicMock()
     concrete.rectangle.return_value = "BUY_RECT"
+    concrete.class_name.return_value = "ThunderRT6FormDC"   # الفورم الصحيح
     app.window.return_value = spec
     spec.wait.return_value = concrete                 # wait() يُرجع الكائن الملموس
     scr._app = app
@@ -384,6 +385,50 @@ def test_bind_form_pins_concrete_window_and_recaptures_form_rect():
     assert scr._window is concrete                    # مثبّت على الملموس لا الـ WindowSpecification
     assert scr._form_rect == "BUY_RECT"               # form_rect من الفورم المربوط الحالي
     spec.rectangle.assert_not_called()                # لم يُلتقط rect من الـ spec الكسول
+
+
+def test_bind_form_rejects_wrong_window_class():
+    """الكائن المربوط ليس ThunderRT6FormDC → RuntimeError «فورم خاطئ» (§0)."""
+    from core.constants import OperationType
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({"buy_screen": {"form_class": "ThunderRT6FormDC"}}, connect_wait=0)
+    app, spec, wrong = MagicMock(), MagicMock(), MagicMock()
+    wrong.class_name.return_value = "SomeOtherDialog"
+    app.window.return_value = spec
+    spec.wait.return_value = wrong
+    scr._app = app
+    with pytest.raises(RuntimeError, match="فورم خاطئ"):
+        scr._bind_form(OperationType.BUY)
+
+
+def test_button_matches_title_among_descendants():
+    """_button يعدّد أزرار الصنف ويطابق العنوان بالـ regex يدويًا (descendants تتجاهل title_re)."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({})
+    win = MagicMock()
+    store, back, other = _fake_button("تخزين"), _fake_button("رجوع"), _fake_button("ايصال صرف")
+    win.descendants.return_value = [other, back, store]     # كما لو تجاهلت title_re
+    scr._window = win
+    btn = scr._button({"title_re": "^تخزين$", "class": "ThunderRT6CommandButton"})
+    assert btn is store                                     # طُوبق «تخزين» بالضبط
+    assert win.descendants.call_args.kwargs["class_name"] == "ThunderRT6CommandButton"
+
+
+def test_button_missing_raises():
+    """لا زر يطابق العنوان → RuntimeError صريح (لا child_window على wrapper)."""
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({})
+    win = MagicMock()
+    win.descendants.return_value = [_fake_button("رجوع")]
+    scr._window = win
+    with pytest.raises(RuntimeError, match="زر غير موجود"):
+        scr._button({"title_re": "^تخزين$", "class": "ThunderRT6CommandButton"})
 
 
 def test_confirm_store_on_main_swallows_errors_after_store():
