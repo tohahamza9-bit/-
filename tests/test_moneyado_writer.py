@@ -771,6 +771,18 @@ def test_buy_fields_commission_sequence_and_delivered():
     assert k.index("commission_rate") < k.index("commission") < k.index("amount_delivered") < k.index("customer")
 
 
+def test_buy_fields_every_typed_field_has_enter():
+    """كل خانة تُكتب فيها قيمة في شاشة الشراء بـ enter=True؛ «المبلغ المسلّم» = ENTER_ONLY."""
+    ops = build_buy_fields(make_buy_leg(payment_method="فودافون كاش", recipient_name="محمد"))
+    for op in ops:
+        if op.key == "amount_delivered":
+            assert op.method == ENTER_ONLY, op.key
+        else:
+            assert op.enter is True, f"{op.key} بلا enter=True"
+    # تأكيد شمول الخانات التي كانت ناقصة
+    assert {"reference_number", "rate_multiply", "quantity", "notes"} <= set(keys(ops))
+
+
 def test_buy_fields_enter_on_currency_country_payment():
     """currency_type والبلد (كود الدفع) ووسيلة الدفع (الهاتف) بـ Enter — بلاه تبقى الخانات فارغة."""
     ops = build_buy_fields(make_buy_leg(payment_method="فودافون كاش"))

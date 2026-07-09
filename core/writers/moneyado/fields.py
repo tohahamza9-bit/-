@@ -167,9 +167,9 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
     # (1) الحساب الأجنبي (الخزينة) → type_keys ثم Enter
     ops.append(FieldOp("foreign_account", _treasury_value(leg), TYPE_KEYS, enter=True))
 
-    # (2) الرقم الإشاري (نفس رقم البيع للطرف المشتقّ) — يُملأ إن وُجد. رقم المعاملة يولّده البرنامج.
+    # (2) الرقم الإشاري (نفس رقم البيع للطرف المشتقّ) — يُملأ إن وُجد + Enter. رقم المعاملة يولّده البرنامج.
     if leg.reference_number:
-        ops.append(FieldOp("reference_number", leg.reference_number, TYPE_KEYS))
+        ops.append(FieldOp("reference_number", leg.reference_number, TYPE_KEYS, enter=True))
 
     # (3) نوع العملة — **بالكود لا بالاسم** في شاشة الشراء (قرار صاحب العمل من الشاشة الحقيقية):
     #     4=مصري، 3=تونسي — تُكتب في خانة رمز العملة + Enter (يُثبّت الرمز وتتحدّث المنسدلة المجاورة؛
@@ -177,14 +177,14 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
     if leg.currency in MONEYADO_CURRENCY_CODE:
         ops.append(FieldOp("currency_type", MONEYADO_CURRENCY_CODE[leg.currency], TYPE_KEYS, enter=True))
 
-    # (4) السعر × الضارب = 1 دائمًا (ثابت §11.1) — مطابقة شاشة الشراء الفعلية (× و/)
-    ops.append(FieldOp("rate_multiply", "1", TYPE_KEYS))
+    # (4) السعر × الضارب = 1 دائمًا (ثابت §11.1) — مطابقة شاشة الشراء الفعلية (× و/) + Enter
+    ops.append(FieldOp("rate_multiply", "1", TYPE_KEYS, enter=True))
 
     # (5) السعر / القسمة = السعر المطبَّع (§3.6). Enter بعدها يفعّل «المبلغ الصافي» (تسلسل §11.3).
     ops.append(FieldOp("rate_divide", leg.price_normalized or "", TYPE_KEYS, enter=True))
 
-    # (6) الكمية (المبلغ الأجنبي)، فاصل الآلاف مُشال
-    ops.append(FieldOp("quantity", _num(leg.amount), TYPE_KEYS))
+    # (6) الكمية (المبلغ الأجنبي)، فاصل الآلاف مُشال + Enter
+    ops.append(FieldOp("quantity", _num(leg.amount), TYPE_KEYS, enter=True))
 
     # (7) نسبة العمولة = "0" + Enter (كشاشة البيع §6.2): لا تُترك فارغة، ثم Enter يفعّل تسلسل
     #     «العمولة» ثم «المبلغ المسلّم» (خانات متسلسلة التفعيل §11.3).
@@ -216,8 +216,8 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
     if leg.phone:
         ops.append(FieldOp("payment_method", leg.phone, TYPE_KEYS, enter=True))
 
-    # (11) ملاحظات = اسم المستلم إن وُجد
+    # (13) ملاحظات = اسم المستلم إن وُجد + Enter
     if leg.recipient_name:
-        ops.append(FieldOp("notes", leg.recipient_name, TYPE_KEYS))
+        ops.append(FieldOp("notes", leg.recipient_name, TYPE_KEYS, enter=True))
 
     return ops
