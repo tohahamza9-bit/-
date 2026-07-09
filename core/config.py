@@ -8,6 +8,7 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,6 +42,7 @@ class Settings(BaseSettings):
     # ── MONEYADO RPA ──
     moneyado_fields_file: str = Field(default=str(CONFIG_DIR / "moneyado_fields.json"))
     moneyado_password_encrypted: str = Field(default="")  # DPAPI (§2.1) — ليس نصًّا واضحًا
+    moneyado_pid: Optional[int] = Field(default=None)     # اختياري: PID نسخة stock.exe المحدّدة (يتفادى التباس تعدّد النسخ §0)
     screenshot_dir: str = Field(default=str(ROOT / "artifacts" / "screenshots"))
 
     # ── مهل MONEYADO RPA (جهاز بطيء/Windows قديم §11.3) — ثوانٍ، قابلة للضبط من .env ──

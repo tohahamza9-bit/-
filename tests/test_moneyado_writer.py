@@ -284,6 +284,76 @@ def test_press_enter_on_active_sends_enter_via_form_window():
     assert win.type_keys.call_args.args[0] == "{ENTER}"
 
 
+def test_connect_app_rejects_multiple_instances():
+    """تعدّد نسخ stock.exe → RuntimeError واضح (لا اتصال عشوائي §0)، بلا استدعاء connect."""
+    from core.constants import OperationType
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({"sell_screen": {}, "buy_screen": {}})
+    scr._list_stock_pids = MagicMock(return_value=[111, 222, 333])
+    orig = screens_mod.Application
+    screens_mod.Application = MagicMock()
+    try:
+        with pytest.raises(RuntimeError, match="التباس"):
+            scr._connect_app(OperationType.BUY)
+        screens_mod.Application.assert_not_called()      # لم نتصل بأي نسخة
+    finally:
+        screens_mod.Application = orig
+
+
+def test_connect_app_errors_when_no_instance():
+    """صفر نسخة → RuntimeError «شغّل MONEYADO»."""
+    from core.constants import OperationType
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({"sell_screen": {}, "buy_screen": {}})
+    scr._list_stock_pids = MagicMock(return_value=[])
+    with pytest.raises(RuntimeError, match="لا نسخة"):
+        scr._connect_app(OperationType.BUY)
+
+
+def test_connect_app_single_instance_connects_by_pid():
+    """نسخة واحدة → اتصال بالـ PID الوحيد (لا path عشوائي)."""
+    from core.constants import OperationType
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({"sell_screen": {}, "buy_screen": {}})
+    scr._list_stock_pids = MagicMock(return_value=[4242])
+    orig = screens_mod.Application
+    app_ctor = MagicMock()
+    screens_mod.Application = app_ctor
+    try:
+        scr._connect_app(OperationType.BUY)
+        app_ctor.return_value.connect.assert_called_once()
+        assert app_ctor.return_value.connect.call_args.kwargs["process"] == 4242
+    finally:
+        screens_mod.Application = orig
+
+
+def test_connect_app_pinned_pid_skips_enumeration():
+    """MONEYADO_PID مثبّت → اتصال به مباشرة بلا عدّ النسخ."""
+    from core.constants import OperationType
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({"sell_screen": {}, "buy_screen": {}}, pid=9999)
+    scr._list_stock_pids = MagicMock(side_effect=AssertionError("يجب ألا يُعدّ النسخ عند PID مثبّت"))
+    orig = screens_mod.Application
+    app_ctor = MagicMock()
+    screens_mod.Application = app_ctor
+    try:
+        scr._connect_app(OperationType.SELL)
+        assert app_ctor.return_value.connect.call_args.kwargs["process"] == 9999
+    finally:
+        screens_mod.Application = orig
+
+
 def test_confirm_store_on_main_presses_enter_on_top_window():
     """confirm_store_on_main يضغط Enter على النافذة الرئيسية للتطبيق (top_window) لا على الفورم."""
     from core.writers.moneyado.screens import MoneyadoScreen

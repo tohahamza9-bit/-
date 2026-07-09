@@ -36,6 +36,54 @@ def _actionable(ctrl) -> bool:
     except Exception:
         return True
 
+
+def _pids_by_image_name(image_name: str) -> list[int]:
+    """قائمة PIDs لكل العمليات التي اسم صورتها image_name (عبر ToolHelp32 — بلا psutil).
+
+    يُستخدم لعدّ نسخ stock.exe: أكثر من نسخة = التباس اتصال (§0) → رفض بدل اتصال عشوائي.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+    k32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+
+    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        return []
+    pids: list[int] = []
+    try:
+        entry = PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        target = image_name.lower()
+        ok = k32.Process32First(snap, ctypes.byref(entry))
+        while ok:
+            exe = entry.szExeFile.decode("mbcs", "ignore").lower()
+            if exe == target:
+                pids.append(int(entry.th32ProcessID))
+            ok = k32.Process32Next(snap, ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(snap)
+    return pids
+
 # ── استيراد محروس (§11.3): البيئة الاختبارية بلا pywinauto/برنامج MONEYADO ──
 try:
     from pywinauto import Application, Desktop  # type: ignore
@@ -151,9 +199,12 @@ class MoneyadoScreen(ScreenController):
         open_timeout: float = 30.0,
         open_retry_wait: float = 6.0,
         open_click_retries: int = 3,
+        pid: Optional[int] = None,
     ) -> None:
         self._config = config
         self._timeout = timeout
+        # PID نسخة stock.exe المثبّتة (اختياري): يُتصل به حصريًا فيتفادى التباس تعدّد النسخ (§0).
+        self._pid = pid
         # مهل الجهاز البطيء (§11.3): بعد تثبيت النافذة، وبعد تعبئة كل حقل — قابلة للضبط من .env.
         self._connect_wait = connect_wait
         self._step_delay = step_delay
@@ -179,6 +230,7 @@ class MoneyadoScreen(ScreenController):
             open_timeout=getattr(settings, "moneyado_open_timeout", 30.0),
             open_retry_wait=getattr(settings, "moneyado_open_retry_wait", 6.0),
             open_click_retries=getattr(settings, "moneyado_open_click_retries", 3),
+            pid=getattr(settings, "moneyado_pid", None),
         )
 
     # ── إعداد الحقول والأزرار ────────────────────────────────────────────────
@@ -203,16 +255,38 @@ class MoneyadoScreen(ScreenController):
         self._connect_app(operation, pid=pid)
         self._bind_form(operation)
 
+    def _list_stock_pids(self, process_name: str) -> list[int]:
+        """PIDs العمليات باسم process_name (يُعزل للاختبار)."""
+        return _pids_by_image_name(process_name)
+
     def _connect_app(self, operation: OperationType, *, pid: Optional[int] = None) -> None:
-        """يتصل بعملية MONEYADO (بلا عنوان — VB6) ويهيّئ self._app. لا يربط فورمًا بعد."""
+        """يتصل بعملية MONEYADO (بلا عنوان — VB6) ويهيّئ self._app. لا يربط فورمًا بعد.
+
+        🔴 لا اتصال عشوائي عند تعدّد النسخ (§0): إن ضُبِط PID (وسيط صريح أو MONEYADO_PID) نتصل
+        به حصريًا؛ وإلا نعدّ نسخ stock.exe — أكثر من واحدة = التباس → RuntimeError واضح (لا نخمّن
+        أيّها هي الصحيحة، كي لا نُدخِل حوالة في نافذة نسخة خطأ). صفر نسخة → خطأ «شغّل MONEYADO».
+        """
         if not _PYWINAUTO_AVAILABLE:
             raise RuntimeError("pywinauto غير متاح — لا يمكن الاتصال بشاشة MONEYADO.")
         screen = self._screen(operation)
-        # نوافذ MONEYADO (VB6/ThunderRT6FormDC) بلا عنوان → نتصل بالعملية لا بالعنوان.
         process_name = screen.get("process_name", self._DEFAULT_PROCESS)
-        # لو تعدّدت النسخ، مرِّر PID صريحًا؛ وإلا pywinauto يتصل بأحدث عملية بالاسم.
-        connect_kwargs = {"process": pid} if pid is not None else {"path": process_name}
-        self._app = Application(backend="win32").connect(timeout=self._timeout, **connect_kwargs)
+
+        # (1) PID مثبّت (وسيط صريح أو MONEYADO_PID من الإعداد) → اتصال حصري به.
+        target_pid = pid if pid is not None else self._pid
+        if target_pid is not None:
+            self._app = Application(backend="win32").connect(timeout=self._timeout, process=target_pid)
+            return
+
+        # (2) بلا PID مثبّت → عدّ النسخ. أكثر من واحدة = التباس صريح (لا اتصال عشوائي §0).
+        pids = self._list_stock_pids(process_name)
+        if len(pids) > 1:
+            raise RuntimeError(
+                f"وُجد {len(pids)} نسخ من {process_name} (PIDs={sorted(pids)}) — التباس اتصال. "
+                f"أغلِق الزائد وأبقِ نسخة واحدة، أو ثبّت MONEYADO_PID في .env (§0)."
+            )
+        if not pids:
+            raise RuntimeError(f"لا نسخة عاملة من {process_name} — شغّل MONEYADO أولًا.")
+        self._app = Application(backend="win32").connect(timeout=self._timeout, process=pids[0])
 
     def _bind_form(self, operation: OperationType, *, timeout: Optional[float] = None) -> None:
         """يلتقط فورم العملية (بيع/شراء) المفتوح وينتظر جاهزيته + مرجع الإحداثيات + حارس الشاشة.
