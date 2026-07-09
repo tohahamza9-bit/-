@@ -4,7 +4,8 @@
 """
 from __future__ import annotations
 
-from core.constants import Currency
+from core.constants import Currency, TreasuryType
+from core.models import SupplierRecord
 from core.parsing import parse_message
 from core.queue.commission import compute_commission
 from core.writers.moneyado.fields import build_sell_fields
@@ -12,6 +13,11 @@ from core.writers.moneyado.fields import build_sell_fields
 
 async def _treas(db):
     return await db.treasuries.all_active()
+
+
+async def _suppliers(db):
+    await db.suppliers.upsert(SupplierRecord(code="760", name="طه", aliases=["طه"]))
+    return await db.suppliers.all_active()
 
 
 # نصّ SI1417 (خصم 1%): قبل=20475، بعد=20271 → عمولة −204، خزينة «ابو يوسف» (77)
@@ -131,3 +137,92 @@ async def test_si_plain_no_discount_has_no_commission(db):
     assert leg.commission is None               # بلا خصم → بلا عمولة
     ops = {op.key: op.value for op in build_sell_fields(leg)}
     assert ops["commission"] == "0"             # تُكتب 0 (لا خصم)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SI مع مورد (بيع + شراء §5/§6): «المورد: طه 5.72» بدل «الخزينة:»
+# ═════════════════════════════════════════════════════════════════════════════
+SI1417_SUPPLIER_TEXT = (
+    "رقم العملية: SI1417\n"
+    "رقم المستلم: 01037354643\n"
+    "اسم الزبون: 570 ايهاب ابو حميد\n"
+    "القيمة قبل الخصم: 20475 ج.م\n"
+    "القيمة بعد الخصم 1%: 20271 ج.م\n"
+    "السعر: 5.9\n"
+    "نوع التحويل: فودافون كاش\n"
+    "المورد: طه 5.72"
+)
+
+
+async def test_si_supplier_line_captures_name_and_rate(db):
+    # (١) «المورد: طه 5.72» → اسم المورد وسعره يُلتقطان
+    leg = parse_message(SI1417_SUPPLIER_TEXT, await _treas(db), await _suppliers(db)).leg
+    assert leg.supplier is not None
+    assert leg.supplier.name == "طه"
+    assert leg.supplier.code == "760"           # حُلّ من القائمة البيضاء
+    assert leg.supplier_price_raw == "5.72"
+
+
+async def test_si_supplier_default_sell_and_buy_treasury(db):
+    # (٢+٣) «المورد:» بلا «الخزينة:» → خزينة sell_and_buy افتراضية (خصم 1% لوجود «بعد الخصم»)
+    leg = parse_message(SI1417_SUPPLIER_TEXT, await _treas(db), await _suppliers(db)).leg
+    assert leg.is_si_format is True
+    assert leg.treasury is not None
+    assert leg.treasury.type == TreasuryType.SELL_AND_BUY
+    assert leg.treasury.code == "72"            # «خصم 1%»
+    # الزبون يبقى طرف بيع (لا يُحوَّل لشراء بسبب المورد)
+    from core.constants import OperationType
+    assert leg.operation == OperationType.SELL
+
+
+async def test_si_supplier_keeps_customer_amounts_and_commission(db):
+    # القيمتان والعمولة كما في SI بخصم عادية (المورد لا يغيّرهما)
+    leg = parse_message(SI1417_SUPPLIER_TEXT, await _treas(db), await _suppliers(db)).leg
+    assert leg.customer_code == "570"
+    assert leg.customer_name == "ايهاب ابو حميد"
+    assert leg.amount == 20475
+    assert leg.amount_after_discount == 20271
+    assert leg.commission == -204.0
+    assert leg.currency == Currency.EGP
+
+
+async def test_si_supplier_no_discount_defaults_saafi(db):
+    # بلا سطر «بعد الخصم» + مورد → خزينة sell_and_buy الافتراضية «صافي» (لا خصم)
+    text = (
+        "رقم العملية: SI1500\nرقم المستلم: 01037354643\n"
+        "اسم الزبون: 570 ايهاب ابو حميد\n"
+        "القيمة (صافي): 20000 ج.م\nالسعر: 5.9\n"
+        "نوع التحويل: فودافون كاش\nالمورد: طه 5.72"
+    )
+    leg = parse_message(text, await _treas(db), await _suppliers(db)).leg
+    assert leg.supplier is not None and leg.supplier.name == "طه"
+    assert leg.treasury is not None
+    assert leg.treasury.type == TreasuryType.SELL_AND_BUY
+    assert leg.treasury.name == "صافي"
+    assert leg.amount_after_discount is None
+
+
+async def test_si_supplier_explicit_treasury_takes_precedence(db):
+    # (٤) «الخزينة:» مذكورة أيضًا → تُقرأ كالمعتاد ولا تُستبدَل بالافتراضية؛ المورد يبقى ملتقَطًا
+    text = SI1417_SUPPLIER_TEXT + "\nالخزينة: ابو يوسف"
+    leg = parse_message(text, await _treas(db), await _suppliers(db)).leg
+    assert leg.treasury is not None and leg.treasury.code == "77"   # ابو يوسف (لا الافتراضية)
+    assert leg.supplier is not None and leg.supplier.name == "طه"
+    assert leg.supplier_price_raw == "5.72"
+
+
+async def test_si_supplier_unresolved_name_kept(db):
+    # مورد خارج القائمة البيضاء → يُحتفظ بالاسم (code=None) بلا فشل
+    text = SI1417_SUPPLIER_TEXT.replace("المورد: طه 5.72", "المورد: مجهول 5.72")
+    leg = parse_message(text, await _treas(db), await _suppliers(db)).leg
+    assert leg.supplier is not None
+    assert leg.supplier.name == "مجهول" and leg.supplier.code is None
+    assert leg.supplier_price_raw == "5.72"
+
+
+async def test_si_plain_unaffected_by_supplier_feature(db):
+    # SI بخصم عادية (بـ«الخزينة:» بلا «المورد:») لم تتأثر: بلا مورد، خزينة كما هي
+    leg = parse_message(SI1417_TEXT, await _treas(db), await _suppliers(db)).leg
+    assert leg.supplier is None
+    assert leg.supplier_price_raw is None
+    assert leg.treasury is not None and leg.treasury.code == "77"   # ابو يوسف كما كانت

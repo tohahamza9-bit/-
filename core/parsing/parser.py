@@ -56,7 +56,7 @@ _COUNTRIES = {"تونس": "تونس", "مصر": "مصر", "ليبيا": "ليب�
 # ── عناوين الصيغة SI (§3.3) ──────────────────────────────────────────────────
 _SI_LABELS = [
     "رقم العمليه", "رقم المستلم", "اسم الزبون", "القيمه قبل", "القيمه بعد",
-    "السعر", "نوع التحويل", "الخزينه", "القيمه",
+    "السعر", "نوع التحويل", "الخزينه", "القيمه", "المورد",
 ]
 
 
@@ -170,7 +170,30 @@ def _parse_si_fields(text: str) -> dict:
             f["payment"] = normalize_payment(val) or (val or None)
         elif head.startswith("الخزينه"):
             f["treasury_name"] = val or None
+        elif head.startswith("المورد"):
+            # SI بيع+شراء (§5/§6): «المورد: طه 5.72» → مورد الطرف الثاني وسعره.
+            scode, sname, srate = _split_supplier(val)
+            f["supplier_code"], f["supplier_name"], f["supplier_rate"] = scode, sname, srate
     return f
+
+
+def _split_supplier(val: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """سطر «المورد: [كود] اسم [سعر]» → (code, name, rate).
+
+    «طه 5.72» → (None, «طه», «5.72»)؛ «760 طه 5.72» → («760», «طه», «5.72»).
+    السعر = آخر رمز رقمي؛ الكود = أول رمز أرقام بحت؛ الباقي اسم.
+    """
+    tokens = (val or "").split()
+    if not tokens:
+        return None, None, None
+    rate: Optional[str] = None
+    if _NUMERIC_TOKEN_RE.match(tokens[-1]):
+        rate, tokens = tokens[-1], tokens[:-1]
+    code: Optional[str] = None
+    if tokens and tokens[0].isdigit():
+        code, tokens = tokens[0], tokens[1:]
+    name = " ".join(tokens).strip() or None
+    return code, name, rate
 
 
 # ── الصيغة A (§3.2) ──────────────────────────────────────────────────────────
@@ -394,6 +417,28 @@ def _build_leg(
             if not explicit:                 # §5.3: الطرف مورد ⇒ شراء
                 op = OperationType.BUY
 
+    # SI بيع+شراء (§5/§6): سطر «المورد: طه 5.72» → الزبون طرف بيع، والمورد طرف الشراء.
+    # الزبون يبقى بيعًا (op=SELL، is_supplier=False)؛ المورد يُحمَل في leg.supplier ليُشتقّ منه
+    # طرف الشراء لاحقًا (pipeline._maybe_synthesize_buy_leg). لو لم تُذكَر «الخزينة:» صراحةً →
+    # خزينة sell_and_buy افتراضيًا (خصم1% عند وجود «بعد الخصم»، وإلا «صافي») ليُخلَّق الطرفان (§6.1).
+    supplier_name_si = f.get("supplier_name")
+    if is_si and supplier_name_si:
+        srec2 = resolve_supplier(supplier_name_si, suppliers)
+        supplier_ref = (
+            SupplierRef(code=srec2.code, name=srec2.name) if srec2 is not None
+            else SupplierRef(code=f.get("supplier_code"), name=supplier_name_si)
+        )
+        if tref is None:                     # بلا «الخزينة:» → خزينة sell_and_buy افتراضية (§6.1)
+            default_tname = "خصم 1%" if f.get("amount_after") is not None else "صافي"
+            trec_sab = resolve_treasury(default_tname, treasuries)
+            if trec_sab is not None:
+                if currency is None:
+                    currency = trec_sab.currency
+                tref = TreasuryRef(
+                    code=trec_sab.code, name=trec_sab.name, type=trec_sab.type,
+                    currency=trec_sab.currency or currency,
+                )
+
     # السعر حسب العملة (§3.6)
     price_raw, price_norm = normalize_price(f.get("price_raw"), currency or Currency.EGP)
 
@@ -419,6 +464,7 @@ def _build_leg(
         customer_code=f.get("customer_code"),
         customer_name=name,
         supplier=supplier_ref,
+        supplier_price_raw=f.get("supplier_rate"),
         price_raw=price_raw,
         price_normalized=price_norm,
         amount=amount,

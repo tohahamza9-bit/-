@@ -76,6 +76,7 @@ class ParsedLeg(BaseModel):
     customer_code: Optional[str] = None       # الكود = مرساة الهوية (§1.1)
     customer_name: Optional[str] = None       # يُتسامح مع خطأ الإملاء
     supplier: Optional[SupplierRef] = None     # للطرف الثاني (شراء من مورد)
+    supplier_price_raw: Optional[str] = None   # سعر المورد من سطر «المورد: طه 5.72» في SI بيع+شراء
     price_raw: Optional[str] = None            # السعر كما ورد
     price_normalized: Optional[str] = None     # بعد §3.6 (تونسي 0.xxxx)
     amount: Optional[float] = None             # المبلغ قبل الخصم (§6.2)
