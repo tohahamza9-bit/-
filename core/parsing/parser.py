@@ -414,12 +414,13 @@ def parse_completion_fragment(
     عن الأنماط بلا اعتماد على ترتيب الأسطر — أمتن للصيغ المتنوّعة من التحليل سطرًا-بسطر.
 
     يلتقط: كود الزبون (2-4 خانات مستقلّة)، الاسم (كلمات عربية متبقّية)، السعر (أصغر رقم عشري —
-    السعر لا المبلغ)، الخزينة (resolve_treasury التامّة على المقاطع)، الهاتف، والعملة
-    (تونس/تونسي→TND، مصر/مصري→EGP). وكلّ ما لا يُطابِق (فودافون كاش/بنك/إنستا باي/صافي…) يُتجاهَل.
+    السعر لا المبلغ)، **المبلغ** (سطر فيه رمز عملة ج.م/د.ت — يميّزه عن الكود)، الخزينة
+    (resolve_treasury التامّة)، الهاتف، والعملة. وكلّ ما لا يُطابِق (فودافون كاش/بنك/…) يُتجاهَل.
     """
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     currency: Optional[Currency] = None
     treasury_rec: Optional[TreasuryRecord] = None
+    amount: Optional[float] = None
     residual: list[str] = []                    # سطور غير مصنّفة → تُفتَّش على مستوى الرمز
 
     for ln in lines:
@@ -428,6 +429,12 @@ def parse_completion_fragment(
             continue                             # وسيلة دفع/مؤشّر خصم/بنك → يُتجاهَل
         if n in _FRAGMENT_CURRENCY:              # «تونس/مصر» سطرًا كاملًا → عملة
             currency = currency or _FRAGMENT_CURRENCY[n]
+            continue
+        cur = detect_currency(ln)                # سطر مبلغ (فيه رمز عملة ج.م/د.ت) → المبلغ + العملة
+        if cur is not None:                      #   (يميّز المبلغ عن الكود، ويمنع تلويث الاسم بـ«ج م»)
+            currency = currency or cur
+            if amount is None:
+                amount = parse_amount(ln)
             continue
         if treasury_rec is None:                 # خزينة سطر-كامل (مطابقة تامّة — آمنة §0)
             rec = resolve_treasury(ln, treasuries)
@@ -490,6 +497,7 @@ def parse_completion_fragment(
         customer_name=name,
         supplier=supplier_ref,
         is_supplier_counterpart=is_supplier,
+        amount=amount,
         price_raw=price_raw,
         price_normalized=price_norm,
         treasury=tref,

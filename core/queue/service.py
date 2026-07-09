@@ -23,9 +23,11 @@ from ..constants import (
 )
 from ..db import Database
 from ..logging_setup import get_logger
-from ..models import Deal, ParsedLeg, RawMessage, WriteJob
+from ..models import Deal, ParsedLeg, RawMessage, SupplierRecord, SupplierRef, TreasuryRecord, TreasuryRef, WriteJob
+from ..parsing import parse_completion_fragment
+from ..parsing.resolve import resolve_treasury
 from .commission import compute_commission
-from .grouping import compute_grouping_key, discount_pair
+from .grouping import _norm_ref, compute_grouping_key, discount_pair
 
 log = get_logger(__name__)
 
@@ -217,6 +219,76 @@ class QueueService:
             "صفقة %s: صيغة خصم (Aخصم) — قبل=%s بعد=%s عمولة=%s خزينة=%s",
             deal.deal_id, merged.amount, merged.amount_after_discount,
             merged.commission, merged.treasury.name if merged.treasury else None,
+        )
+        return deal
+
+    async def try_absorb_supplier_second(
+        self, leg: ParsedLeg, raw: RawMessage, now: datetime,
+        treasuries: list[TreasuryRecord], suppliers: list[SupplierRecord],
+    ) -> Deal | None:
+        """رسالة ثانية بنفس الرقم الإشاري لصفقة معلّقة (WAITING) في نفس الغرفة تحمل **موردًا**
+        (كود+اسم+سعر+مبلغ بعد الخصم §6): تُدمَج كطرف مورد في تلك الصفقة — لا صفقة جديدة (§6).
+
+        🔴 المشكلة: الرسالة الثانية تبدأ بنفس الرقم الإشاري فتُقرأ كحوالة جديدة. الحلّ: إن طابق
+        رقمها الإشاري صفقةً لها طرف بيع بكود زبون (الرسالة الأولى) وبلا طرف شراء في نفس الغرفة →
+        تُستخرج بيانات المورد بـ **pattern-fishing** (متينة للترتيب المختلف)، ومبلغها الأصغر =
+        بعد الخصم. يُرجع الصفقة المكتملة أو None (فتتبع الرسالة المسار العادي try_group)."""
+        if not raw.chat_jid or not leg.reference_number:
+            return None
+        ref = _norm_ref(leg.reference_number)
+        horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        target: Deal | None = None
+        for deal in await self.db.deals.waiting_in_room(raw.chat_jid):
+            sell = deal.sell_leg
+            if (sell is not None and deal.buy_leg is None and sell.customer_code
+                    and sell.supplier is None
+                    and _norm_ref(sell.reference_number) == ref and ref
+                    and _as_naive_utc(deal.created_at) >= horizon):
+                target = deal
+                break
+        if target is None:
+            return None
+        # المورد بـ pattern-fishing (يعالج الترتيب المختلف للرسالة الثانية: الكود آخرًا…)
+        frag = parse_completion_fragment(raw.text, treasuries, suppliers)
+        if not frag.customer_code:
+            return None                          # لا هوية مورد في الرسالة الثانية → ليست طرف مورد
+        return await self._absorb_supplier_leg(target, frag, raw.message_key, treasuries, now)
+
+    async def _absorb_supplier_leg(
+        self, deal: Deal, frag: ParsedLeg, message_key: str, treasuries: list[TreasuryRecord],
+        now: datetime,
+    ) -> Deal:
+        """يضبط المورد وسعره والمبلغ بعد الخصم على طرف البيع المعلّق + خزينة sell_and_buy
+        افتراضية، فيُشتقّ طرف الشراء لاحقًا (pipeline._maybe_synthesize_buy_leg §6.1)."""
+        sell = deal.sell_leg
+        # المبلغ الأصغر في الرسالة الثانية = المبلغ بعد الخصم (للعمولة والطرف المشتقّ §6.2)
+        if frag.amount is not None and sell.amount is not None and frag.amount < sell.amount:
+            sell.amount_after_discount = frag.amount
+        # كود+اسم الرسالة الثانية = المورد (لا زبون جديد)
+        sell.supplier = SupplierRef(code=frag.customer_code, name=frag.customer_name)
+        sell.supplier_price_raw = frag.price_raw
+        sell.commission = compute_commission(sell, None)  # بعد − قبل (سالبة §6.2)
+        sell.commission_rate = 0.0
+        # خزينة sell_and_buy افتراضية (كصيغة SI مع مورد §6.1): «خصم 1%» مع خصم، وإلا «صافي»
+        if sell.treasury is None:
+            default_name = "خصم 1%" if sell.amount_after_discount is not None else "صافي"
+            rec = resolve_treasury(default_name, treasuries)
+            if rec is not None:
+                sell.treasury = TreasuryRef(
+                    code=rec.code, name=rec.name, type=rec.type,
+                    currency=rec.currency or sell.currency,
+                )
+        deal.is_two_legged = True
+        deal.status = Status.PARSED
+        deal.waiting_deadline = None
+        if message_key and message_key not in deal.source_message_keys:
+            deal.source_message_keys.append(message_key)
+        deal.updated_at = now
+        await self.db.deals.upsert(deal)
+        log.info(
+            "صفقة %s: رسالة ثانية بمورد «%s %s» (نفس الرقم %s) → دُمجت كطرف مورد (بعد الخصم=%s)",
+            deal.deal_id, frag.customer_code, frag.customer_name,
+            sell.reference_number, sell.amount_after_discount,
         )
         return deal
 

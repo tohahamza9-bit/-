@@ -198,6 +198,12 @@ class Pipeline:
             log.info("الحارس: %s نزلت من قبل — تجاهل (§9)", raw.message_key)
             return None
 
+        # 🔴 رسالة ثانية بنفس الرقم الإشاري لصفقة معلّقة في نفس الغرفة تحمل موردًا (§6): تُدمَج
+        #    كطرف مورد لا كصفقة جديدة — قبل try_group كي لا تُنشأ صفقة منفصلة.
+        second = await self.queue.try_absorb_supplier_second(leg, raw, now, treasuries, suppliers)
+        if second is not None:
+            return second
+
         # التجميع (§7.3): صفقة جديدة أو دمج طرف ثانٍ
         deal = await self.queue.try_group(leg, now, chat_jid=raw.chat_jid)
         return deal
@@ -342,7 +348,10 @@ class Pipeline:
 
             # (8·ب) طرف الشراء المشتقّ لخزينة sell_and_buy (§6): بيع ثم شراء لنفس الخزينة الخارجية.
             #        يُخلَّق بعد المطابقة/الثقة على البيع الأصلي، وقبل بناء أوامر الكتابة مباشرة.
+            had_buy = deal.buy_leg is not None
             self._maybe_synthesize_buy_leg(deal)
+            if deal.buy_leg is not None and not had_buy:
+                await self.db.deals.upsert(deal)   # احفظ الطرف المشتقّ في السجلّ قبل الكتابة
 
             # (9) Outbox + الكتابة (بيع order=0 ثم شراء order=1 — التسلسل: بيع→تخزين→شراء→تخزين)
             jobs = await self.queue.build_write_jobs(deal)

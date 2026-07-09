@@ -329,6 +329,87 @@ async def test_expire_stale_pending_on_startup(db):
     assert len(admin_notifs) == 2
 
 
+async def test_two_message_supplier_second_merges_not_new_deal(db):
+    """حوالة A مع مورد برسالتين بنفس الرقم الإشاري: الثانية (المورد) تُدمَج في صفقة الأولى
+    (الزبون) لا تُنشئ صفقة جديدة → طرفان: بيع الزبون + شراء المورد المشتقّ (§6)."""
+    from core.parsing import parse_message
+    from core.queue.service import QueueService
+
+    treas = await db.treasuries.all_active()
+    svc = QueueService(db)
+    now = PAST + timedelta(seconds=1000)
+
+    # الرسالة الأولى (الزبون): A8136 + مبلغ 1010 + كود 1300 + سعر 5.90 (بلا خزينة → تنتظر الثانية)
+    leg1 = parse_message(
+        "A8136\n01001234567\n1010 ج م\nفودافون كاش\n1300 عبدالله معتيق 5.90", treas, []).leg
+    leg1.source_message_key = "m1"
+    deal1 = await svc.try_group(leg1, now, chat_jid=CENTRAL)
+    assert deal1.status == Status.WAITING_SECOND_LEG
+
+    # الرسالة الثانية (المورد): نفس A8136 + مبلغ أصغر 1000 + كود 760 «طه» (غير مُدرَج كمورد)
+    msg2 = "A8136\n01001234567\n1000 ج م\nفودافون كاش\n760 طه 5.90"
+    leg2 = parse_message(msg2, treas, []).leg
+    leg2.source_message_key = "m2"
+    merged = await svc.try_absorb_supplier_second(leg2, _raw("m2", msg2), now, treas, [])
+    assert merged is not None, "الرسالة الثانية تُدمَج لا تُنشئ صفقة جديدة"
+    assert merged.deal_id == deal1.deal_id
+
+    sell = merged.sell_leg
+    assert (sell.customer_code, sell.customer_name) == ("1300", "عبدالله معتيق")
+    assert sell.amount == 1010 and sell.amount_after_discount == 1000     # الأصغر = بعد الخصم
+    assert sell.supplier is not None and (sell.supplier.code, sell.supplier.name) == ("760", "طه")
+    assert sell.supplier_price_raw == "5.90"
+    assert sell.treasury is not None and sell.treasury.type == TreasuryType.SELL_AND_BUY  # «خصم 1%»
+
+    # طرف الشراء المشتقّ من المورد (pipeline)
+    pipe = _make_pipeline(db)
+    pipe._maybe_synthesize_buy_leg(merged)
+    buy = merged.buy_leg
+    assert buy is not None and buy.operation == OperationType.BUY
+    assert buy.customer_code == "760" and buy.amount == 1000
+    assert buy.price_normalized == "5.90" and buy.is_supplier_counterpart is True
+
+
+async def test_supplier_second_ignored_without_customer_code(db):
+    """رسالة ثانية بلا كود (تسوية خصم/خزينة فقط) لا تُلتقط كطرف مورد — تتبع المسار العادي."""
+    from core.parsing import parse_message
+    from core.queue.service import QueueService
+    treas = await db.treasuries.all_active()
+    svc = QueueService(db)
+    now = PAST + timedelta(seconds=1000)
+    leg1 = parse_message(
+        "A8136\n01001234567\n1010 ج م\nفودافون كاش\n1300 عبدالله معتيق 5.90", treas, []).leg
+    leg1.source_message_key = "m1"
+    await svc.try_group(leg1, now, chat_jid=CENTRAL)
+    # رسالة ثانية: خزينة + مبلغ بلا كود → ليست طرف مورد
+    msg2 = "A8136\n01001234567\n1000 ج م\nبلاس فون"
+    leg2 = parse_message(msg2, treas, []).leg
+    leg2.source_message_key = "m2"
+    assert await svc.try_absorb_supplier_second(leg2, _raw("m2", msg2), now, treas, []) is None
+
+
+async def test_supplier_second_pattern_fishing_code_last(db):
+    """متانة الترتيب: الرسالة الثانية بالكود **آخر السطر** والسعر أولًا → تُلتقط بـ pattern-fishing."""
+    from core.parsing import parse_message
+    from core.queue.service import QueueService
+    treas = await db.treasuries.all_active()
+    svc = QueueService(db)
+    now = PAST + timedelta(seconds=1000)
+    leg1 = parse_message(
+        "A8136\n01001234567\n1010 ج م\nفودافون كاش\n1300 عبدالله معتيق 5.90", treas, []).leg
+    leg1.source_message_key = "m1"
+    await svc.try_group(leg1, now, chat_jid=CENTRAL)
+    # الرسالة الثانية: المبلغ بسطر عملة، وسطر المورد «5.90 طه 760» (الكود آخرًا — يفشل سطرًا-بسطر)
+    msg2 = "A8136\n01001234567\n1000 ج م\nفودافون كاش\n5.90 طه 760"
+    leg2 = parse_message(msg2, treas, []).leg
+    leg2.source_message_key = "m2"
+    merged = await svc.try_absorb_supplier_second(leg2, _raw("m2", msg2), now, treas, [])
+    assert merged is not None
+    sell = merged.sell_leg
+    assert sell.supplier is not None and (sell.supplier.code, sell.supplier.name) == ("760", "طه")
+    assert sell.amount_after_discount == 1000 and sell.supplier_price_raw == "5.90"
+
+
 async def test_auto_trust_skips_room_matching_and_completes(db):
     """وضع التلقائي (auto_trust): غرف مُصنّفة بلا رسالة غرفة → تُتخطّى المطابقة وتكتمل عبر بوابة الثقة."""
     await db.control.set(BotControl(storage_enabled=True, auto_trust=True, state="running"), "test")
