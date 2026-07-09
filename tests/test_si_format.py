@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from core.constants import Currency, TreasuryType
 from core.models import SupplierRecord
 from core.parsing import parse_message
@@ -62,6 +64,19 @@ async def test_si_saafi_treasury_is_ignored(db):
     assert leg is not None
     assert leg.treasury is None                     # «صافي» ليست خزينة
     assert leg.customer_code == "1284"              # باقي الحقول سليمة
+
+
+@pytest.mark.parametrize("val", [
+    "793 حميد بن غارات",          # أ: الكود في البداية بلا «كود»
+    "حميد بن غارات كود.793",      # ب: الكود في النهاية مع «كود.»
+    "كود.793 حميد بن غارات",      # ج: الكود في البداية مع «كود.»
+])
+def test_extract_code_name_all_positions(val):
+    """يستخرج الكود=793 والاسم='حميد بن غارات' في المواضع الثلاثة (بداية/نهاية، مع «كود.» أو بلا)."""
+    from core.parsing.parser import _extract_code_name
+    code, name = _extract_code_name(val)
+    assert code == "793"
+    assert name == "حميد بن غارات"
 
 
 async def test_si_customer_code_merged_with_dot(db):
