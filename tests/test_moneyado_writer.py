@@ -368,6 +368,24 @@ def test_confirm_store_on_main_presses_enter_on_top_window():
     assert top.type_keys.call_args.args[0] == "{ENTER}"
 
 
+def test_bind_form_pins_concrete_window_and_recaptures_form_rect():
+    """_bind_form يثبّت self._window على كائن wait() الملموس ويعيد التقاط form_rect منه (لا spec كسول)."""
+    from core.constants import OperationType
+    from core.writers.moneyado.screens import _PYWINAUTO_AVAILABLE, MoneyadoScreen
+    if not _PYWINAUTO_AVAILABLE:
+        pytest.skip("pywinauto غير متاح")
+    scr = MoneyadoScreen({"buy_screen": {"form_class": "ThunderRT6FormDC"}}, connect_wait=0)
+    app, spec, concrete = MagicMock(), MagicMock(), MagicMock()
+    concrete.rectangle.return_value = "BUY_RECT"
+    app.window.return_value = spec
+    spec.wait.return_value = concrete                 # wait() يُرجع الكائن الملموس
+    scr._app = app
+    scr._bind_form(OperationType.BUY)
+    assert scr._window is concrete                    # مثبّت على الملموس لا الـ WindowSpecification
+    assert scr._form_rect == "BUY_RECT"               # form_rect من الفورم المربوط الحالي
+    spec.rectangle.assert_not_called()                # لم يُلتقط rect من الـ spec الكسول
+
+
 def test_confirm_store_on_main_swallows_errors_after_store():
     """فشل Enter على النافذة الرئيسية لا يرمي (الحفظ تمّ فعلاً) — best-effort مسجَّل (T5)."""
     from core.writers.moneyado.screens import MoneyadoScreen

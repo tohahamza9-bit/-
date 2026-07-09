@@ -301,14 +301,20 @@ class MoneyadoScreen(ScreenController):
         wait_timeout = self._timeout if timeout is None else timeout
 
         # التقط الفورم النشط من صنفه (بلا عنوان) وانتظر جاهزيته — لا sleep ثابت (§11.3).
-        self._window = self._app.window(class_name=form_class)
-        self._window.wait("ready visible enabled", timeout=wait_timeout)
+        # 🔴 نثبّت self._window على الكائن الملموس الذي يُرجعه wait() (لا WindowSpecification كسول):
+        #    وإلا تُحلّ .rectangle() (المرجع) و.descendants() (الحقول) كلٌّ على حدة، فقد تُشيران
+        #    إلى فورمَين مختلفين حين يوجد أكثر من ThunderRT6FormDC (فورم بيع متبقٍّ + شراء) →
+        #    فيصير form_rect من فورم والحقول من آخر، فيفشل تحديد الحقل («غير موجود»).
+        self._window = self._app.window(class_name=form_class).wait(
+            "ready visible enabled", timeout=wait_timeout
+        )
 
         # 🔴 لا نحرّك النافذة (move_window كان يُغلق MONEYADO على الجهاز): الإحداثيات نسبية
         # للفورم (rel = rect - form_rect) فتعمل عند أي موضع للنافذة — لا حاجة لتثبيت الموضع (§11.3).
         time.sleep(self._connect_wait)  # مهلة استقرار للجهاز البطيء قبل التقاط المرجع/التفاعل
 
-        # مرجع الإحداثيات النسبية: يُلتقط مرة واحدة بعد الجاهزية.
+        # مرجع الإحداثيات النسبية: يُعاد التقاطه **في كل ربط** (بيع أو شراء) من الفورم المربوط
+        # الحالي — لا يُعاد استخدام rect فورم سابق (يشمل مسار «فورم مفتوح مسبقًا → استخدامه»).
         self._form_rect = self._window.rectangle()
 
         # حارس الشاشة الصحيحة (§0): الفورمان من نفس الصنف وبلا عنوان → نميّز ببصمة العدد.
