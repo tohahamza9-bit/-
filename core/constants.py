@@ -82,6 +82,7 @@ SEED_TREASURIES: list[dict] = [
     {"code": "79", "name": "محمد حمامات", "currency": "TND", "type": "sell_only", "aliases": ["محمد"]},
     # بيع وشراء (§4.4) — الأكواد معلّقة، تُستكمل من Dashboard
     {"code": "72", "name": "خصم 1%", "currency": "EGP", "type": "sell_and_buy", "aliases": ["خصم", "خصم1", "خصم 1", "خصم 1%", "خصم1%"]},  # الخزينة الافتراضية لـ SI مع مورد
+    {"code": "85", "name": "فودافون بالخصم", "currency": "EGP", "type": "sell_and_buy", "aliases": ["فودافون بالخصم", "فودافون خصم"]},  # الخزينة الافتراضية لطرف مورد حوالة A الثانية
     {"code": None, "name": "صافي", "currency": None, "type": "sell_and_buy", "aliases": ["صافى"]},
     {"code": None, "name": "تونسي خارجي", "currency": "TND", "type": "sell_and_buy", "aliases": ["تونسي خارجى", "خارجي"]},
 ]

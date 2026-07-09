@@ -46,8 +46,9 @@ def test_khasm_1pct_resolves_by_name_and_aliases():
 def test_all_sell_and_buy_treasuries_present():
     # كل الخزائن الخارجية (sell_and_buy) موجودة في البذرة
     sab = {t.name: t for t in TREAS if t.type == TreasuryType.SELL_AND_BUY}
-    assert set(sab) == {"خصم 1%", "صافي", "تونسي خارجي"}
-    assert sab["خصم 1%"].code == "72"       # الافتراضية لـ SI مع مورد
+    assert set(sab) == {"خصم 1%", "فودافون بالخصم", "صافي", "تونسي خارجي"}
+    assert sab["خصم 1%"].code == "72"                # الافتراضية لـ SI مع مورد
+    assert sab["فودافون بالخصم"].code == "85"        # الافتراضية لطرف مورد حوالة A الثانية
     assert sab["صافي"].code is None         # معلّق (ملحق ب-3)
     assert sab["تونسي خارجي"].code is None  # معلّق (ملحق ب-3)
 

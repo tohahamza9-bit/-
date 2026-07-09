@@ -269,10 +269,10 @@ class QueueService:
         sell.supplier_price_raw = frag.price_raw
         sell.commission = compute_commission(sell, None)  # بعد − قبل (سالبة §6.2)
         sell.commission_rate = 0.0
-        # خزينة sell_and_buy افتراضية (كصيغة SI مع مورد §6.1): «خصم 1%» مع خصم، وإلا «صافي»
+        # خزينة sell_and_buy الافتراضية لطرف مورد حوالة A الثانية = «فودافون بالخصم» (85) **دائمًا**
+        # — سواء وُجد خصم أو لا (قرار صاحب العمل §6.1) — كي يُشتقّ منها طرف الشراء بكود قابل للكتابة.
         if sell.treasury is None:
-            default_name = "خصم 1%" if sell.amount_after_discount is not None else "صافي"
-            rec = resolve_treasury(default_name, treasuries)
+            rec = resolve_treasury("فودافون بالخصم", treasuries)
             if rec is not None:
                 sell.treasury = TreasuryRef(
                     code=rec.code, name=rec.name, type=rec.type,

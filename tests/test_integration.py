@@ -359,7 +359,9 @@ async def test_two_message_supplier_second_merges_not_new_deal(db):
     assert sell.amount == 1010 and sell.amount_after_discount == 1000     # الأصغر = بعد الخصم
     assert sell.supplier is not None and (sell.supplier.code, sell.supplier.name) == ("760", "طه")
     assert sell.supplier_price_raw == "5.90"
-    assert sell.treasury is not None and sell.treasury.type == TreasuryType.SELL_AND_BUY  # «خصم 1%»
+    # الخزينة الافتراضية لطرف مورد حوالة A الثانية = «فودافون بالخصم» code=85 (sell_and_buy)
+    assert sell.treasury is not None and sell.treasury.type == TreasuryType.SELL_AND_BUY
+    assert sell.treasury.code == "85"
 
     # طرف الشراء المشتقّ من المورد (pipeline)
     pipe = _make_pipeline(db)
@@ -368,6 +370,8 @@ async def test_two_message_supplier_second_merges_not_new_deal(db):
     assert buy is not None and buy.operation == OperationType.BUY
     assert buy.customer_code == "760" and buy.amount == 1000
     assert buy.price_normalized == "5.90" and buy.is_supplier_counterpart is True
+    # طرف الشراء يأخذ خزينة sell_and_buy الافتراضية «فودافون بالخصم» code=85 (دائمًا)
+    assert buy.treasury is not None and buy.treasury.code == "85"
 
 
 async def test_supplier_second_ignored_without_customer_code(db):
@@ -508,8 +512,8 @@ async def test_two_leg_grouping_and_order(db):
     assert d.sell_leg.amount == 8475 and d.buy_leg.amount == 8391
     # العمولة = الفرق بالسالب (§6.2): 8391 − 8475 = −84
     assert d.sell_leg.commission == pytest.approx(-84.0)
-    # خزينة الطرفين = «خصم 1%» (§6.1)
-    assert d.sell_leg.treasury.code == "90" and d.buy_leg.treasury.code == "90"
+    # خزينة الطرفين = «فودافون بالخصم» (85) — الافتراضية لطرف مورد حوالة A الثانية (§6.1)
+    assert d.sell_leg.treasury.code == "85" and d.buy_leg.treasury.code == "85"
 
     # الترتيب الصارم: بيع (0) ثم شراء (1) — §7.3 §11.4
     assert writer.calls == [("sell", 0, True), ("buy", 1, True)]
