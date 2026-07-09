@@ -87,6 +87,21 @@ def _treasury_value(leg: ParsedLeg) -> str:
     return leg.treasury.code or leg.treasury.name or ""
 
 
+def _buy_rate_divide(leg: ParsedLeg) -> str:
+    """سعر خانة «/» في شاشة الشراء = السعر المطبَّع (§3.6)، مع **سراح أمان للتونسي**:
+    السعر التونسي دائمًا < 1 (0.xxxx)؛ فلو وصل غير مطبَّع (> 1) والعملة TND → ×0.01 (35→0.35).
+    idempotent: قيمة ≤ 1 (مثل 0.35) تبقى كما هي، فلا تطبيع مزدوج ولو مرّ التطبيع مسبقًا أعلى."""
+    raw = leg.price_normalized or ""
+    if leg.currency == Currency.TND and raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return raw
+        if value > 1:
+            return _num(value * 0.01)
+    return raw
+
+
 def build_sell_fields(leg: ParsedLeg) -> list[FieldOp]:
     """يبني خانات شاشة «بيع عملة» بالترتيب المؤكّد (§11.1)."""
     ops: list[FieldOp] = []
@@ -190,8 +205,9 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
     # (5) السعر × الضارب = 1 دائمًا (ثابت §11.1) — مطابقة شاشة الشراء الفعلية (× و/) + Enter
     ops.append(FieldOp("rate_multiply", "1", TYPE_KEYS, enter=True))
 
-    # (8) السعر / القسمة = السعر المطبَّع (§3.6). Enter بعده يحسب «المبلغ الصافي» (الكمية مُدخَلة مسبقًا §11.3).
-    ops.append(FieldOp("rate_divide", leg.price_normalized or "", TYPE_KEYS, enter=True))
+    # (8) السعر / القسمة = السعر المطبَّع (مع سراح أمان للتونسي §3.6). Enter بعده يحسب «المبلغ
+    #     الصافي» (الكمية مُدخَلة مسبقًا §11.3).
+    ops.append(FieldOp("rate_divide", _buy_rate_divide(leg), TYPE_KEYS, enter=True))
 
     # (9) المبلغ الصافي — يحسبه البرنامج (AO) بعد السعر: Enter فقط للمرور به (§11.3).
     ops.append(FieldOp("net_amount", "", ENTER_ONLY))

@@ -852,6 +852,26 @@ def test_buy_fields_commission_sequence_and_delivered():
     assert k.index("commission_rate") < k.index("commission") < k.index("amount_delivered") < k.index("customer")
 
 
+def test_buy_rate_divide_tnd_safety_normalizes_gt_one():
+    """سراح أمان تونسي: TND + سعر > 1 (وصل غير مطبَّع) → ×0.01 (35→0.35)."""
+    ops = build_buy_fields(make_buy_leg(currency=Currency.TND, price_normalized="35"))
+    assert by_key(ops, "rate_divide").value == "0.35"
+    ops2 = build_buy_fields(make_buy_leg(currency=Currency.TND, price_normalized="35.75"))
+    assert by_key(ops2, "rate_divide").value == "0.3575"
+
+
+def test_buy_rate_divide_tnd_idempotent_when_already_normalized():
+    """TND + سعر ≤ 1 (مطبَّع مسبقًا 0.35) → يبقى كما هو (لا تطبيع مزدوج)."""
+    ops = build_buy_fields(make_buy_leg(currency=Currency.TND, price_normalized="0.35"))
+    assert by_key(ops, "rate_divide").value == "0.35"
+
+
+def test_buy_rate_divide_egp_untouched():
+    """EGP: السعر كما هو ولو > 1 (5.72 لا يُقسم) — السراح للتونسي وحده."""
+    ops = build_buy_fields(make_buy_leg(currency=Currency.EGP, price_normalized="5.72"))
+    assert by_key(ops, "rate_divide").value == "5.72"
+
+
 def test_buy_fields_every_typed_field_has_enter():
     """كل خانة تُكتب فيها قيمة في شاشة الشراء بـ enter=True؛ حقول AO = ENTER_ONLY."""
     ao = {"transaction_number", "date_field", "net_amount", "amount_delivered"}
