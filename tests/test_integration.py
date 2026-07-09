@@ -153,6 +153,56 @@ async def test_synthesize_buy_leg_for_sell_and_buy(db):
     assert deal.sell_leg.amount == 20475 and deal.sell_leg.commission == -204.0
 
 
+async def test_synthesize_buy_leg_uses_supplier_code_and_rate(db):
+    # SI مع مورد: طرف الشراء المشتقّ = كود المورد + سعر المورد (لا نسخة صرفة من البيع)
+    from core.constants import OperationType
+    from core.models import SupplierRef
+    pipe = _make_pipeline(db)
+    leg = _sab_sell_leg(supplier=SupplierRef(code="760", name="طه"), supplier_price_raw="5.72")
+    deal = _sab_deal(leg)
+    pipe._maybe_synthesize_buy_leg(deal)
+
+    buy = deal.buy_leg
+    assert buy is not None and buy.operation == OperationType.BUY
+    assert buy.amount == 20271                      # الصافي كالمعتاد
+    assert buy.customer_code == "760"               # كود المورد (الحساب في شاشة الشراء §5.3)
+    assert buy.customer_name == "طه"
+    assert buy.price_normalized == "5.72"           # سعر المورد لا سعر البيع (5.9)
+    assert buy.is_supplier_counterpart is True
+    assert buy.supplier is not None and buy.supplier.code == "760"
+    assert buy.supplier_price_raw is None           # استُهلك في البناء
+    # طرف البيع لم يتغيّر (سعره وكوده وعمولته كما هي)
+    assert deal.sell_leg.price_normalized == "5.9"
+    assert deal.sell_leg.customer_code == "570"
+    assert deal.sell_leg.commission == -204.0
+
+
+async def test_synthesized_supplier_buy_leg_screen_fields(db):
+    # النتيجة النهائية على شاشة الشراء: الحساب = كود المورد، السعر = سعر المورد، الكمية = الصافي
+    from core.models import SupplierRef
+    from core.writers.moneyado.fields import build_buy_fields
+    pipe = _make_pipeline(db)
+    leg = _sab_sell_leg(supplier=SupplierRef(code="760", name="طه"), supplier_price_raw="5.72")
+    deal = _sab_deal(leg)
+    pipe._maybe_synthesize_buy_leg(deal)
+    ops = {op.key: op.value for op in build_buy_fields(deal.buy_leg)}
+    assert ops["customer"] == "760"                 # كود المورد في خانة الحساب
+    assert ops["rate_divide"] == "5.72"             # سعر المورد
+    assert ops["quantity"] == "20271"               # الكمية = الصافي
+
+
+async def test_synthesize_no_supplier_stays_plain_copy(db):
+    # sell_and_buy بلا مورد (صافي/خصم1%): يبقى نسخة صرفة — لا كود/سعر مورد يُقحَم
+    pipe = _make_pipeline(db)
+    deal = _sab_deal(_sab_sell_leg())               # بلا supplier
+    pipe._maybe_synthesize_buy_leg(deal)
+    buy = deal.buy_leg
+    assert buy.customer_code == "570"               # كود الزبون كما هو (لا مورد)
+    assert buy.price_normalized == "5.9"            # سعر البيع كما هو
+    assert buy.is_supplier_counterpart is False
+    assert buy.supplier is None
+
+
 async def test_synthesize_uses_amount_when_no_discount(db):
     pipe = _make_pipeline(db)
     deal = _sab_deal(_sab_sell_leg(amount=5000.0, amount_after_discount=None, commission=None))

@@ -25,6 +25,7 @@ from .logging_setup import get_logger
 from .matching.service import MatchingService
 from .models import Deal, LedgerEntry, ParsedLeg, RawMessage, WriteJob
 from .parsing import detect_control, parse_message
+from .parsing.normalize import normalize_price
 from .parsing.resolve import resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
 from .queue.service import QueueService, is_completion_fragment
@@ -316,6 +317,10 @@ class Pipeline:
 
         يُخلَّق فقط إن لم يوجد طرف شراء (لا يمسّ مسار الطرفين بمورد §5.3). طرف مشتقّ بلا مورد
         فلا يُعاد حساب عمولته في _resolve_two_leg (محصور بالمورد أعلاه).
+
+        🔴 مورد مذكور في البيع (SI «المورد: طه 5.72» §5/§6): طرف الشراء يُبنى **من المورد** لا
+        نسخةً صرفة من البيع — الحساب = كود المورد، والسعر = سعر المورد (لا سعر البيع)، ويُعلَّم
+        طرف مورد (is_supplier_counterpart) ليأخذ كود المورد في شاشة الشراء (§5.3، build_buy_fields).
         """
         sell = deal.sell_leg
         if deal.buy_leg is not None or sell is None or sell.treasury is None:
@@ -323,17 +328,31 @@ class Pipeline:
         if sell.treasury.type != TreasuryType.SELL_AND_BUY:
             return
         net = sell.amount_after_discount if sell.amount_after_discount is not None else sell.amount
-        deal.buy_leg = sell.model_copy(update={
+        update = {
             "operation": OperationType.BUY,
             "amount": net,
             "amount_after_discount": None,
             "commission": None,
             "commission_rate": 0.0,
-        })
+        }
+        if sell.supplier is not None:
+            # سعر المورد → سعر طرف الشراء (مطبَّع حسب العملة §3.6)؛ الحساب = كود المورد.
+            _raw, pnorm = normalize_price(sell.supplier_price_raw, sell.currency or Currency.EGP)
+            update.update({
+                "customer_code": sell.supplier.code,
+                "customer_name": sell.supplier.name,
+                "price_raw": sell.supplier_price_raw,
+                "price_normalized": pnorm,
+                "is_supplier_counterpart": True,
+                "supplier_price_raw": None,          # استُهلك في بناء طرف الشراء
+            })
+        deal.buy_leg = sell.model_copy(update=update)
         deal.is_two_legged = True
         log.info(
-            "صفقة %s: خزينة sell_and_buy «%s» → تخليق طرف شراء (مبلغ=%s، بلا عمولة، ref=%s)",
-            deal.deal_id, sell.treasury.name, net, sell.reference_number,
+            "صفقة %s: خزينة sell_and_buy «%s» → تخليق طرف شراء (مبلغ=%s، مورد=%s، سعر=%s، ref=%s)",
+            deal.deal_id, sell.treasury.name, net,
+            sell.supplier.name if sell.supplier else "—",
+            sell.supplier_price_raw if sell.supplier else "—", sell.reference_number,
         )
 
     async def _resolve_two_leg(self, deal: Deal) -> None:
