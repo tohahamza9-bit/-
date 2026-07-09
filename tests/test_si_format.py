@@ -51,6 +51,19 @@ async def test_si0464_labeled(db):
     assert leg.treasury is not None and leg.treasury.name == "بلاس فون"
 
 
+async def test_si_customer_code_merged_with_dot(db):
+    """صيغة جديدة: كود مدموج بسطر الاسم بنقطة «حميد بن غارات كود.793» → كود=793، الاسم بلا الكود."""
+    text = (
+        "رقم العملية: SI1900\nرقم المستلم: 01093232832\n"
+        "اسم الزبون: حميد بن غارات كود.793\n"
+        "القيمة قبل الخصم: 3540 ج.م\nالقيمة بعد الخصم 1%: 3505 ج.م\n"
+        "السعر: 5.9\nنوع التحويل: فودافون كاش\nالخزينة: بلاس فون"
+    )
+    leg = parse_message(text, await _treas(db), []).leg
+    assert leg.customer_code == "793"
+    assert leg.customer_name == "حميد بن غارات"
+
+
 async def test_si0855_before_after(db):
     text = (
         "لبستنا\nرقم العملية: SI0855\nرقم المستلم: 01278497844\n"

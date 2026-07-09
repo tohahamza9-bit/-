@@ -363,12 +363,15 @@ def _parse_customer_line(seg: str) -> Optional[tuple[str, Optional[str], Optiona
 
 
 def _extract_code_name(val: str) -> tuple[Optional[str], Optional[str]]:
-    """يستخرج الكود والاسم من نص الزبون: «مروان الشاوش كود 1284» → (1284, مروان الشاوش)."""
+    """يستخرج الكود والاسم من نص الزبون: «مروان الشاوش كود 1284» → (1284, مروان الشاوش).
+
+    الفاصل بعد «كود» اختياري ومتعدّد الأشكال: فراغ/نقطة/نقطتان/شرطة أو بلا فاصل —
+    «كود 1284» / «كود1201» / «حميد بن غارات كود.793» كلها تُلتقط (§3.2)."""
     code = None
-    m = re.search(r"كود\s*(\d+)", val)
+    m = re.search(r"كود[\s.:\-]*(\d+)", val)
     if m:
         code = m.group(1)
-        name = re.sub(r"كود\s*\d+", "", val).strip()
+        name = re.sub(r"كود[\s.:\-]*\d+", "", val).strip()
     else:
         name = val.strip()
         m2 = re.match(r"^(\d+)\s+(.+)$", name)      # كود في البداية
