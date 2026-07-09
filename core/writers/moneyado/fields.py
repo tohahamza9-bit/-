@@ -172,9 +172,10 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
         ops.append(FieldOp("reference_number", leg.reference_number, TYPE_KEYS))
 
     # (3) نوع العملة — **بالكود لا بالاسم** في شاشة الشراء (قرار صاحب العمل من الشاشة الحقيقية):
-    #     4=مصري، 3=تونسي — تُكتب في خانة رمز العملة (شاشة البيع تبقى باختيار الاسم عبر SELECT).
+    #     4=مصري، 3=تونسي — تُكتب في خانة رمز العملة + Enter (يُثبّت الرمز وتتحدّث المنسدلة المجاورة؛
+    #     بلا Enter تبقى الخانة فارغة). (شاشة البيع تبقى باختيار الاسم عبر SELECT.)
     if leg.currency in MONEYADO_CURRENCY_CODE:
-        ops.append(FieldOp("currency_type", MONEYADO_CURRENCY_CODE[leg.currency], TYPE_KEYS))
+        ops.append(FieldOp("currency_type", MONEYADO_CURRENCY_CODE[leg.currency], TYPE_KEYS, enter=True))
 
     # (4) السعر × الضارب = 1 دائمًا (ثابت §11.1) — مطابقة شاشة الشراء الفعلية (× و/)
     ops.append(FieldOp("rate_multiply", "1", TYPE_KEYS))
@@ -185,13 +186,13 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
     # (6) الكمية (المبلغ الأجنبي)، فاصل الآلاف مُشال
     ops.append(FieldOp("quantity", _num(leg.amount), TYPE_KEYS))
 
-    # (7) نسبة العمولة: لا تُكتب قيمة (🔴 [750,290] = نسبة العمولة الحقيقية) — Enter فقط لتفعيل
-    #     تسلسل «العمولة» ثم «المبلغ المسلّم» (خانات متسلسلة التفعيل §11.3).
-    ops.append(FieldOp("commission_rate", "", TYPE_KEYS, enter=True))
+    # (7) نسبة العمولة = "0" + Enter (كشاشة البيع §6.2): لا تُترك فارغة، ثم Enter يفعّل تسلسل
+    #     «العمولة» ثم «المبلغ المسلّم» (خانات متسلسلة التفعيل §11.3).
+    ops.append(FieldOp("commission_rate", "0", TYPE_KEYS, enter=True))
 
-    # (8) العمولة: فارغة عند None (شراء طرف sell_and_buy بلا عمولة §6) — لا تُكتب قيمة، لكن Enter
-    #     يبقى ليفعّل «المبلغ المسلّم» (يحسبه البرنامج). للطرف بمورد تُكتب قيمتها.
-    commission_value = _num(leg.commission) if leg.commission is not None else ""
+    # (8) العمولة = "0" + Enter عند غيابها (طرف الشراء بلا عمولة §6.2 — على البيع)؛ لا تُترك فارغة.
+    #     قيمة صريحة (نادرة) تُكتب كما هي. Enter يفعّل «المبلغ المسلّم» (يحسبه البرنامج).
+    commission_value = _num(leg.commission) if leg.commission is not None else "0"
     ops.append(FieldOp("commission", commission_value, TYPE_KEYS, enter=True))
 
     # (9) المبلغ المسلّم للحساب — يحسبه البرنامج تلقائيًا. Enter فقط على الحقل النشط (بلا كتابة/
@@ -209,11 +210,11 @@ def build_buy_fields(leg: ParsedLeg) -> list[FieldOp]:
     #      الحوالة، لا اسم الدولة. (شاشة البيع تبقى ببلد حقيقي عبر _country_label.)
     pay_code = _buy_payment_code(leg)
     if pay_code:
-        ops.append(FieldOp("country", pay_code, TYPE_KEYS))
+        ops.append(FieldOp("country", pay_code, TYPE_KEYS, enter=True))  # Enter يُثبّت الرمز (بلاه تبقى فارغة)
 
-    # (12) وسيلة الدفع = رقم الهاتف
+    # (12) وسيلة الدفع = رقم الهاتف + Enter (يُثبّت القيمة؛ بلا Enter تبقى الخانة فارغة).
     if leg.phone:
-        ops.append(FieldOp("payment_method", leg.phone, TYPE_KEYS))
+        ops.append(FieldOp("payment_method", leg.phone, TYPE_KEYS, enter=True))
 
     # (11) ملاحظات = اسم المستلم إن وُجد
     if leg.recipient_name:

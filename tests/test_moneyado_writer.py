@@ -746,16 +746,25 @@ def test_buy_fields_order_and_supplier():
 
 
 def test_buy_fields_commission_sequence_and_delivered():
-    """نسبة العمولة فارغة(+Enter) ثم العمولة فارغة عند None(+Enter) ثم «المبلغ المسلّم» enter_only."""
-    ops = build_buy_fields(make_buy_leg())               # make_buy_leg بلا عمولة → فارغة
+    """نسبة العمولة "0"(+Enter) ثم العمولة "0" عند None(+Enter) ثم «المبلغ المسلّم» enter_only."""
+    ops = build_buy_fields(make_buy_leg())               # make_buy_leg بلا عمولة → "0"
     cr = by_key(ops, "commission_rate")
-    assert (cr.value, cr.enter) == ("", True)             # لا تُكتب قيمة، Enter فقط لتفعيل التسلسل
+    assert (cr.value, cr.enter) == ("0", True)            # "0" لا فارغة، + Enter
     comm = by_key(ops, "commission")
-    assert (comm.value, comm.enter) == ("", True)         # بلا عمولة → فارغة (لا تُكتب) لكن Enter
+    assert (comm.value, comm.enter) == ("0", True)        # بلا عمولة → "0" (لا فارغة) + Enter
     ad = by_key(ops, "amount_delivered")
     assert (ad.method, ad.value) == (ENTER_ONLY, "")      # يحسبه البرنامج، Enter فقط
     k = keys(ops)
     assert k.index("commission_rate") < k.index("commission") < k.index("amount_delivered") < k.index("customer")
+
+
+def test_buy_fields_enter_on_currency_country_payment():
+    """currency_type والبلد (كود الدفع) ووسيلة الدفع (الهاتف) بـ Enter — بلاه تبقى الخانات فارغة."""
+    ops = build_buy_fields(make_buy_leg(payment_method="فودافون كاش"))
+    assert by_key(ops, "currency_type").enter is True     # (١) العملة
+    assert by_key(ops, "country").enter is True           # (٥) كود وسيلة الدفع (17)
+    pm = by_key(ops, "payment_method")
+    assert (pm.value, pm.enter) == ("01115233493", True)  # (٤) رقم الهاتف + Enter
 
 
 def test_buy_fields_commission_value_when_present():
