@@ -171,7 +171,8 @@ async def test_treasuries_expose_currency_for_country_column(db):
         by_name = {t["name"]: t for t in r.json()}
         assert by_name["بلاس فون"]["currency"] == "EGP"            # 🇪🇬 مصر
         assert by_name["وليد تونس العاصمة"]["currency"] == "TND"   # 🇹🇳 تونس
-        assert by_name["خصم 1%"]["currency"] is None               # — غير محدّد
+        assert by_name["خصم 1%"]["currency"] == "EGP"              # 🇪🇬 مصر (كودها مستكمَل 72)
+        assert by_name["صافي"]["currency"] is None                 # — غير محدّد
 
 
 async def test_rooms_patch_type_only_preserves_name(db):

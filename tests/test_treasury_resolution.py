@@ -28,6 +28,30 @@ def test_misspelled_alias_resolves_fix4():
     assert resolve_treasury("بلس", TREAS).code == "74"
 
 
+# ── الخزائن الخارجية sell_and_buy: خصم 1% مستكمَلة الكود (72، EGP) ────────────
+def test_khasm_1pct_seeded_code_and_currency():
+    from core.constants import Currency
+    rec = next(t for t in TREAS if t.name == "خصم 1%")
+    assert rec.code == "72"
+    assert rec.currency == Currency.EGP
+    assert rec.type == TreasuryType.SELL_AND_BUY
+
+
+def test_khasm_1pct_resolves_by_name_and_aliases():
+    # الاسم وكل الـaliases تحلّ للكود 72 (يشمل «خصم 1%»/«خصم1%» الصريحة)
+    for token in ("خصم 1%", "خصم1%", "خصم 1", "خصم1", "خصم"):
+        assert resolve_treasury(token, TREAS).code == "72", token
+
+
+def test_all_sell_and_buy_treasuries_present():
+    # كل الخزائن الخارجية (sell_and_buy) موجودة في البذرة
+    sab = {t.name: t for t in TREAS if t.type == TreasuryType.SELL_AND_BUY}
+    assert set(sab) == {"خصم 1%", "صافي", "تونسي خارجي"}
+    assert sab["خصم 1%"].code == "72"       # مستكمَل
+    assert sab["صافي"].code is None         # معلّق (ملحق ب-3)
+    assert sab["تونسي خارجي"].code is None  # معلّق (ملحق ب-3)
+
+
 # ── منع false-positive (#2) — اسم زبون/مدينة لا يُطابِق خزينة ────────────────
 def test_customer_name_not_matched_as_treasury():
     # «محمد عبدالرحيم» (اسم مستلم) لا يُطابِق خزينة «محمد حمامات» (كان code 79 خطأً)

@@ -23,6 +23,7 @@ from ..constants import (
     ROOM_MATCH_WINDOW_SECONDS,
     RoomType,
     Status,
+    TreasuryType,
 )
 from ..db import Database
 from ..bus import Bus
@@ -145,7 +146,18 @@ class MatchingService:
            يُرفع `deal.treasury_no_room` و`return False`؛ يتولّى `escalation_tick` تنبيه المركزية
            لطلب اعتماد يدوي («تم» من موظف معتمد) ثم التصعيد للمسؤول بعد 15 دقيقة (§8.1، قرار
            صاحب العمل 2026-07-08). خطأ قراءة DB (عارض) يبقى fail-open (True، لا حجب بلا يقين).
+        🔴 استثناء: خزينة خارجية (sell_and_buy: خصم1%/صافي/تونسي خارجي §6) بلا غرفة واتساب →
+           **اعتماد تلقائي** (treasury=True، بلا «تم» يدوي): خزائن محاسبية داخلية لا غرفة لها
+           أصلًا، فلا معنى لطلب اعتماد يدوي عليها (قرار صاحب العمل).
         """
+        # خزينة خارجية sell_and_buy → اعتماد تلقائي (لا غرفة، لا «تم» يدوي).
+        treasury = self._deal_treasury(deal)
+        if treasury is not None and getattr(treasury, "type", None) == TreasuryType.SELL_AND_BUY:
+            deal.treasury_no_room = False
+            log.debug("خزينة الصفقة %s خارجية (sell_and_buy) → اعتماد تلقائي بلا غرفة (§6).",
+                      deal.deal_id)
+            return True
+
         code = self._deal_treasury_code(deal)
         repo = getattr(self._db, "rooms", None)
 

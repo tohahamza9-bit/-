@@ -332,6 +332,34 @@ async def test_treasury_no_room_confirm_via_reply_proceeds(db):
     # HELD ليست حالة نهائية تحجب «تم» — يمرّ التجاوز البشري ويُكمل الإدخال (Pipeline._handle_control).
 
 
+async def test_sell_and_buy_treasury_auto_matches_without_room(db):
+    # 🔴 خزينة خارجية sell_and_buy (خصم1%) بلا غرفة → اعتماد تلقائي (لا «تم» يدوي، قرار صاحب العمل)
+    bus = make_bus(db)
+    svc = MatchingService(db, bus, customer_room_jids=[CUST_ROOM])
+    await _seed_room(db, CUST_ROOM, "c1", "احمد العكاري 8475")
+    leg = make_leg(treasury=TreasuryRef(
+        code="72", name="خصم 1%", type=TreasuryType.SELL_AND_BUY, currency=Currency.EGP))
+    deal = await svc.match_in_rooms(make_deal(leg), now=T0 + timedelta(seconds=12))
+    assert deal.matched_treasury_room is True    # اعتماد تلقائي
+    assert deal.treasury_no_room is False        # لا «تم» يدوي
+    assert deal.matched_customer_room is True
+    assert deal.status is Status.MATCHED
+
+
+async def test_sell_and_buy_treasury_no_manual_confirm_alert(db):
+    # لا تنبيه «تم» ولا تصعيد للخزينة الخارجية (بعكس sell_only بلا غرفة)
+    bus = make_bus(db)
+    svc = MatchingService(db, bus, customer_room_jids=[CUST_ROOM])
+    await _seed_room(db, CUST_ROOM, "c1", "احمد العكاري 8475")
+    leg = make_leg(treasury=TreasuryRef(
+        code="72", name="خصم 1%", type=TreasuryType.SELL_AND_BUY, currency=Currency.EGP))
+    deal = await svc.match_in_rooms(make_deal(leg), now=T0 + timedelta(seconds=12))
+    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=20))
+    # MATCHED نهائية → لا تذكير/تصعيد، ولا رسالة «تم»
+    assert deal.status is Status.MATCHED
+    assert not [o for o in await _outgoing(db) if "تم" in (o.get("text") or "")]
+
+
 async def test_treasury_linked_room_found_when_transfer_present(db):
     # غرفة خزينة الصفقة موجودة والحوالة ظهرت فيها → خزينة=True (بحث فعلي في الغرفة المرتبطة).
     bus = make_bus(db)
