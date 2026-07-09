@@ -14,11 +14,19 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from .bus import Bus
-from .constants import Currency, Mark, OperationType, RoomType, Status, TreasuryType
+from .constants import (
+    SECOND_MESSAGE_LINK_SECONDS,
+    Currency,
+    Mark,
+    OperationType,
+    RoomType,
+    Status,
+    TreasuryType,
+)
 from .db import Database, utcnow
 from .guard import Guard, build_reversal, is_out_of_active_window
 from .logging_setup import get_logger
@@ -28,7 +36,7 @@ from .parsing import detect_control, parse_message
 from .parsing.normalize import normalize_price
 from .parsing.resolve import resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
-from .queue.service import QueueService, is_completion_fragment
+from .queue.service import QueueService, _as_naive_utc, is_completion_fragment
 from .queue.stabilization import is_stable
 from .verification.sql_verifier import SqlVerifier
 from .writers.base import Writer
@@ -190,6 +198,39 @@ class Pipeline:
         # التجميع (§7.3): صفقة جديدة أو دمج طرف ثانٍ
         deal = await self.queue.try_group(leg, now, chat_jid=raw.chat_jid)
         return deal
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # (5·أ) حجْر الإقلاع: صفقات معلّقة قديمة لا تُعالَج تلقائيًّا بعد إعادة التشغيل
+    # ═════════════════════════════════════════════════════════════════════════
+    async def expire_stale_on_startup(self, now: datetime) -> list[Deal]:
+        """عند بدء تشغيل النواة: أي صفقة معلّقة (WAITING_SECOND_LEG أو PARSED) عمرها (من
+        created_at) أكثر من SECOND_MESSAGE_LINK_SECONDS (120s) → **تُحجَر** (ESCALATED) بلا
+        معالجة ولا كتابة في MONEYADO، مع تنبيه واحد للمسؤول لكل صفقة (§7.3، §12).
+
+        السبب: بعد إطفاء/إعادة تشغيل قد تكون النافذة الزمنية للربط انقضت أو سبق تنبيه المسؤول؛
+        فمعالجتها تلقائيًّا تُدخِل حوالة قديمة/مكرّرة. القاعدة الذهبية (§0): عند الشكّ لا نكتب —
+        نصعّد للإنسان. تُستدعى مرّة عند الإقلاع قبل تشغيل العامل، فلا يلتقطها sweep_waiting/tick."""
+        cutoff = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        quarantined: list[Deal] = []
+        for deal in await self.db.deals.by_status(Status.WAITING_SECOND_LEG, Status.PARSED):
+            if _as_naive_utc(deal.created_at) >= cutoff:
+                continue                      # حديثة (≤120s) → تُعالَج طبيعيًّا
+            deal.status = Status.ESCALATED
+            deal.mark = Mark.WARN
+            deal.hold_reason = (
+                "صفقة معلّقة قديمة عند إعادة التشغيل — لم تُعالَج تفاديًا لإدخال حوالة قديمة (§7.3)"
+            )
+            await self.db.deals.upsert(deal)  # حجْر صامت (بلا كتابة في MONEYADO)
+            await self.bus.notify_admin(
+                f"⏰ صفقة معلّقة قديمة ({self._ref(deal)}) عند إعادة التشغيل — لم تُعالَج تلقائيًّا "
+                f"(عمرها > {SECOND_MESSAGE_LINK_SECONDS}s)؛ مراجعة يدوية.",
+                self._deal_key(deal),
+            )
+            quarantined.append(deal)
+            log.warning("حجْر الإقلاع: صفقة %s قديمة → ESCALATED بلا معالجة", deal.deal_id)
+        if quarantined:
+            log.info("حجْر الإقلاع (§7.3): %d صفقة معلّقة قديمة حُجِرت بلا كتابة", len(quarantined))
+        return quarantined
 
     # ═════════════════════════════════════════════════════════════════════════
     # (5) الطرف الثاني: تصعيد المتأخّر + معالجة الصفقات الجاهزة

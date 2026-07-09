@@ -128,6 +128,16 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
             log.warning("SQL معطّل — تخطّي الاسترجاع بعد الإطفاء (§12). فعّله قبل التخزين الحقيقي.")
             run_worker_now = run_worker
 
+        # 🔴 حجْر الإقلاع (§7.3): صفقات معلّقة قديمة (>120s) لا تُعالَج تلقائيًّا عند إعادة التشغيل
+        #    (تفادي إدخال حوالة قديمة) — تُحجَر ESCALATED مع تنبيه المسؤول، قبل تشغيل العامل.
+        try:
+            quarantined = await pipeline.expire_stale_on_startup(utcnow())
+            if quarantined:
+                log.warning("حجْر الإقلاع: %d صفقة معلّقة قديمة حُجِرت (ESCALATED) بلا كتابة.",
+                            len(quarantined))
+        except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل
+            log.exception("فشل حجْر الإقلاع: %s — متابعة.", exc)
+
         if run_worker_now:
             state["worker"] = asyncio.create_task(_worker_loop(pipeline, state["stop"]))
         log.info("MONEYADO Bot جاهز — dry_run=%s، تخزين افتراضي: إيقاف (§13).", settings.dry_run)

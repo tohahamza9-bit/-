@@ -17,7 +17,9 @@ import pytest
 
 from core.bus import Bus
 from core.constants import Mark, OperationType, RoomType, Status, TreasuryType
-from core.models import BotControl, EmployeeRecord, RawMessage, Room, TreasuryRecord, WriteResult
+from core.models import (
+    BotControl, Deal, EmployeeRecord, ParsedLeg, RawMessage, Room, TreasuryRecord, WriteResult,
+)
 from core.pipeline import Pipeline
 
 CENTRAL = "central@g.us"
@@ -292,6 +294,39 @@ async def test_golden_path_simple_egp_sell(db):
     outs = await db.outgoing.next_unsent(50)
     assert all(o["chat_jid"] in {CENTRAL, ADMIN} for o in outs)
     assert any(o.get("reaction") == Mark.DONE.value and o["chat_jid"] == CENTRAL for o in outs)
+
+
+async def test_expire_stale_pending_on_startup(db):
+    """حجْر الإقلاع: WAITING/PARSED عمرها >120s → ESCALATED + تنبيه؛ الحديثة (≤120s) تبقى."""
+    pipe = _make_pipeline(db)
+    now = PAST + timedelta(seconds=1000)
+    old = now - timedelta(seconds=200)        # > 120s → تُحجَر
+    fresh = now - timedelta(seconds=30)        # ≤ 120s → تبقى
+
+    def _leg(ref):
+        return ParsedLeg(operation=OperationType.SELL, customer_code="1208",
+                         amount=1600.0, reference_number=ref)
+
+    deals = [
+        Deal(deal_id="w1", status=Status.WAITING_SECOND_LEG, created_at=old, updated_at=old,
+             chat_jid=CENTRAL, sell_leg=_leg("A1")),
+        Deal(deal_id="p1", status=Status.PARSED, created_at=old, updated_at=old,
+             chat_jid=CENTRAL, sell_leg=_leg("A2")),
+        Deal(deal_id="p2", status=Status.PARSED, created_at=fresh, updated_at=fresh,
+             chat_jid=CENTRAL, sell_leg=_leg("A3")),   # حديثة
+    ]
+    for d in deals:
+        await db.deals.upsert(d)
+
+    quarantined = await pipe.expire_stale_on_startup(now)
+    assert {d.deal_id for d in quarantined} == {"w1", "p1"}
+    assert (await db.deals.get("w1")).status == Status.ESCALATED
+    assert (await db.deals.get("p1")).status == Status.ESCALATED
+    assert (await db.deals.get("p2")).status == Status.PARSED       # الحديثة لم تُحجَر
+    # تنبيه واحد للمسؤول لكل صفقة محجورة (لا كتابة في MONEYADO)
+    outs = await db.outgoing.next_unsent(50)
+    admin_notifs = [o for o in outs if o["chat_jid"] == ADMIN]
+    assert len(admin_notifs) == 2
 
 
 async def test_auto_trust_skips_room_matching_and_completes(db):
