@@ -51,6 +51,19 @@ async def test_si0464_labeled(db):
     assert leg.treasury is not None and leg.treasury.name == "بلاس فون"
 
 
+async def test_si_saafi_treasury_is_ignored(db):
+    """«الخزينة: صافي» ليست خزينة وجهة (تعني «المبلغ صافي») → treasury=None (تُعامَل كملاحظة §6.1)."""
+    text = (
+        "رقم العملية: SI1901\nرقم المستلم: 01093232832\n"
+        "اسم الزبون: مروان الشاوش كود 1284\n"
+        "القيمة (صافي): 3540 ج.م\nالسعر: 5.9\nنوع التحويل: فودافون كاش\nالخزينة: صافي"
+    )
+    leg = parse_message(text, await _treas(db), []).leg
+    assert leg is not None
+    assert leg.treasury is None                     # «صافي» ليست خزينة
+    assert leg.customer_code == "1284"              # باقي الحقول سليمة
+
+
 async def test_si_customer_code_merged_with_dot(db):
     """صيغة جديدة: كود مدموج بسطر الاسم بنقطة «حميد بن غارات كود.793» → كود=793، الاسم بلا الكود."""
     text = (

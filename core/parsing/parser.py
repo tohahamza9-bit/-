@@ -392,10 +392,13 @@ def _build_leg(
 
     currency: Optional[Currency] = f.get("currency")
 
-    # الخزينة (§4) — من سطر A أو من عنوان SI
+    # الخزينة (§4) — من سطر A أو من عنوان SI. «صافي/خصم1%/بدون خصم» ليست خزينة وجهة بل
+    # مؤشّر «المبلغ صافي/نوع الخصم» → تُتجاهَل عند البحث عن الخزينة (كأسماء المدن) فتبقى
+    # treasury=None وتُعامَل كملاحظة (§3.2 §6.1). خزينة الطرفين الحسابية تُسنَد لاحقًا لا من هنا.
     trec: Optional[TreasuryRecord] = f.get("treasury_record")
-    if trec is None and f.get("treasury_name"):
-        trec = resolve_treasury(f["treasury_name"], treasuries)
+    tname = f.get("treasury_name")
+    if trec is None and tname and not _is_discount_indicator(tname):
+        trec = resolve_treasury(tname, treasuries)
     tref: Optional[TreasuryRef] = None
     if trec is not None:
         if currency is None:
