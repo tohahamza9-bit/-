@@ -272,42 +272,70 @@ class MoneyadoScreen(ScreenController):
         self._connect_app(operation, pid=pid)
         self._bind_form(operation)
 
+    # أصناف نوافذ MONEYADO التي تدلّ على نسخة **معروضة أمام المستخدم**: النافذة الرئيسية
+    # (ThunderRT6Form) أو فورم العملية (ThunderRT6FormDC). 🔴 لا ThunderRT6Main: نافذة VB6
+    # مخفية صفرية الحجم (0×0) وWS_VISIBLE **دائمًا** لكل نسخة — فلا تُميّز المعروضة من الخلفية
+    # (أُثبت حيًّا: نسختان كلتاهما is_visible=True بينما النافذة الحقيقية مُصغّرة/صفرية).
+    _VISIBLE_WINDOW_CLASSES = {"ThunderRT6Form", "ThunderRT6FormDC"}
+
     def _list_stock_pids(self, process_name: str) -> list[int]:
         """PIDs العمليات باسم process_name (يُعزل للاختبار)."""
         return _pids_by_image_name(process_name)
 
+    def _visible_stock_pids(self, process_name: str, pids: list[int]) -> list[int]:
+        """من بين pids، مَن له نافذة MONEYADO **معروضة فعلاً** — بترتيب الظهور بلا تكرار.
+        «معروضة» = صنفها Form/FormDC، WS_VISIBLE، **غير مُصغّرة**، و**حجمها > 0** (لا 0×0)؛
+        فتُستبعَد النسخ الخلفية/المُصغّرة/صفرية الحجم. يُعزل للاختبار (يلمس pywinauto)."""
+        wanted = set(pids)
+        visible: list[int] = []
+        for win in Desktop(backend="win32").windows():
+            try:
+                p = win.process_id()
+                if p not in wanted or p in visible:
+                    continue
+                if win.class_name() not in self._VISIBLE_WINDOW_CLASSES:
+                    continue
+                if not win.is_visible() or win.is_minimized():
+                    continue
+                rect = win.rectangle()
+                if rect.width() <= 0 or rect.height() <= 0:   # 0×0 = غير معروضة فعلاً
+                    continue
+                visible.append(p)
+            except Exception:                 # نافذة تلاشت/تعذّر فحصها — تخطٍّ آمن
+                continue
+        return visible
+
     def _connect_app(self, operation: OperationType, *, pid: Optional[int] = None) -> None:
         """يتصل بعملية MONEYADO (بلا عنوان — VB6) ويهيّئ self._app. لا يربط فورمًا بعد.
 
-        اكتشاف ذكيّ (بلا تدخّل يدوي عند إعادة تشغيل MONEYADO §0):
-          1) PID مثبّت (وسيط صريح أو MONEYADO_PID) **وحيّ** (ضمن نسخ stock.exe العاملة) → يُستخدم.
-          2) PID مثبّت لكنه مات، أو غير مضبوط → اكتشاف تلقائي لنسخ stock.exe العاملة:
-             نسخة واحدة → تُستخدم (ويُحدَّث self._pid منها)؛ أكثر من واحدة → RuntimeError «حدّد
-             MONEYADO_PID» (لا اتصال عشوائي كي لا نُدخِل في نافذة نسخة خطأ)؛ صفر → «MONEYADO غير مشغّل».
+        🔴 يتصل **فقط** بنسخة stock.exe نافذتها مرئية (Main/Form/FormDC) — لا يقبل نسخة خلفية/شبح
+        أبدًا (قرار المستخدم §0):
+          1) لا نسخة stock.exe عاملة → «MONEYADO غير مشغّل».
+          2) عاملة لكن لا نافذة مرئية → «MONEYADO غير مرئي — افتحه أولًا».
+          3) نسخة مرئية → تُستخدم ويُحدَّث self._pid. PID مثبّت (MONEYADO_PID) يُفضَّل إن كان ضمن
+             المرئية؛ وإلا أوّل نسخة مرئية (أكثر من مرئية = نادر → الأولى).
         """
         if not _PYWINAUTO_AVAILABLE:
             raise RuntimeError("pywinauto غير متاح — لا يمكن الاتصال بشاشة MONEYADO.")
         screen = self._screen(operation)
         process_name = screen.get("process_name", self._DEFAULT_PROCESS)
-        pids = self._list_stock_pids(process_name)   # النسخ العاملة الآن
-
-        # (1) PID مثبّت وحيّ → استخدمه (يفضّ الالتباس حتى مع وجود نسخ أخرى).
-        target_pid = pid if pid is not None else self._pid
-        if target_pid is not None and target_pid in pids:
-            self._connect_pid(target_pid)
-            return
-        if target_pid is not None:
-            log.warning("MONEYADO_PID=%s غير عامل — بحث تلقائي عن نسخة %s.", target_pid, process_name)
-
-        # (2) اكتشاف تلقائي من النسخ العاملة.
-        if len(pids) > 1:
-            raise RuntimeError(
-                f"وُجد {len(pids)} نسخ من {process_name} (PIDs={sorted(pids)}) — التباس اتصال. "
-                f"أغلِق الزائد وأبقِ نسخة واحدة، أو حدّد MONEYADO_PID في .env (§0)."
-            )
+        pids = self._list_stock_pids(process_name)
         if not pids:
             raise RuntimeError(f"MONEYADO غير مشغّل (لا نسخة {process_name}) — شغّله أولًا.")
-        self._connect_pid(pids[0])   # (3) يُحدَّث self._pid من النسخة المكتشَفة
+
+        visible = self._visible_stock_pids(process_name, pids)
+        if not visible:
+            raise RuntimeError("MONEYADO غير مرئي — افتحه أولًا (لا نافذة MONEYADO مرئية).")
+
+        target_pid = pid if pid is not None else self._pid
+        if target_pid is not None and target_pid in visible:
+            chosen = target_pid                    # المثبّت مرئي → يُفضَّل (يفضّ الالتباس)
+        else:
+            chosen = visible[0]                    # أوّل نسخة مرئية
+            if len(visible) > 1:
+                log.warning("أكثر من نسخة MONEYADO مرئية (%s) — استُخدمت الأولى %s (§0).",
+                            sorted(visible), chosen)
+        self._connect_pid(chosen)                  # يُحدَّث self._pid
 
     def _connect_pid(self, pid: int) -> None:
         """يتصل بنسخة MONEYADO المعطاة ويثبّت self._pid عليها."""
