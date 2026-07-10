@@ -10,6 +10,9 @@
 from __future__ import annotations
 
 from .classify import detect_control, is_out_of_scope
-from .parser import parse_completion_fragment, parse_message
+from .parser import extract_code_name_price_lines, parse_completion_fragment, parse_message
 
-__all__ = ["parse_message", "parse_completion_fragment", "detect_control", "is_out_of_scope"]
+__all__ = [
+    "parse_message", "parse_completion_fragment", "extract_code_name_price_lines",
+    "detect_control", "is_out_of_scope",
+]

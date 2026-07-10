@@ -414,6 +414,58 @@ async def test_supplier_second_pattern_fishing_code_last(db):
     assert sell.amount_after_discount == 1000 and sell.supplier_price_raw == "5.90"
 
 
+async def test_reference_less_second_links_customer_and_supplier(db):
+    """رسالة ثانية بلا رقم إشاري (سطر زبون + سطر مورد) → تُكمِّل صفقة معلّقة واحدة في الغرفة (§7.3)."""
+    from core.constants import Currency
+    from core.models import Deal, ParsedLeg
+    from core.parsing import extract_code_name_price_lines
+    from core.queue.service import QueueService
+    treas = await db.treasuries.all_active()
+    svc = QueueService(db)
+    now = PAST + timedelta(seconds=1000)
+    # صفقة معلّقة: رقم إشاري + مبلغ + هاتف، بلا كود زبون (تنتظر الإكمال)
+    sell = ParsedLeg(operation=OperationType.SELL, reference_number="A8137", amount=37050.0,
+                     currency=Currency.EGP, phone="01225484288")
+    await db.deals.upsert(Deal(deal_id="d1", status=Status.WAITING_SECOND_LEG,
+                               created_at=now - timedelta(seconds=10), updated_at=now,
+                               chat_jid=CENTRAL, sell_leg=sell))
+    pairs = extract_code_name_price_lines("1300 عبد الله معتيق 5.82\n1163 مومن عريبي 5.86")
+    assert len(pairs) == 2
+    cands = await svc.waiting_candidates_for_second(CENTRAL, now)
+    assert len(cands) == 1
+    merged = await svc.absorb_customer_supplier(cands[0], pairs[0], pairs[1], "m2", treas, now)
+    s = merged.sell_leg
+    assert (s.customer_code, s.customer_name) == ("1300", "عبد الله معتيق")   # كُمِّل الزبون
+    assert s.price_normalized == "5.82"
+    assert s.supplier is not None and (s.supplier.code, s.supplier.name) == ("1163", "مومن عريبي")
+    assert s.supplier_price_raw == "5.86" and s.treasury.code == "85"          # فودافون بالخصم
+    pipe = _make_pipeline(db)
+    pipe._maybe_synthesize_buy_leg(merged)
+    b = merged.buy_leg
+    assert b is not None and b.customer_code == "1163" and b.is_supplier_counterpart is True
+
+
+async def test_reference_less_second_ambiguous_escalates(db):
+    """رسالة ثانية بلا رقم + **أكثر من صفقة معلّقة** في الغرفة → تصعيد للمسؤول لا تخمين (§0)."""
+    from core.constants import Currency
+    from core.models import Deal, ParsedLeg
+    now = PAST + timedelta(seconds=1000)
+    for i in (1, 2):
+        sell = ParsedLeg(operation=OperationType.SELL, reference_number=f"A81{i}",
+                         amount=1000.0, currency=Currency.EGP)
+        await db.deals.upsert(Deal(deal_id=f"d{i}", status=Status.WAITING_SECOND_LEG,
+                                   created_at=now - timedelta(seconds=10), updated_at=now,
+                                   chat_jid=CENTRAL, sell_leg=sell))
+    pipe = _make_pipeline(db, rooms=False)
+    raw = _raw("m2", "1300 عبد الله معتيق 5.82\n1163 مومن عريبي 5.86", jid=CENTRAL, at=now)
+    result = await pipe._ingest(raw, now)
+    assert result is None                                       # لا ربط (التباس)
+    for i in (1, 2):
+        assert (await db.deals.get(f"d{i}")).sell_leg.supplier is None
+    outs = await db.outgoing.next_unsent(50)
+    assert any(o["chat_jid"] == ADMIN and "تعذّر الربط" in (o.get("text") or "") for o in outs)
+
+
 async def test_auto_trust_skips_room_matching_and_completes(db):
     """وضع التلقائي (auto_trust): غرف مُصنّفة بلا رسالة غرفة → تُتخطّى المطابقة وتكتمل عبر بوابة الثقة."""
     await db.control.set(BotControl(storage_enabled=True, auto_trust=True, state="running"), "test")

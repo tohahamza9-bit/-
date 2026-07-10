@@ -362,6 +362,20 @@ def _parse_customer_line(seg: str) -> Optional[tuple[str, Optional[str], Optiona
     return code, name, price
 
 
+def extract_code_name_price_lines(text: str) -> list[tuple[str, str, Optional[str]]]:
+    """يستخرج أسطر «كود + اسم + [سعر]» من النصّ (كلٌّ على سطر) — للرسالة الثانية بلا رقم إشاري
+    (سطر زبون ثم سطر مورد §7.3). يتجاهل الأسطر غير المطابقة (هاتف/عملة/خزينة…)."""
+    pairs: list[tuple[str, str, Optional[str]]] = []
+    for ln in (text or "").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        r = _parse_customer_line(ln)
+        if r is not None and r[0] and r[1]:   # كود + اسم (السعر اختياري)
+            pairs.append(r)
+    return pairs
+
+
 def _extract_code_name(val: str) -> tuple[Optional[str], Optional[str]]:
     """يستخرج الكود والاسم من نص الزبون: «مروان الشاوش كود 1284» → (1284, مروان الشاوش).
 

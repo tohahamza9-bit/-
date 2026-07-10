@@ -17,6 +17,7 @@ from ..constants import (
     PENDING_REPLY_MAX_SECONDS,
     SECOND_LEG_MAX_SECONDS,
     SECOND_MESSAGE_LINK_SECONDS,
+    Currency,
     Mark,
     OperationType,
     Status,
@@ -25,6 +26,7 @@ from ..db import Database
 from ..logging_setup import get_logger
 from ..models import Deal, ParsedLeg, RawMessage, SupplierRecord, SupplierRef, TreasuryRecord, TreasuryRef, WriteJob
 from ..parsing import parse_completion_fragment
+from ..parsing.normalize import normalize_price
 from ..parsing.resolve import resolve_treasury
 from .commission import compute_commission
 from .grouping import _norm_ref, compute_grouping_key, discount_pair
@@ -291,6 +293,42 @@ class QueueService:
             sell.reference_number, sell.amount_after_discount,
         )
         return deal
+
+    async def waiting_candidates_for_second(
+        self, chat_jid: str | None, now: datetime,
+    ) -> list[Deal]:
+        """صفقات معلّقة (WAITING) في الغرفة خلال نافذة الربط (120s)، لها طرف بيع بلا مورد ولا
+        طرف شراء — مرشّحة لرسالة ثانية بلا رقم إشاري (§7.3). تعدّدها = التباس → يُصعَّد في الأنبوب."""
+        if not chat_jid:
+            return []
+        horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        return [
+            d for d in await self.db.deals.waiting_in_room(chat_jid)
+            if d.sell_leg is not None and d.buy_leg is None and d.sell_leg.supplier is None
+            and _as_naive_utc(d.created_at) >= horizon
+        ]
+
+    async def absorb_customer_supplier(
+        self, deal: Deal, customer: tuple, supplier: tuple, message_key: str,
+        treasuries: list[TreasuryRecord], now: datetime,
+    ) -> Deal:
+        """رسالة ثانية بلا رقم إشاري بسطرين «كود+اسم+سعر»: السطر ١ (زبون) **يكمل** بيانات صفقة
+        البيع الناقصة (كود/اسم/سعر — لا يُنشئ زبونًا)، والسطر ٢ (مورد) يُدمَج كطرف مورد (§7.3)."""
+        ccode, cname, cprice = customer
+        sell = deal.sell_leg
+        # (١) السطر الأول يكمل الناقص فقط (لا يستبدل زبونًا موجودًا)
+        if not sell.customer_code and ccode:
+            sell.customer_code = ccode
+        if not sell.customer_name and cname:
+            sell.customer_name = cname
+        if not sell.price_normalized and cprice:
+            _raw, pnorm = normalize_price(cprice, sell.currency or Currency.EGP)
+            sell.price_raw, sell.price_normalized = cprice, pnorm
+        # (٢) السطر الثاني = المورد → نفس منطق طرف المورد (خزينة «فودافون بالخصم» 85 + اشتقاق الشراء)
+        scode, sname, sprice = supplier
+        frag = ParsedLeg(operation=OperationType.SELL, customer_code=scode,
+                         customer_name=sname, price_raw=sprice)
+        return await self._absorb_supplier_leg(deal, frag, message_key, treasuries, now)
 
     @staticmethod
     def _apply_leg(deal: Deal, leg: ParsedLeg) -> None:

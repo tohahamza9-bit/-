@@ -32,7 +32,12 @@ from .guard import Guard, build_reversal, is_out_of_active_window
 from .logging_setup import get_logger
 from .matching.service import MatchingService
 from .models import Deal, LedgerEntry, ParsedLeg, RawMessage, WriteJob
-from .parsing import detect_control, parse_completion_fragment, parse_message
+from .parsing import (
+    detect_control,
+    extract_code_name_price_lines,
+    parse_completion_fragment,
+    parse_message,
+)
 from .parsing.normalize import normalize_price
 from .parsing.resolve import resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
@@ -171,6 +176,24 @@ class Pipeline:
             )
             return None
         if result.kind == "noise":
+            # 🔴 رسالة ثانية بلا رقم إشاري بسطرين «كود+اسم+سعر» (زبون ثم مورد §7.3): تُربَط بصفقة
+            #    معلّقة في نفس الغرفة خلال النافذة (وقت+غرفة). حماية الالتباس: أكثر من صفقة معلّقة →
+            #    تصعيد للمسؤول لا تخمين (§0).
+            pairs = extract_code_name_price_lines(raw.text)
+            if len(pairs) >= 2:
+                cands = await self.queue.waiting_candidates_for_second(raw.chat_jid, now)
+                if len(cands) == 1:
+                    return await self.queue.absorb_customer_supplier(
+                        cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
+                if len(cands) > 1:
+                    await self.bus.notify_admin(
+                        f"⚠️ رسالة ثانية بلا رقم إشاري وتعدّد صفقات معلّقة ({len(cands)}) في الغرفة "
+                        f"— تعذّر الربط التلقائي؛ مراجعة يدوية: {(raw.text or '').strip()[:60]}",
+                        raw.message_key,
+                    )
+                    log.warning("رسالة ثانية بلا رقم + تعدّد معلّقات (%d) — تصعيد (§0).", len(cands))
+                    return None
+
             # رد خزينة/مورد بلا رقم إشاري («بلس»/«صافي» وحدها) — ليس هدرزة بل جزء مكمّل
             # لحوالة معلّقة (§7.3): يُربَط بالمعلّقة (قرب زمني/نفس الغرفة) أو يُحفَظ ردًّا معلّقًا.
             if is_completion_fragment(result.leg):
