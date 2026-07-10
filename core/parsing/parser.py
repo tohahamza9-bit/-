@@ -460,10 +460,38 @@ def _parse_customer_line(seg: str) -> Optional[tuple[str, Optional[str], Optiona
     return code, name, price
 
 
-def extract_code_name_price_lines(text: str) -> list[tuple[str, str, Optional[str]]]:
+def _parse_name_price_supplier(
+    seg: str, suppliers: list[SupplierRecord]
+) -> Optional[tuple[str, str, Optional[str]]]:
+    """سطر «اسم [سعر]» **بلا كود رقمي** («مومن عريبي 5.90») → يُطابَق موردًا مسجّلًا فيصير
+    (كود المورد من db، اسمه، السعر). يمكّن Path A من ربط سطر مورد بلا كود بالقائمة البيضاء
+    (§5.4 §7.3). المطابقة عبر resolve_supplier الصارمة (§5.4) فلا يُطابَق نصّ حرّ/مدينة/خزينة."""
+    tokens = seg.split()
+    if not tokens:
+        return None
+    price: Optional[str] = None
+    if _NUMERIC_TOKEN_RE.match(tokens[-1]):
+        price = tokens[-1].replace("،", ".")     # الفاصلة العربية → عشرية (§3.6)
+        tokens = tokens[:-1]
+    name = " ".join(tokens).strip()
+    if not name or not _ARABIC_RE.search(name):
+        return None
+    srec = resolve_supplier(name, suppliers)
+    if srec is None or not srec.code:            # مورد مسجّل بكود فقط (بلا كود → لا يُكتب §0)
+        return None
+    return srec.code, srec.name, price
+
+
+def extract_code_name_price_lines(
+    text: str, suppliers: Optional[list[SupplierRecord]] = None,
+) -> list[tuple[str, str, Optional[str]]]:
     """يستخرج أسطر «كود + اسم + [سعر]» من النصّ — للرسالة الثانية بلا رقم إشاري (سطر زبون ثم سطر
     مورد §7.3). المقاطع تُفصَل بسطر جديد **أو بـ«/»** («1300 عبد الله 5.82 / 760 طه 5.90» = سطران:
-    زبون + مورد). يتجاهل المقاطع غير المطابقة (هاتف/عملة/خزينة…)."""
+    زبون + مورد). يتجاهل المقاطع غير المطابقة (هاتف/عملة/خزينة…).
+
+    🔴 سطر المورد قد يأتي **بلا كود** («مومن عريبي 5.90»): عند تمرير `suppliers` يُطابَق بالاسم
+    في القائمة البيضاء فيُستكمَل كوده من db (§5.4) — فيصير الزوج صالحًا وPath A يعمل. بلا
+    `suppliers` (السلوك الأصلي) تُقبَل الأسطر ذات الكود الرقمي فقط."""
     pairs: list[tuple[str, str, Optional[str]]] = []
     for raw_line in (text or "").splitlines():
         for ln in raw_line.split("/"):       # «/» فاصل مقاطع كالسطر الجديد (§7.3)
@@ -471,8 +499,13 @@ def extract_code_name_price_lines(text: str) -> list[tuple[str, str, Optional[st
             if not ln or detect_currency(ln):   # مقطع مبلغ (فيه رمز عملة) → ليس سطر زبون
                 continue
             r = _parse_customer_line(ln)
-            if r is not None and r[0] and r[1]:   # كود + اسم (السعر اختياري)
+            if r is not None and r[0] and r[1]:   # كود رقمي + اسم (السعر اختياري)
                 pairs.append(r)
+                continue
+            if suppliers:                        # بلا كود: طابِق موردًا مسجّلًا بالاسم (كوده من db)
+                s = _parse_name_price_supplier(ln, suppliers)
+                if s is not None:
+                    pairs.append(s)
     return pairs
 
 

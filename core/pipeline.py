@@ -143,11 +143,11 @@ class Pipeline:
         if raw.chat_jid != self.bus.central_jid or not (raw.text or "").strip():
             return False
         # رسالة ثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون+مورد) — تُربَط بحوالة معلّقة فورًا
-        # (لا تنتظر استقرار «الحرف» ولا نبضة تالية).
-        if len(extract_code_name_price_lines(raw.text)) >= 2:
+        # (لا تنتظر استقرار «الحرف» ولا نبضة تالية). سطر المورد قد يأتي بلا كود → يُطابَق بـ suppliers.
+        suppliers = await self.db.suppliers.all_active()
+        if len(extract_code_name_price_lines(raw.text, suppliers)) >= 2:
             return True
         treasuries = await self.db.treasuries.all_active()
-        suppliers = await self.db.suppliers.all_active()
         res = parse_message(raw.text, treasuries, suppliers)
         return res.kind == "noise" and is_completion_fragment(res.leg)
 
@@ -170,7 +170,7 @@ class Pipeline:
         # 🔴 ربط الرسالة الثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون ثم مورد §7.3) بصفقة معلّقة
         #    في نفس الغرفة خلال النافذة — **قبل التصنيف** كي لا تُسقَط noise/خارج-النطاق. لو نجح الربط
         #    → return فورًا؛ وإلا نكمل المسار العادي. حماية الالتباس: تعدّد المعلّقات → تصعيد لا تخمين (§0).
-        pairs = extract_code_name_price_lines(raw.text)
+        pairs = extract_code_name_price_lines(raw.text, suppliers)
         if len(pairs) >= 2:
             cands = await self.queue.waiting_candidates_for_second(raw.chat_jid, now)
             if len(cands) == 1:
