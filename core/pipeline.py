@@ -47,6 +47,7 @@ from .queue.service import (
     _as_naive_utc,
     is_completion_fragment,
     is_treasury_only_reply,
+    is_treasury_second_reply,
 )
 from .queue.stabilization import is_stable
 from .verification.sql_verifier import SqlVerifier
@@ -162,7 +163,10 @@ class Pipeline:
             return True
         treasuries = await self.db.treasuries.all_active()
         res = parse_message(raw.text, treasuries, suppliers)
-        return res.kind == "noise" and is_completion_fragment(res.leg)
+        # رد مكمّل بلا رقم («بلس»/«صافي»)، **أو** رسالة ثانية «رقم إشاري + خزينة» بلا هوية زبون
+        # (تُربَط بالرقم فورًا في _ingest) → تُعالَج فورًا بلا انتظار استقرار «الحرف» (§7.3).
+        return (res.kind == "noise" and is_completion_fragment(res.leg)) \
+            or is_treasury_second_reply(res.leg)
 
     async def _ingest(self, raw: RawMessage, now: datetime) -> Optional[Deal]:
         # الرسائل من غير المركزية = مصدر مطابقة صامت فقط (§2.2 §8) — لا تُفكَّك كحوالة

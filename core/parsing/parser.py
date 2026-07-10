@@ -26,6 +26,7 @@ from .classify import (
     is_out_of_scope,
 )
 from .normalize import (
+    classify_phone,
     detect_currency,
     extract_phone,
     is_phone_like,
@@ -314,14 +315,17 @@ def _fish_a_anchors(text: str, f: dict) -> None:
 
     المبلغ+العملة الملتصقة («541ج») تبقى على تصنيف المقاطع (§3.5). كلّ ما لا يُطابِق يُتجاهَل."""
     for tok in re.split(r"[\s/]+", text.strip()):
-        if not tok:
-            continue
-        if "reference" not in f and _REFERENCE_RE.match(tok):
+        if tok and "reference" not in f and _REFERENCE_RE.match(tok):
             f["reference"] = tok
-        if "phone" not in f:
-            digits = re.sub(r"\D", "", tok)
-            if 10 <= len(digits) <= 13:      # هاتف: 10-13 خانة (§3.4)
-                f["phone"] = digits
+            break
+    if "phone" not in f:
+        # الهاتف على مستوى **السطر** لا الرمز: يبقى مجرى الأرقام متّصلًا («+218 91-...» ليبي كامل
+        # فيُرفَض)، والعربية تكسره فيُعزَل عن المبلغ («01... مصر 100000» → الهاتف وحده) (§3.4).
+        for line in text.splitlines():
+            ph = extract_phone(line)          # مصري/تونسي، يرفض الليبي (classify_phone)
+            if ph:
+                f["phone"] = ph
+                break
 
     # ٤) عملة على سطر مستقلّ + مبلغ على سطر مجاور — يُفحَص قبل حارس «amount» كي تُضبط العملة دومًا.
     _fish_standalone_currency_amount(text, f)
@@ -601,6 +605,14 @@ _FRAGMENT_CURRENCY = {"تونس": Currency.TND, "تونسي": Currency.TND,
                       "مصر": Currency.EGP, "مصري": Currency.EGP}
 _DECIMAL_RE = re.compile(r"^\d+[.,،]\d+$")     # رقم عشري (سعر): فيه فاصلة عشرية
 _CODE_RE = re.compile(r"^\d{2,4}$")            # كود الزبون: صحيح 2-4 خانات
+_GLUED_NAME_NUM_RE = re.compile(r"^(.*[ء-ي])(\d+(?:[.,،]\d+)?)$")   # «قريش35.5»→(«قريش»,«35.5»)
+
+
+def _split_glued_name_number(tok: str) -> list[str]:
+    """يفصل رقمًا ملصقًا **بنهاية** اسم عربيّ: «قريش35.5»→[«قريش»,«35.5»]، «عاشور35»→[«عاشور»,«35»].
+    لا يمسّ «كود+اسم» («1188زبون») لأنّ الرقم فيه **بداية** لا نهاية (§3.2)."""
+    m = _GLUED_NAME_NUM_RE.match(tok)
+    return [m.group(1), m.group(2)] if m else [tok]
 
 
 def _fish_treasury_from_tokens(
@@ -659,19 +671,23 @@ def parse_completion_fragment(
     tokens = " ".join(residual).split()
     if treasury_rec is None:                     # خزينة inline مدموجة (احتياطي)
         treasury_rec, tokens = _fish_treasury_from_tokens(tokens, treasuries)
+    tokens = [t for tok in tokens for t in _split_glued_name_number(tok)]  # «قريش35.5»→«قريش»,«35.5»
 
     prices: list[str] = []
     code: Optional[str] = None
+    code_idx = -1
+    last_name_idx = -1
     phone: Optional[str] = None
     name_tokens: list[str] = []
-    for tok in tokens:
-        digits = re.sub(r"\D", "", tok)
-        if len(digits) >= 9:                     # مجرى أرقام طويل = هاتف
-            phone = phone or extract_phone(tok)
+    for i, tok in enumerate(tokens):
+        ph = classify_phone(tok)
+        if ph:                                   # هاتف مستلم (مصري/تونسي، يرفض الليبي)
+            phone = phone or ph
         elif _DECIMAL_RE.match(tok):             # رقم عشري = سعر
             prices.append(tok)
-        elif _CODE_RE.match(tok):                # 2-4 خانات = كود الزبون
-            code = code or tok
+        elif _CODE_RE.match(tok):                # 2-4 خانات = كود الزبون (قد يُعاد تفسيره سعرًا أدناه)
+            if code is None:
+                code, code_idx = tok, i
         elif _NUMERIC_TOKEN_RE.match(tok):       # عدد آخر (مبلغ/رقم طويل) → يُتجاهَل
             continue
         else:
@@ -680,6 +696,15 @@ def parse_completion_fragment(
                 currency = currency or _FRAGMENT_CURRENCY[ntok]
             elif "بنك" not in ntok and _ARABIC_RE.search(tok):
                 name_tokens.append(tok)          # كلمة عربية = جزء من الاسم
+                last_name_idx = i
+
+    # عدد صحيح 2-خانة يقع **بعد** الاسم (لا قبله) + عملة/خزينة تونسية + بلا سعر عشريّ = **سعر تونسي
+    # صحيح** لا كود («محمد عاشور 35 / فتحي»→سعر 35). «53 احمد» الكود قبل الاسم فيبقى كودًا (§3.6).
+    tnd = (currency == Currency.TND) or (treasury_rec is not None and treasury_rec.currency == Currency.TND)
+    if (not prices and tnd and name_tokens and code is not None
+            and len(code) == 2 and code_idx > last_name_idx >= 0):
+        prices.append(code)
+        code = None
 
     # السعر = أصغر رقم عشري (السعر لا المبلغ) — الفاصلة العربية «،» → عشرية (§3.6)
     price_raw = (

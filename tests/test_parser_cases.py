@@ -95,6 +95,41 @@ async def test_standalone_currency_and_amount_lines(db, text, amount):
     assert res.leg.currency == Currency.EGP
 
 
+# ── الهاتف: رفض الليبي، قبول التونسي 8-خانات والمصري 11، وعزله عن المبلغ (§3.4) ──
+@pytest.mark.parametrize("text, expected_phone", [
+    ("A200\n+218 91-2192050\n3000 دت", None),          # ليبي (+218) → يُرفَض
+    ("A201\n92192050\nمصر\n50000", "92192050"),         # تونسي 8-خانات (يبدأ 9)
+    ("A202\n01029051735\nمصر\n50000", "01029051735"),   # مصري 11
+    ("A203\n01064074568 مصر 100000", "01064074568"),    # الهاتف يُعزَل عن المبلغ
+])
+async def test_phone_classification(db, text, expected_phone):
+    res = parse_message(text, await _treas(db), [])
+    assert res.leg.phone == expected_phone
+
+
+# ── الرسالة الثانية التونسية: سعر ملصق بالاسم + عدد صحيح سعرًا (لا كودًا) ─────────
+@pytest.mark.parametrize("text, code, name, price_raw", [
+    ("939 سامر قريش35.5", "939", "سامر قريش", "35.5"),   # السعر ملصق بالاسم → يُفصَل
+    ("محمد عاشور 35\nفتحي", None, "محمد عاشور", "35"),    # «35» بعد الاسم + تونسي → سعر لا كود
+    ("53 احمد العكاري 5.90\nوليد", "53", "احمد العكاري", "5.90"),  # الكود قبل الاسم يبقى كودًا
+    ("526 بكر همالي\nوليد", "526", "بكر همالي", None),    # كود 3-خانات قبل الاسم يبقى كودًا
+])
+async def test_tunisian_second_message_price_vs_code(db, text, code, name, price_raw):
+    from core.parsing.parser import parse_completion_fragment
+    f = parse_completion_fragment(text, await _treas(db), [])
+    assert f.customer_code == code
+    assert f.customer_name == name
+    assert f.price_raw == price_raw
+
+
+# ── الاستقرار: رقم إشاري + هاتف → جاهزة فورًا (0s) حتى بلا مبلغ+عملة مُلتصقين ─────
+def test_ref_plus_phone_is_immediately_stable():
+    from core.queue.stabilization import looks_like_complete_transfer as C
+    assert C("A8154\n01029051735\nمصر\n50000") is True    # ref + هاتف → فورية
+    assert C("A201\n92192050\nمصر\n50000") is True          # ref + هاتف تونسي → فورية
+    assert C("مصر\n50000") is False                          # بلا رقم إشاري → ليست فورية
+
+
 # ── #1 عملة ملتصقة بالرقم «541ج» → المبلغ يُلتقط (كان xfail) ──────────────────
 async def test_case_j_glued_currency_slash(db):
     text = "بلس / A5183 / فودافون / 01094589619 / 541ج / صافي"

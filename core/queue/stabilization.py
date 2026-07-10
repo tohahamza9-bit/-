@@ -76,14 +76,21 @@ def _elapsed_seconds(raw: RawMessage, now: datetime) -> float:
     return (now_n - ref_n).total_seconds()
 
 
+def _has_phone(text: str) -> bool:
+    """سطر فيه مجرى أرقام ≥8 خانات = هاتف (مصري 11 / تونسي 8) — إشارة حوالة جاهزة (§3.4)."""
+    return any(len(re.sub(r"\D", "", ln)) >= 8 for ln in text.splitlines())
+
+
 def looks_like_complete_transfer(text: str) -> bool:
-    """حوالة كاملة واضحة: رقم إشاري + مبلغ بعملة، أو حقول SI مُعنونة."""
+    """حوالة كاملة واضحة: رقم إشاري + (مبلغ بعملة **أو هاتف**)، أو حقول SI مُعنونة.
+
+    🔴 رقم إشاري + هاتف → جاهزة فورًا (قرار المستخدم): يُغطّي الصيغ التي تُفصَل فيها العملة عن
+    المبلغ («مصر\\n50000») فلا يلتقطها _AMOUNT_CUR_RE، فلا تنتظر 60s بلا داعٍ (§7.2)."""
     t = (text or "").strip()
     if not t:
         return False
     has_ref = bool(_REF_RE.search(t))
-    has_amount = bool(_AMOUNT_CUR_RE.search(t))
-    if has_ref and has_amount:
+    if has_ref and (bool(_AMOUNT_CUR_RE.search(t)) or _has_phone(t)):
         return True
     # صيغة SI: حقلان مُعنونان صريحان على الأقل
     si_hits = sum(1 for lbl in _SI_LABELS if lbl in t)
