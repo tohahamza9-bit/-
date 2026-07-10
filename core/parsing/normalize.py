@@ -50,6 +50,10 @@ def detect_currency(s: Optional[str]) -> Optional[Currency]:
         return Currency.TND
     if _EGP_TOKENS & tokens or ("ج" in tokens and "م" in tokens):
         return Currency.EGP
+    # «م» وحدها اختصار «مصري» (§3.4) — لكن **فقط token منفصلة مجاورة لرقم**: «1000 م» / «م 1000».
+    # الحصر بالمجاورة يمنع التقاطها داخل كلمة («محمد»/«مصر» token واحدة، ولا مجاورة لرقم مباشر).
+    if re.search(r"\d\s+م(?:\s|$)|(?:^|\s)م\s+\d", norm):
+        return Currency.EGP
     return None
 
 

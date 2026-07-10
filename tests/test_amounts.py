@@ -45,6 +45,24 @@ def test_glued_currency_detected_fix1():
     assert detect_currency("2000دت") == Currency.TND
 
 
+def test_egp_short_meem_after_or_before_number():
+    """«م» وحدها اختصار مصري إذا كانت token منفصلة مجاورة لرقم (§3.4)."""
+    from core.constants import Currency
+    from core.parsing.normalize import detect_currency, parse_amount
+    # المطلوب الجديد: «م» منفردة بعد/قبل رقم → EGP
+    assert detect_currency("1000 م") == Currency.EGP
+    assert detect_currency("م 1000") == Currency.EGP
+    assert detect_currency("1000م") == Currency.EGP          # ملتصقة → تُفصَل ثم تُكشَف
+    assert parse_amount("1000 م") == 1000
+    # صيغ «ج م» القائمة تبقى EGP
+    assert detect_currency("م ج 1000") == Currency.EGP
+    assert detect_currency("1000 م ج") == Currency.EGP
+    # 🔴 حذر: «م» داخل كلمة أو بلا رقم مجاور → لا تُلتقط
+    assert detect_currency("محمد") is None
+    assert detect_currency("مصر") is None
+    assert detect_currency("760 طه محمد") is None            # «م» ليست token منفصلة
+
+
 def test_amount_negative_preserved():
     assert parse_amount("-35") == -35
 
