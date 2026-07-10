@@ -252,8 +252,10 @@ class QueueService:
             return None
         # المورد بـ pattern-fishing (يعالج الترتيب المختلف للرسالة الثانية: الكود آخرًا…)
         frag = parse_completion_fragment(raw.text, treasuries, suppliers)
-        if not frag.customer_code:
-            return None                          # لا هوية مورد في الرسالة الثانية → ليست طرف مورد
+        # هوية المورد = كود رقمي في الرسالة («760 طه») **أو** اسم مُدرَج بالقائمة البيضاء بلا كود
+        # («طه» وحده → يُحلّ كودُه من القائمة). غياب الاثنين → ليست طرف مورد (تتبع المسار العادي).
+        if not frag.customer_code and frag.supplier is None:
+            return None
         return await self._absorb_supplier_leg(target, frag, raw.message_key, treasuries, now)
 
     async def _absorb_supplier_leg(
@@ -266,8 +268,9 @@ class QueueService:
         # المبلغ الأصغر في الرسالة الثانية = المبلغ بعد الخصم (للعمولة والطرف المشتقّ §6.2)
         if frag.amount is not None and sell.amount is not None and frag.amount < sell.amount:
             sell.amount_after_discount = frag.amount
-        # كود+اسم الرسالة الثانية = المورد (لا زبون جديد)
-        sell.supplier = SupplierRef(code=frag.customer_code, name=frag.customer_name)
+        # المورد = المُحلّ من القائمة البيضاء (بكوده الصحيح) إن وُجد، وإلّا الكود+الاسم من الرسالة
+        # («760 طه» بلا إدراج). يمنع فقدان كود القائمة حين يأتي المورد بالاسم وحده («طه»).
+        sell.supplier = frag.supplier or SupplierRef(code=frag.customer_code, name=frag.customer_name)
         sell.supplier_price_raw = frag.price_raw
         sell.commission = compute_commission(sell, None)  # بعد − قبل (سالبة §6.2)
         sell.commission_rate = 0.0
@@ -289,7 +292,7 @@ class QueueService:
         await self.db.deals.upsert(deal)
         log.info(
             "صفقة %s: رسالة ثانية بمورد «%s %s» (نفس الرقم %s) → دُمجت كطرف مورد (بعد الخصم=%s)",
-            deal.deal_id, frag.customer_code, frag.customer_name,
+            deal.deal_id, sell.supplier.code, sell.supplier.name,
             sell.reference_number, sell.amount_after_discount,
         )
         return deal

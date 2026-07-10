@@ -450,7 +450,8 @@ def parse_completion_fragment(
     السعر لا المبلغ)، **المبلغ** (سطر فيه رمز عملة ج.م/د.ت — يميّزه عن الكود)، الخزينة
     (resolve_treasury التامّة)، الهاتف، والعملة. وكلّ ما لا يُطابِق (فودافون كاش/بنك/…) يُتجاهَل.
     """
-    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    # «/» فاصل مقاطع كالسطر الجديد — رسالة ثانية على سطر واحد («… / طه 5.90») تُفكَّك سليمة
+    lines = [ln.strip() for ln in (text or "").replace("/", "\n").splitlines() if ln.strip()]
     currency: Optional[Currency] = None
     treasury_rec: Optional[TreasuryRecord] = None
     amount: Optional[float] = None
