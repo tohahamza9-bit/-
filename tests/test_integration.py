@@ -480,6 +480,26 @@ async def test_reference_less_second_linked_before_classification(db):
     assert result.sell_leg.supplier is not None and result.sell_leg.supplier.code == "1163"
 
 
+async def test_reference_less_second_slash_separated(db):
+    """رسالة ثانية على **سطر واحد بـ«/»**: «1300 عبد الله 5.82 / 760 طه 5.90» → زبون + مورد (§7.3)."""
+    from core.constants import Currency
+    from core.models import Deal, ParsedLeg
+    now = PAST + timedelta(seconds=1000)
+    sell = ParsedLeg(operation=OperationType.SELL, reference_number="A8140", amount=10220.0,
+                     currency=Currency.EGP, phone="01025661897")
+    await db.deals.upsert(Deal(deal_id="d1", status=Status.WAITING_SECOND_LEG,
+                               created_at=now - timedelta(seconds=10), updated_at=now,
+                               chat_jid=CENTRAL, sell_leg=sell))
+    await db.suppliers.upsert(SupplierRecordFactory("طه", "760"))
+    pipe = _make_pipeline(db, rooms=False)
+    raw = _raw("m2", "1300 عبد الله 5.82 / 760 طه 5.90", jid=CENTRAL, at=now)
+    result = await pipe._ingest(raw, now)
+    assert result is not None and result.deal_id == "d1"
+    assert result.sell_leg.customer_code == "1300"                 # الزبون كُمِّل
+    assert result.sell_leg.customer_name == "عبد الله"
+    assert result.sell_leg.supplier is not None and result.sell_leg.supplier.code == "760"
+
+
 async def test_reference_less_second_ambiguous_escalates(db):
     """رسالة ثانية بلا رقم + **أكثر من صفقة معلّقة** في الغرفة → تصعيد للمسؤول لا تخمين (§0)."""
     from core.constants import Currency

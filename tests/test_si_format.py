@@ -84,6 +84,17 @@ def test_customer_line_code_glued_to_name():
     assert _parse_customer_line("01225484288") is None
 
 
+def test_extract_code_name_price_lines_slash_separator():
+    """المقاطع مفصولة بـ«/» على سطر واحد تُقرأ كسطرين (زبون + مورد) §7.3."""
+    from core.parsing.parser import extract_code_name_price_lines
+    pairs = extract_code_name_price_lines("1300 عبد الله 5.82 / 760 طه 5.90")
+    assert pairs == [("1300", "عبد الله", "5.82"), ("760", "طه", "5.90")]
+    # زبون + خزينة بـ«/» يبقى زوجًا واحدًا (الخزينة ليست سطر زبون) — لا يتحوّل لطرفين
+    assert extract_code_name_price_lines("1300 عبد الله 5.82 / ابو يوسف") == [
+        ("1300", "عبد الله", "5.82")
+    ]
+
+
 @pytest.mark.parametrize("text, code, name, price, treasury_code", [
     # أ) كود+اسم+سعر في سطر، ثم وسيلة دفع (تُتجاهَل)، ثم خزينة
     ("750 ايهاب ابو حميد 5.70\nفودافون كاش\nابو يوسف", "750", "ايهاب ابو حميد", "5.70", "77"),
@@ -319,3 +330,39 @@ async def test_si_plain_unaffected_by_supplier_feature(db):
     assert leg.supplier is None
     assert leg.supplier_price_raw is None
     assert leg.treasury is not None and leg.treasury.code == "77"   # ابو يوسف كما كانت
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SI بـ«القيمة بعد الخصم» فقط بلا «القيمة قبل الخصم» — «بعد» = المبلغ (لا تُهمَل §6)
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_si_after_only_uses_after_as_amount(db):
+    # كانت تُسقَط noise (amount=None) — الآن «بعد» يصير المبلغ الأجنبي، تُعامَل صافيةً.
+    text = (
+        "رقم العملية: SI1417\nاسم الزبون: 570 ايهاب\n"
+        "القيمة بعد الخصم 1%: 20271 ج.م\nالسعر: 5.9\nالخزينة: بلاس فون"
+    )
+    res = parse_message(text, await _treas(db), [])
+    assert res.kind == "transfer"                    # لم تعد noise/مُهمَلة
+    leg = res.leg
+    assert leg.amount == 20271                        # «بعد» = المبلغ الأجنبي
+    assert leg.amount_after_discount is None          # بلا «قبل» → لا فرق خصم
+    assert leg.commission is None
+    assert leg.currency == Currency.EGP               # من «20271 ج.م» في سطر «بعد»
+    assert leg.customer_code == "570"
+    assert leg.treasury is not None and leg.treasury.name == "بلاس فون"
+
+
+async def test_si_after_only_with_supplier_defaults_saafi(db):
+    # «بعد» فقط + مورد بلا «الخزينة» → المبلغ=بعد، خزينة sell_and_buy الافتراضية «صافي» (لا خصم محسوب)
+    text = (
+        "رقم العملية: SI1417\nاسم الزبون: 570 ايهاب ابو حميد\n"
+        "القيمة بعد الخصم 1%: 20271 ج.م\nالسعر: 5.9\n"
+        "نوع التحويل: فودافون كاش\nالمورد: طه 5.72"
+    )
+    leg = parse_message(text, await _treas(db), await _suppliers(db)).leg
+    assert leg.amount == 20271
+    assert leg.amount_after_discount is None
+    assert leg.supplier is not None and leg.supplier.name == "طه"
+    assert leg.treasury is not None
+    assert leg.treasury.type == TreasuryType.SELL_AND_BUY
+    assert leg.treasury.name == "صافي"                # لا «خصم 1%» (لا فرق خصم بلا «قبل»)

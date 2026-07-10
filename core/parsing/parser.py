@@ -159,6 +159,7 @@ def _parse_si_fields(text: str) -> dict:
             f["currency"] = detect_currency(val) or f.get("currency")
             f["amount"] = parse_amount(val)
         elif head.startswith("القيمه بعد"):
+            f["currency"] = detect_currency(val) or f.get("currency")
             f["amount_after"] = parse_amount(val)
         elif head.startswith("القيمه"):
             # «القيمة:» أو «القيمة (صافي):» بلا «قبل/بعد» = المبلغ قبل الخصم (صافي = بلا خصم)
@@ -174,6 +175,12 @@ def _parse_si_fields(text: str) -> dict:
             # SI بيع+شراء (§5/§6): «المورد: طه 5.72» → مورد الطرف الثاني وسعره.
             scode, sname, srate = _split_supplier(val)
             f["supplier_code"], f["supplier_name"], f["supplier_rate"] = scode, sname, srate
+    # SI بـ«القيمة بعد الخصم» فقط بلا «القيمة قبل الخصم»: «بعد» يمثّل المبلغ الأجنبي — لا يُهمَل
+    # (المبلغ=None كان يُسقط الحوالة noise §6). بلا قيمة «قبل» لا فرق خصم محسوب → تُعامَل صافيةً:
+    # amount=بعد، وamount_after=None (فلا عمولة وهمية، وخزينة sell_and_buy الافتراضية = «صافي»).
+    if f.get("amount") is None and f.get("amount_after") is not None:
+        f["amount"] = f["amount_after"]
+        f["amount_after"] = None
     return f
 
 
@@ -366,16 +373,18 @@ def _parse_customer_line(seg: str) -> Optional[tuple[str, Optional[str], Optiona
 
 
 def extract_code_name_price_lines(text: str) -> list[tuple[str, str, Optional[str]]]:
-    """يستخرج أسطر «كود + اسم + [سعر]» من النصّ (كلٌّ على سطر) — للرسالة الثانية بلا رقم إشاري
-    (سطر زبون ثم سطر مورد §7.3). يتجاهل الأسطر غير المطابقة (هاتف/عملة/خزينة…)."""
+    """يستخرج أسطر «كود + اسم + [سعر]» من النصّ — للرسالة الثانية بلا رقم إشاري (سطر زبون ثم سطر
+    مورد §7.3). المقاطع تُفصَل بسطر جديد **أو بـ«/»** («1300 عبد الله 5.82 / 760 طه 5.90» = سطران:
+    زبون + مورد). يتجاهل المقاطع غير المطابقة (هاتف/عملة/خزينة…)."""
     pairs: list[tuple[str, str, Optional[str]]] = []
-    for ln in (text or "").splitlines():
-        ln = ln.strip()
-        if not ln or detect_currency(ln):   # سطر مبلغ (فيه رمز عملة) → ليس سطر زبون
-            continue
-        r = _parse_customer_line(ln)
-        if r is not None and r[0] and r[1]:   # كود + اسم (السعر اختياري)
-            pairs.append(r)
+    for raw_line in (text or "").splitlines():
+        for ln in raw_line.split("/"):       # «/» فاصل مقاطع كالسطر الجديد (§7.3)
+            ln = ln.strip()
+            if not ln or detect_currency(ln):   # مقطع مبلغ (فيه رمز عملة) → ليس سطر زبون
+                continue
+            r = _parse_customer_line(ln)
+            if r is not None and r[0] and r[1]:   # كود + اسم (السعر اختياري)
+                pairs.append(r)
     return pairs
 
 
