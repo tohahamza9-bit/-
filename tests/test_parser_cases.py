@@ -82,6 +82,19 @@ async def test_glued_currency_amount(db, glued):
     assert res.leg.currency == Currency.EGP
 
 
+# ── عملة ومبلغ على سطرين منفصلين («مصر» ثم «50000») → يُلتقطان في _fish_a_anchors ──
+@pytest.mark.parametrize("text, amount", [
+    ("A8154\n01029051735\nمصر\n50000\n562 بوجناح 5.96", 50000),   # «مصر» + «50000» سطران
+    ("A8154\n01029051735\nمصر\n49.500\nبلاس فون", 49500),         # «49.500» بنقطة = 49500 لا 49.5
+    ("A9\n01029051735\nمصري\n50000\n562 بوجناح 5.96", 50000),     # «مصري» سطر مستقلّ → EGP
+])
+async def test_standalone_currency_and_amount_lines(db, text, amount):
+    res = parse_message(text, await _treas(db), [])
+    assert res.kind == "transfer"
+    assert res.leg.amount == amount
+    assert res.leg.currency == Currency.EGP
+
+
 # ── #1 عملة ملتصقة بالرقم «541ج» → المبلغ يُلتقط (كان xfail) ──────────────────
 async def test_case_j_glued_currency_slash(db):
     text = "بلس / A5183 / فودافون / 01094589619 / 541ج / صافي"

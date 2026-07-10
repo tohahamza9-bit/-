@@ -50,6 +50,15 @@ _LABEL_SEP_RE = re.compile(r"[:=]")
 # وسوم المبلغ المُعنون في حوالة A: «القيمة =»/«المبلغ :»/«القيمة:» → قيمة رقمية (§3.5)
 _AMOUNT_LABELS = ("القيمه", "المبلغ")
 
+# كلمة عملة على **سطر مستقلّ** (§3.4): «مصر»/«مصري»→EGP، «تونس»/«تونسي»→TND. تُلتقط عملةً حين
+# تُفصَل عن المبلغ على سطرين («مصر» ثم «50000»)، إذ «مصر» وحدها لا يلتقطها detect_currency.
+_STANDALONE_CURRENCY = {
+    "مصر": Currency.EGP, "مصري": Currency.EGP,
+    "تونس": Currency.TND, "تونسي": Currency.TND,
+}
+# سطر رقميّ مجرّد (بلا حرف عربيّ): مبلغ محتمل — «50000»/«49.500». الفواصل «.،,» فواصل آلاف (§3.5).
+_BARE_NUMBER_RE = re.compile(r"^\d[\d.,،'\s]*$")
+
 # سطر تعليمات بشري (طلب لا بيانات): «ارجو تحويل…» / «برجاء…» → يُتجاهَل (§7.2).
 # مطابقة بالكلمة الكاملة المطبَّعة (لا بادئة) كي لا تُطابَق أسماء مثل «رجائي/مرجان».
 _REQUEST_NOISE_WORDS = {
@@ -265,12 +274,43 @@ def _parse_a_fields(text: str, treasuries: list[TreasuryRecord]) -> dict:
     return f
 
 
+def _bare_amount(line: str) -> Optional[float]:
+    """سطر رقميّ مجرّد (بلا حرف عربيّ) = مبلغ محتمل («50000»/«49.500»→49500 §3.5). يُستثنى مجرى
+    الهاتف (10-13 خانة) فلا يُقرأ رقم الهاتف مبلغًا. يُرجع القيمة أو None."""
+    if not _BARE_NUMBER_RE.match(line):
+        return None
+    digits = re.sub(r"\D", "", line)
+    if not digits or 10 <= len(digits) <= 13:   # مجرى هاتف — ليس مبلغًا
+        return None
+    return parse_amount(line)
+
+
+def _fish_standalone_currency_amount(text: str, f: dict) -> None:
+    """عملة على **سطر مستقلّ** («مصر»/«مصري»/«تونس») + مبلغ على **سطر مجاور** («50000»/«49.500»):
+    يضبط العملة (setdefault)، والمبلغ = أقرب سطر رقميّ مجرّد (التالي أولًا ثم السابق) (§3.4 §3.5)."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for i, ln in enumerate(lines):
+        cur = _STANDALONE_CURRENCY.get(normalize_ar(ln))
+        if cur is None:
+            continue
+        f.setdefault("currency", cur)
+        if "amount" in f:
+            continue
+        for j in (i + 1, i - 1):                 # المبلغ في السطر المجاور: التالي أولًا ثم السابق
+            if 0 <= j < len(lines):
+                amt = _bare_amount(lines[j])
+                if amt is not None:
+                    f["amount"] = amt
+                    break
+
+
 def _fish_a_anchors(text: str, f: dict) -> None:
     """يُفتّش **كامل نصّ** الرسالة الأولى (حوالة A §7.3) عن المرابط بلا اعتماد على ترتيب الأسطر:
 
     ١. الرقم الإشاري (Axxxx): أوّل رمز مستقلّ يطابق `_REFERENCE_RE`.
     ٢. الهاتف: أوّل مجرى أرقام 10-13 خانة (يميّزه عن الكود 2-4 والمبلغ ≤7).
     ٣. المبلغ المُعنون: «القيمة = 25000» / «المبلغ : 5000» / «القيمة: 25000» → المبلغ (+عملة إن وُجدت).
+    ٤. عملة على سطر مستقلّ («مصر»/«مصري»/«تونس») + مبلغ على سطر مجاور («50000»/«49.500») → عملة+مبلغ.
 
     المبلغ+العملة الملتصقة («541ج») تبقى على تصنيف المقاطع (§3.5). كلّ ما لا يُطابِق يُتجاهَل."""
     for tok in re.split(r"[\s/]+", text.strip()):
@@ -282,6 +322,9 @@ def _fish_a_anchors(text: str, f: dict) -> None:
             digits = re.sub(r"\D", "", tok)
             if 10 <= len(digits) <= 13:      # هاتف: 10-13 خانة (§3.4)
                 f["phone"] = digits
+
+    # ٤) عملة على سطر مستقلّ + مبلغ على سطر مجاور — يُفحَص قبل حارس «amount» كي تُضبط العملة دومًا.
+    _fish_standalone_currency_amount(text, f)
 
     if "amount" in f:
         return
