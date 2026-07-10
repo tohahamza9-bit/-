@@ -341,6 +341,13 @@ class SupplierListRepo(_Repo):
     async def upsert(self, rec: SupplierRecord) -> None:
         await self.col.update_one({"name": rec.name}, {"$set": self._dump(rec)}, upsert=True)
 
+    async def seed_if_missing(self, seed: list[dict]) -> None:
+        """يُدرِج الموردين الافتراضيين الناقصين فقط ($setOnInsert) — لا يمسّ الموجود/تعديلات
+        Dashboard، فيعمل على قاعدة مأهولة (بخلاف seed_if_empty §5.4)."""
+        for s in seed:
+            doc = {"active": True, "aliases": [], **s}
+            await self.col.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+
     async def all_active(self) -> list[SupplierRecord]:
         cur = self.col.find({"active": True})
         return [SupplierRecord(**d) async for d in cur]

@@ -130,6 +130,73 @@ def test_ref_plus_phone_is_immediately_stable():
     assert C("مصر\n50000") is False                          # بلا رقم إشاري → ليست فورية
 
 
+# ── الأرقام العربية-الهندية + هاتف مصري دوليّ + عملة «دم» (§3.4 §3.5) ──────────
+async def test_arabic_indic_digits_and_intl_phone(db):
+    # «٠١٠…» → 01093871382، «مبلغ 15150» label، «فودافون كاش» وسيلة، ref+هاتف
+    r = parse_message("A8031\nحول لي\n٠١٠٩٣٨٧١٣٨٢\nمبلغ 15150 جنيه مصري\nفودافون كاش",
+                      await _treas(db), [])
+    assert r.kind == "transfer"
+    assert r.leg.reference_number == "A8031"
+    assert r.leg.phone == "01093871382"          # أرقام عربية-هندية → لاتينية
+    assert r.leg.amount == 15150 and r.leg.currency == Currency.EGP
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("٠١٠٩٣٨٧١٣٨٢", "01093871382"),   # عربية-هندية
+    ("+20 100 745 3278", "01007453278"),  # مصري دوليّ (+20) → محلّي
+])
+def test_phone_normalization(raw, expected):
+    from core.parsing.normalize import extract_phone
+    assert extract_phone(raw) == expected
+
+
+async def test_daal_meem_is_egp(db):
+    # «دم» (درهم/دينار مصري) → EGP: «16650دم»
+    leg = parse_message("A700\n01000000000\n16650دم", await _treas(db), []).leg
+    assert leg.amount == 16650 and leg.currency == Currency.EGP
+
+
+async def test_attachment_kilobyte_is_noise(db):
+    # «127 كيلوبايت» (صورة مرفقة) لا تُقرأ زبونًا (code 127)
+    leg = parse_message("A701\n01000000000\n127 كيلوبايت\n5000 ج م", await _treas(db), []).leg
+    assert leg.customer_code is None
+
+
+# ── الرسالة الثانية: كود ملصق ببداية الاسم + كود بنقطة ختامية (§3.2) ──────────
+@pytest.mark.parametrize("text, code, name, price", [
+    ("728معتصم شعافي 35.5\nعمر", "728", "معتصم شعافي", "35.5"),   # كود ملصق «728معتصم»
+    ("الوروار 1298. 35.5\nعمر", "1298", "الوروار", "35.5"),        # كود بنقطة ختامية «1298.»
+])
+async def test_second_message_glued_code_and_trailing_dot(db, text, code, name, price):
+    from core.parsing.parser import parse_completion_fragment
+    f = parse_completion_fragment(text, await _treas(db), [])
+    assert (f.customer_code, f.customer_name, f.price_raw) == (code, name, price)
+
+
+async def test_two_leg_glued_code_pairs(db):
+    # بيع+شراء بكود ملصق «145خماج» → زوجان صالحان لـ Path A (§7.3)
+    from core.parsing.parser import extract_code_name_price_lines
+    pairs = extract_code_name_price_lines("145خماج 5.84\n760 طه 5.9")
+    assert pairs == [("145", "خماج", "5.84"), ("760", "طه", "5.9")]
+
+
+async def test_supplier_albarraq_seeded_makes_two_leg(db):
+    # مورد «البراق» (كود 1280) مسجّل → «258احمد بوسالم 5.78 / البراق 5.84» يصير زوجين (بيع+شراء)
+    from core.constants import SEED_SUPPLIERS
+    from core.parsing.parser import extract_code_name_price_lines
+    await db.suppliers.seed_if_missing(SEED_SUPPLIERS)
+    sp = await db.suppliers.all_active()
+    pairs = extract_code_name_price_lines("258احمد بوسالم 5.78\nالبراق 5.84", sp)
+    assert pairs == [("258", "احمد بوسالم", "5.78"), ("1280", "البراق", "5.84")]
+
+
+async def test_omar_alias_resolves_treasury_58(db):
+    # «عمر» alias لخزينة تونس (عمر العاصمة) كود 58 — مؤكَّد في seed
+    from core.parsing.parser import parse_completion_fragment
+    f = parse_completion_fragment("الصافنات 35.5\nعمر", await _treas(db), [])
+    assert f.treasury is not None and f.treasury.code == "58"
+
+
 # ── #1 عملة ملتصقة بالرقم «541ج» → المبلغ يُلتقط (كان xfail) ──────────────────
 async def test_case_j_glued_currency_slash(db):
     text = "بلس / A5183 / فودافون / 01094589619 / 541ج / صافي"

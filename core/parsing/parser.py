@@ -31,6 +31,7 @@ from .normalize import (
     extract_phone,
     is_phone_like,
     normalize_ar,
+    normalize_digits,
     normalize_payment,
     normalize_price,
     parse_amount,
@@ -64,8 +65,10 @@ _BARE_NUMBER_RE = re.compile(r"^\d[\d.,،'\s]*$")
 # مطابقة بالكلمة الكاملة المطبَّعة (لا بادئة) كي لا تُطابَق أسماء مثل «رجائي/مرجان».
 _REQUEST_NOISE_WORDS = {
     normalize_ar(w)
-    for w in ("ارجو", "أرجو", "نرجو", "يرجى", "برجاء", "الرجاء", "بالرجاء")
+    for w in ("ارجو", "أرجو", "نرجو", "يرجى", "برجاء", "الرجاء", "بالرجاء", "حول")
 }
+# ضجيج مرفقات/تعليمات: صورة مرفقة («127 كيلوبايت»)، تُتجاهَل فلا تُقرأ كزبون (§7.2).
+_ATTACHMENT_NOISE = ("كيلوبايت", "ميجابايت", "بايت")
 
 # ── الأماكن/البلدان (§11.1 خانة البلد) ───────────────────────────────────────
 _CITIES = {
@@ -103,6 +106,7 @@ def parse_message(
     """يفكّك رسالة المركزية إلى ParseResult (§3، §5، §7.2، §10)."""
     if not text or not text.strip():
         return ParseResult(kind="noise", reason="رسالة فارغة", confidence=1.0)
+    text = normalize_digits(text)          # أرقام عربية-هندية → لاتينية قبل أي استخراج (§3.5)
 
     # خارج النطاق (§0): تسليم يدوي/باليد → يُصعَّد لا يُدخَل.
     # 🔴 قرار المستخدم: وجود رقم إشاري (Axxxx) مرساة معاملة قاطعة → حوالة (pattern-fishing)
@@ -372,7 +376,7 @@ def _is_discount_indicator(n: str) -> bool:
     الحوالة هي مؤشّر خصم → تُوجَّه إلى الملاحظات ولا تُحلّ خزينةً — فالخزينة الحقيقية تأتي صريحة
     (بلس/وليد/طلال…) أو من الرسالة الثانية، وخزينة «صافي/خصم1%» في الطرفين تُسنَد حسابيًّا (§6.1).
     """
-    if "بدون" in n:                                  # «بدون خصم»
+    if "بدون" in n or "دون خصم" in n:                # «بدون خصم» / «دون خصم»
         return True
     compact = n.replace(" ", "").replace("%", "")
     return compact in {"صافي", "صافى", "خصم", "خصم1"}
@@ -409,6 +413,10 @@ def _amount_beside_phone(seg: str, phone: Optional[str], f: dict) -> None:
 def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_header: bool) -> None:
     """يصنّف سطرًا/جزءًا في الصيغة A ويملأ الحقول (§3.2)."""
     n = normalize_ar(seg)
+
+    # ضجيج مرفق (صورة: «127 كيلوبايت») → يُتجاهَل مبكّرًا كي لا يُقرأ «127» كودًا و«كيلوبايت» اسمًا.
+    if any(w in n for w in _ATTACHMENT_NOISE):
+        return
 
     # 0) سطر معنون بالاسم في صيغة A (رسالة تونسية أولى بأسطر معنونة بلا «/»):
     #    «الاسم: محمد عبدالرحيم» / «الاسم = محمد» → اسم المستلم. «الهاتف»/«القيمة» تُلتقط في
@@ -549,7 +557,7 @@ def extract_code_name_price_lines(
     في القائمة البيضاء فيُستكمَل كوده من db (§5.4) — فيصير الزوج صالحًا وPath A يعمل. بلا
     `suppliers` (السلوك الأصلي) تُقبَل الأسطر ذات الكود الرقمي فقط."""
     pairs: list[tuple[str, str, Optional[str]]] = []
-    for raw_line in (text or "").splitlines():
+    for raw_line in normalize_digits(text or "").splitlines():
         for ln in raw_line.split("/"):       # «/» فاصل مقاطع كالسطر الجديد (§7.3)
             ln = ln.strip()
             if not ln or detect_currency(ln):   # مقطع مبلغ (فيه رمز عملة) → ليس سطر زبون
@@ -588,9 +596,9 @@ def _extract_code_name(val: str) -> tuple[Optional[str], Optional[str]]:
         if m2:
             code, name = m2.group(1), m2.group(2).strip()
         else:
-            # الكود في النهاية بلا كلمة «كود» («عبد القادر حبيب 769») — يُشترط أن يبدأ
-            # المقطع باسم عربيّ كي لا يُلتقط هاتفٌ/رقم عابر كاسم/كود.
-            m3 = re.match(r"^(.+?)\s+(\d+)$", name)
+            # الكود في النهاية بلا كلمة «كود» («عبد القادر حبيب 769»)، وقد يتبعه نقطة/فاصلة
+            # («الوروار 1298.») — يُشترط أن يبدأ المقطع باسم عربيّ كي لا يُلتقط هاتفٌ/رقم عابر.
+            m3 = re.match(r"^(.+?)\s+(\d+)[.،]?$", name)
             if m3 and _ARABIC_RE.search(m3.group(1)):
                 name, code = m3.group(1).strip(), m3.group(2)
     return code, (name or None)
@@ -606,13 +614,22 @@ _FRAGMENT_CURRENCY = {"تونس": Currency.TND, "تونسي": Currency.TND,
 _DECIMAL_RE = re.compile(r"^\d+[.,،]\d+$")     # رقم عشري (سعر): فيه فاصلة عشرية
 _CODE_RE = re.compile(r"^\d{2,4}$")            # كود الزبون: صحيح 2-4 خانات
 _GLUED_NAME_NUM_RE = re.compile(r"^(.*[ء-ي])(\d+(?:[.,،]\d+)?)$")   # «قريش35.5»→(«قريش»,«35.5»)
+_GLUED_CODE_NAME_RE = re.compile(r"^(\d{2,4})([ء-ي].*)$")           # «728معتصم»→(«728»,«معتصم»)
 
 
 def _split_glued_name_number(tok: str) -> list[str]:
-    """يفصل رقمًا ملصقًا **بنهاية** اسم عربيّ: «قريش35.5»→[«قريش»,«35.5»]، «عاشور35»→[«عاشور»,«35»].
-    لا يمسّ «كود+اسم» («1188زبون») لأنّ الرقم فيه **بداية** لا نهاية (§3.2)."""
+    """يفصل رقمًا ملصقًا باسم عربيّ في الرسالة الثانية (§3.2):
+    - سعر بنهاية الاسم: «قريش35.5»→[«قريش»,«35.5»].
+    - كود ببداية الاسم: «728معتصم»→[«728»,«معتصم»].
+    ثم يُقشَّر رقم بنقطة/فاصلة ختامية («1298.»→«1298»)."""
+    tok = tok.rstrip(".،")                              # «1298.»→«1298» (نقطة ختامية §3.2)
     m = _GLUED_NAME_NUM_RE.match(tok)
-    return [m.group(1), m.group(2)] if m else [tok]
+    if m:
+        return [m.group(1), m.group(2)]
+    m2 = _GLUED_CODE_NAME_RE.match(tok)
+    if m2:
+        return [m2.group(1), m2.group(2)]
+    return [tok] if tok else []
 
 
 def _fish_treasury_from_tokens(
@@ -642,7 +659,8 @@ def parse_completion_fragment(
     (resolve_treasury التامّة)، الهاتف، والعملة. وكلّ ما لا يُطابِق (فودافون كاش/بنك/…) يُتجاهَل.
     """
     # «/» فاصل مقاطع كالسطر الجديد — رسالة ثانية على سطر واحد («… / طه 5.90») تُفكَّك سليمة
-    lines = [ln.strip() for ln in (text or "").replace("/", "\n").splitlines() if ln.strip()]
+    text = normalize_digits(text or "")     # أرقام عربية-هندية → لاتينية (§3.5)
+    lines = [ln.strip() for ln in text.replace("/", "\n").splitlines() if ln.strip()]
     currency: Optional[Currency] = None
     treasury_rec: Optional[TreasuryRecord] = None
     amount: Optional[float] = None

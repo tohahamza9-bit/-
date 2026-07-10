@@ -17,10 +17,21 @@ log = get_logger(__name__)
 _DIACRITICS = re.compile("[ؐ-ًؚ-ٰٟۖ-ۭـ]")
 
 
+# الأرقام العربية-الهندية (٠-٩) والفارسية (۰-۹) → لاتينية 0-9 (§3.5) — قبل أي مطابقة/استخراج
+_ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+
+def normalize_digits(s: Optional[str]) -> str:
+    """يحوّل الأرقام العربية-الهندية/الفارسية إلى لاتينية (٠١٠→010) — يُطبَّق قبل استخراج
+    الهاتف/المبلغ/الكود إذ الأنماط الرقمية تطابق `\\d` اللاتينية فقط (§3.5)."""
+    return s.translate(_ARABIC_INDIC_DIGITS) if s else (s or "")
+
+
 def normalize_ar(s: Optional[str]) -> str:
     """يوحّد الهمزات/التاء المربوطة/الألف المقصورة ويزيل التشكيل — للمطابقة المتسامحة."""
     if not s:
         return ""
+    s = normalize_digits(s)          # أرقام عربية-هندية → لاتينية (§3.5)
     s = _DIACRITICS.sub("", s)
     s = (
         s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ٱ", "ا")
@@ -32,7 +43,7 @@ def normalize_ar(s: Optional[str]) -> str:
 
 
 # ── العملة (§3.4) ────────────────────────────────────────────────────────────
-_EGP_TOKENS = {"ج", "جم", "جنيه", "مصري"}
+_EGP_TOKENS = {"ج", "جم", "جنيه", "مصري", "دم"}   # «دم» = درهم/دينار مصري (§3.4)
 _TND_TOKENS = {"دت", "تونسي", "دينار", "دنانير"}
 
 
@@ -63,7 +74,7 @@ def normalize_payment(s: Optional[str]) -> Optional[str]:
     if not s:
         return None
     compact = normalize_ar(s).replace(" ", "")
-    if any(k in compact for k in ("فودافون", "فودفون", "فدفون", "فدافون")):
+    if any(k in compact for k in ("فودافون", "فودفون", "فدفون", "فدافون", "فودا")):
         return "فودافون كاش"
     if "انستا" in compact:
         return "إنستا باي"
@@ -81,13 +92,15 @@ def classify_phone(raw: Optional[str]) -> Optional[str]:
     """
     if not raw:
         return None
-    d = re.sub(r"\D", "", raw)
+    d = re.sub(r"\D", "", normalize_digits(raw))
     if d.startswith("00"):            # بادئة الاتصال الدوليّ
         d = d[2:]
     if d.startswith("218"):          # ليبي → يُرفَض (§3.4)
         return None
     if d.startswith("216"):          # تونسي دوليّ → المحلّي
         d = d[3:]
+    elif d.startswith("20") and len(d) == 12:   # مصري دوليّ (+20) → المحلّي (0…)
+        d = "0" + d[2:]
     if not d:
         return None
     if len(d) == 8 and d[0] in "259":   # تونسي محلّي (2/5/9)
@@ -128,7 +141,7 @@ def parse_amount(raw: Optional[str]) -> Optional[float]:
     """
     if raw is None:
         return None
-    m = _AMOUNT_TOKEN_RE.search(str(raw))
+    m = _AMOUNT_TOKEN_RE.search(normalize_digits(str(raw)))   # أرقام عربية-هندية → لاتينية (§3.5)
     if not m:
         return None
     token = m.group().strip()

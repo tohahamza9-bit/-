@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .bus import Bus
 from .config import ROOT, get_settings, load_json_config
-from .constants import SEED_TREASURIES, RoomType
+from .constants import SEED_SUPPLIERS, SEED_TREASURIES, RoomType
 from .db import Database, utcnow
 from .logging_setup import get_logger, setup_logging
 from .pipeline import Pipeline
@@ -94,6 +94,7 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
             await _db.ensure_indexes()
         await _db.treasuries.seed_if_empty(SEED_TREASURIES)
         await _db.treasuries.dedupe_by_code()  # تنظيف ذاتي: خزينة واحدة لكل كود (يزيل المكرّرات)
+        await _db.suppliers.seed_if_missing(SEED_SUPPLIERS)  # موردو القائمة البيضاء الناقصون (§5.4)
         await _seed_rooms_from_env(_db, settings)  # §شرط 4 — بذر الغرف الحالية من env
 
         bus = Bus(_db, settings.allowed_output_jids, settings.central_room_jid, settings.admin_room_jid)
