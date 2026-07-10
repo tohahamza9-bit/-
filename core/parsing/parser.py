@@ -44,6 +44,16 @@ _REFERENCE_RE = re.compile(r"^[A-Za-z]{1,4}\d{2,}$")
 _NUMERIC_TOKEN_RE = re.compile(r"^\d+(?:[.,،]\d+)?$")
 _ARABIC_RE = re.compile(r"[ء-ي]")
 
+# فاصل العنوان/القيمة في السطور المعنونة: «:» أو «=» («القيمة = 25000» = «القيمة: 25000»)
+_LABEL_SEP_RE = re.compile(r"[:=]")
+
+# سطر تعليمات بشري (طلب لا بيانات): «ارجو تحويل…» / «برجاء…» → يُتجاهَل (§7.2).
+# مطابقة بالكلمة الكاملة المطبَّعة (لا بادئة) كي لا تُطابَق أسماء مثل «رجائي/مرجان».
+_REQUEST_NOISE_WORDS = {
+    normalize_ar(w)
+    for w in ("ارجو", "أرجو", "نرجو", "يرجى", "برجاء", "الرجاء", "بالرجاء")
+}
+
 # ── الأماكن/البلدان (§11.1 خانة البلد) ───────────────────────────────────────
 _CITIES = {
     "العاصمه": "العاصمة", "سوسه": "سوسة", "جربه": "جربة", "صفاقس": "صفاقس",
@@ -126,14 +136,29 @@ def _parse_transfer(
     return _build_leg(fields, text, treasuries, suppliers, is_si)
 
 
+def _split_label(line: str) -> Optional[tuple[str, str]]:
+    """يقسم سطرًا معنونًا على أوّل «:» أو «=» → (العنوان، القيمة). None إن لا فاصل.
+
+    «القيمة: 25000» و«القيمة = 25000» متكافئان (§3.3)."""
+    m = _LABEL_SEP_RE.search(line)
+    if m is None:
+        return None
+    return line[:m.start()], line[m.start() + 1:]
+
+
+def _is_request_noise(seg: str) -> bool:
+    """سطر تعليمات بشري («ارجو تحويل…»/«برجاء…») — طلب لا بيانات، يُتجاهَل (§7.2)."""
+    return bool(_REQUEST_NOISE_WORDS & set(normalize_ar(seg).split()))
+
+
 def _looks_like_si(text: str) -> bool:
-    """SI إن كان سطران على الأقل يبدآن بعنوان معروف متبوعًا بنقطتين (§3.3)."""
+    """SI إن كان سطران على الأقل يبدآن بعنوان معروف متبوعًا بـ«:» أو «=» (§3.3)."""
     count = 0
     for line in text.splitlines():
-        line = line.strip()
-        if ":" not in line:
+        parts = _split_label(line.strip())
+        if parts is None:
             continue
-        head = normalize_ar(line.split(":", 1)[0])
+        head = normalize_ar(parts[0])
         if any(head.startswith(lb) for lb in _SI_LABELS):
             count += 1
     return count >= 2
@@ -143,10 +168,10 @@ def _looks_like_si(text: str) -> bool:
 def _parse_si_fields(text: str) -> dict:
     f: dict = {}
     for line in text.splitlines():
-        line = line.strip()
-        if ":" not in line:
+        parts = _split_label(line.strip())
+        if parts is None:
             continue
-        raw_head, val = line.split(":", 1)
+        raw_head, val = parts
         head, val = normalize_ar(raw_head), val.strip()
         if head.startswith("رقم العمليه"):
             f["reference"] = val.split()[0] if val else None
@@ -273,10 +298,11 @@ def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_he
     n = normalize_ar(seg)
 
     # 0) سطر معنون بالاسم في صيغة A (رسالة تونسية أولى بأسطر معنونة بلا «/»):
-    #    «الاسم: محمد عبدالرحيم» → اسم المستلم. «الهاتف:»/«القيمة:» تُلتقط في الخطوات 3/4
-    #    كما هي؛ هذه الخطوة تلتقط الاسم فقط (لا تجعل الرسالة SI — «الاسم» ليست من _SI_LABELS).
-    if ":" in seg:
-        head, _, val = seg.partition(":")
+    #    «الاسم: محمد عبدالرحيم» / «الاسم = محمد» → اسم المستلم. «الهاتف»/«القيمة» تُلتقط في
+    #    الخطوات 3/4؛ هذه الخطوة تلتقط الاسم فقط (لا تجعل الرسالة SI — «الاسم» ليست من _SI_LABELS).
+    label = _split_label(seg)
+    if label is not None:
+        head, val = label
         if normalize_ar(head) in ("الاسم", "اسم") and val.strip():
             f.setdefault("recipient_name", val.strip())
             return
@@ -318,6 +344,11 @@ def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_he
         f.setdefault("customer_name", name)
         if price is not None:
             f.setdefault("price_raw", price)
+        return
+
+    # 5.5) سطر تعليمات بشري («ارجو تحويل انستا باي») → يُتجاهَل. يُفحص **بعد** الزبون/المبلغ
+    #      (فلا يُسقط بيانات) و**قبل** الدفع (فلا يُلتقط «انستا باي» في جملة طلب) (§7.2).
+    if _is_request_noise(seg):
         return
 
     # 6) وسيلة الدفع (§3.4)
@@ -459,8 +490,8 @@ def parse_completion_fragment(
 
     for ln in lines:
         n = normalize_ar(ln)
-        if normalize_payment(ln) or _is_discount_indicator(n) or "بنك" in n:
-            continue                             # وسيلة دفع/مؤشّر خصم/بنك → يُتجاهَل
+        if normalize_payment(ln) or _is_discount_indicator(n) or "بنك" in n or _is_request_noise(ln):
+            continue                             # وسيلة دفع/مؤشّر خصم/بنك/طلب بشري → يُتجاهَل
         if n in _FRAGMENT_CURRENCY:              # «تونس/مصر» سطرًا كاملًا → عملة
             currency = currency or _FRAGMENT_CURRENCY[n]
             continue

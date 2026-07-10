@@ -156,6 +156,9 @@ async def test_tnd_sell_only(examples, db):
         ("5.802", 5802.0),
         ("1600", 1600.0),
         ("2000", 2000.0),
+        ("25,000", 25000.0),    # فاصلة لاتينية = فاصل آلاف
+        ("1,234,567", 1234567.0),
+        ("25,000 ج.م", 25000.0),
     ],
 )
 def test_amount_thousands_rule(raw, expected):
@@ -283,3 +286,58 @@ async def test_parse_message_control_edit(db):
     assert res.kind == "control"
     assert res.control_action == "edit"
     assert res.control_value == 9000.0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# صيغة SI بفاصل «=» (بدل «:») + سطر تعليمات بشري يُتجاهَل + hot-reload الموردين
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_si_equals_separator(db):
+    """«القيمة = 25000» — «=» فاصل عنوان/قيمة كـ«:» (§3.3)، والفاصلة فاصل آلاف («25,000»)."""
+    text = (
+        "رقم العملية = SI1417\nاسم الزبون = 570 ايهاب\n"
+        "القيمة = 25,000 ج.م\nالسعر = 5.9\nالخزينة = بلاس فون"
+    )
+    res = parse_message(text, await _treasuries(db), [])
+    assert res.kind == "transfer"
+    leg = res.leg
+    assert leg.is_si_format is True
+    assert leg.reference_number == "SI1417"
+    assert leg.customer_code == "570"
+    assert leg.amount == 25000.0                       # «25,000» → 25000
+    assert leg.price_normalized == "5.9"
+    assert leg.treasury is not None and leg.treasury.name == "بلاس فون"
+
+
+async def test_request_noise_line_ignored_in_a(db):
+    """سطر «ارجو تحويل انستا باي» طلب بشري → يُتجاهَل: لا يُلتقط دفعًا ولا اسمًا/مستلمًا (§7.2)."""
+    res = parse_message(
+        "A8142\n01025661897\n5600 مصري\n187 فكهاني 5.91\nارجو تحويل انستا باي",
+        await _treasuries(db), [])
+    assert res.kind == "transfer"
+    leg = res.leg
+    assert leg.customer_code == "187" and leg.customer_name == "فكهاني"
+    assert leg.payment_method is None                  # «انستا باي» في جملة طلب لا يُلتقط
+    assert leg.recipient_name is None                  # لا تلوّث اسم المستلم
+
+
+def test_request_noise_line_ignored_in_fragment():
+    """في الرسالة الثانية: سطر طلب بلا كلمة دفع لا يلوّث اسم المورد (§7.3)."""
+    from core.parsing import parse_completion_fragment
+    frag = parse_completion_fragment("طه 5.90\nارجو التحويل بسرعة", [], [])
+    assert frag.customer_name == "طه"                  # لا «طه ارجو التحويل بسرعة»
+    assert frag.price_raw == "5.90"
+
+
+async def test_suppliers_read_dynamically_hot_reload(db):
+    """الموردون يُقرأون من الـ DB في كل مرة (all_active) — إضافة مورد جديد تُحلّ فورًا بلا إعادة تشغيل."""
+    from core.parsing import parse_completion_fragment
+    # لا مورد بعد → «طه» لا يُحلّ من القائمة (اسم فقط، بلا كود/تعليم مورد)
+    frag0 = parse_completion_fragment("طه 5.90", await _treasuries(db), await db.suppliers.all_active())
+    assert frag0.supplier is None and frag0.is_supplier_counterpart is False
+    # أُدرِج المورد في الـ DB الآن
+    await db.suppliers.upsert(SupplierRecord(code="760", name="طه", aliases=["طه"]))
+    # القراءة التالية (all_active) تلتقطه فورًا → يُحلّ كمورد
+    frag1 = parse_completion_fragment("طه 5.90", await _treasuries(db), await db.suppliers.all_active())
+    assert frag1.supplier is not None
+    assert (frag1.supplier.code, frag1.supplier.name) == ("760", "طه")
+    assert frag1.is_supplier_counterpart is True
