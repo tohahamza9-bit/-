@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from .db import Database
@@ -51,11 +52,21 @@ class Bus:
         log.info("Reply → %s (ردًّا على %s): %s", chat_jid, reply_to_key, text[:80])
 
     async def react(self, chat_jid: str, message_key: str, emoji: str) -> None:
-        """تفاعل صامت (🔸/✅) — مرآة للحالة فقط (§8.3). يُسمح فقط في المركزية."""
+        """تفاعل صامت (🔸/✅) — مرآة للحالة فقط (§8.3). يُسمح فقط في المركزية.
+
+        فشل الإدراج (عابر) → إعادة محاولة واحدة بعد ثانية (لا نُسقط مرآة الحالة بصمت T5).
+        `_guard` خارج الإعادة: رفض الوجهة سياسة دائمة لا تُعاد (§2.2)."""
         self._guard(chat_jid)
-        await self._db.outgoing.enqueue(
-            OutgoingMessage(chat_jid=chat_jid, text="", reply_to_key=message_key, reaction=emoji)
-        )
+        msg = OutgoingMessage(chat_jid=chat_jid, text="", reply_to_key=message_key, reaction=emoji)
+        try:
+            await self._db.outgoing.enqueue(msg)
+        except Exception as exc:  # noqa: BLE001 — نُسجّل ونعيد المحاولة مرّة (لا ابتلاع صامت T5)
+            log.warning(
+                "فشل إدراج التفاعل %s على %s (%s) — إعادة محاولة واحدة بعد ثانية.",
+                emoji, message_key, exc,
+            )
+            await asyncio.sleep(1)
+            await self._db.outgoing.enqueue(msg)
         log.info("Reaction %s → %s على %s", emoji, chat_jid, message_key)
 
     # ── مساعدات وجهة صريحة (تمنع الأخطاء) ──

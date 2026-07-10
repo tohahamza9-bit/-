@@ -87,11 +87,16 @@ def _pids_by_image_name(image_name: str) -> list[int]:
 # ── استيراد محروس (§11.3): البيئة الاختبارية بلا pywinauto/برنامج MONEYADO ──
 try:
     from pywinauto import Application, Desktop  # type: ignore
+    from pywinauto.base_wrapper import ElementNotEnabled  # type: ignore
 
     _PYWINAUTO_AVAILABLE = True
 except ImportError as _exc:  # لا نُخفي السبب (T5) — نسجّله ونعطّل التشغيل الحيّ فقط
     Application = None  # type: ignore
     Desktop = None  # type: ignore
+
+    class ElementNotEnabled(Exception):  # placeholder — يبقى except صالحًا بلا pywinauto
+        pass
+
     _PYWINAUTO_AVAILABLE = False
     log.warning("pywinauto غير مثبّت — MoneyadoScreen غير قابل للتشغيل الحيّ: %s", _exc)
 
@@ -654,7 +659,11 @@ class MoneyadoScreen(ScreenController):
         if self._window is None:
             raise RuntimeError("الاتصال بالشاشة غير مُهيّأ (connect لم يُستدعَ).")
         # نفس آلية Enter المستخدمة للحقول الأخرى، لكن على الحقل النشط بلا تحديد بإحداثي.
-        self._window.type_keys("{ENTER}", set_foreground=True)
+        # ElementNotEnabled بعد Enter = MONEYADO سجّل القيمة فعلًا وعطّل الحقل → نتجاهله (§11.1).
+        try:
+            self._window.type_keys("{ENTER}", set_foreground=True)
+        except ElementNotEnabled:
+            log.info("press_enter_on_active: الحقل معطَّل بعد Enter — MONEYADO سجّل فعلًا (تجاهُل §11.1).")
         time.sleep(self._step_delay)  # مهلة استقرار (جهاز بطيء §11.3)
 
     def _fill(self, field_op: FieldOp, field_cfg: dict) -> None:
