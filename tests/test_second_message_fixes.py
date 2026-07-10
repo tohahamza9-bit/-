@@ -135,6 +135,26 @@ async def test_treasury_only_second_no_match_is_stored_as_pending(db):
     assert await db.pending_replies.col.count_documents({}) == 1   # حُفِظ ردًّا معلّقًا
 
 
+async def test_treasury_second_with_amount_diff_phone_merges_discount(db):
+    # 🔴 رسالة ثانية بنفس الرقم + خزينة + مبلغ بعد الخصم **بهاتف مختلف** → تُدمَج كخصم عبر المطابقة
+    # بالرقم (لا ref+phone) فلا تصير صفقتين، ولا يضيع المبلغ بعد الخصم/العمولة (Aخصم §6.3).
+    svc = QueueService(db)
+    first = parse_message("A8156\n01029051735\nمصر\n50000\n562 بوجناح 5.96", await _treas(db), []).leg
+    first.source_message_key = "m1"
+    d1 = await svc.try_group(first, NOW, chat_jid=CENTRAL)
+    assert d1.status == Status.WAITING_SECOND_LEG
+
+    txt2 = "A8156\n01025946738\n49.500 ج م\nبلاس فون"   # هاتف مختلف عن الأولى
+    leg2 = parse_message(txt2, await _treas(db), []).leg
+    d2 = await svc.try_absorb_treasury_second(leg2, _raw("m2", txt2, NOW + timedelta(seconds=20)),
+                                              NOW + timedelta(seconds=20))
+    assert d2 is not None and d2.deal_id == d1.deal_id            # صفقة واحدة، لا صفقتين
+    assert d2.sell_leg.amount == 50000 and d2.sell_leg.amount_after_discount == 49500
+    assert d2.sell_leg.commission == -500                         # الخصم مطبَّق (بعد − قبل)
+    assert d2.sell_leg.treasury is not None and d2.sell_leg.treasury.code == "74"
+    assert "m2" in d2.source_message_keys
+
+
 async def test_treasury_only_before_first_stored_and_linked_on_arrival(db):
     # 🔴 خارج الترتيب: الخزينة تصل قبل الأولى → تُحفَظ ردًّا معلّقًا، ثم تُربَط تلقائيًّا عند وصول الأولى.
     svc = QueueService(db)

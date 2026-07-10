@@ -60,17 +60,23 @@ def is_completion_fragment(leg: ParsedLeg | None) -> bool:
     return has_treasury_or_supplier and leg.amount is None and not leg.reference_number
 
 
-def is_treasury_only_reply(leg: ParsedLeg | None) -> bool:
-    """رسالة ثانية «رقم إشاري + خزينة فقط» (§7.3): رقم إشاري + خزينة محلولة + **بلا مبلغ** + بلا
-    هوية زبون. رد خزينة يُكمِّل صفقة معلّقة بنفس الرقم (لا حوالة مستقلّة). «بلا مبلغ» يصون مسار
-    تسوية الخصم (Aخصم §6.3)؛ تمييزه عن is_completion_fragment: هذا **يحمل** رقمًا إشاريًا."""
+def is_treasury_second_reply(leg: ParsedLeg | None) -> bool:
+    """رسالة ثانية «رقم إشاري + خزينة» بلا هوية زبون (§7.3) — **المبلغ اختياري**. تُكمِّل صفقة
+    معلّقة بنفس الرقم: خزينةً عاديةً، أو **تسوية خصم** إن حملت مبلغًا بعد الخصم (Aخصم §6.3).
+    تمييزه عن is_completion_fragment: هذا **يحمل** رقمًا إشاريًا."""
     if leg is None:
         return False
     from ..matching.fuzzy import normalize_ar  # استيراد محليّ: تفادي دورة استيراد الحزمة
     return (
-        bool(leg.reference_number) and leg.treasury is not None and leg.amount is None
+        bool(leg.reference_number) and leg.treasury is not None
         and not leg.customer_code and not normalize_ar(leg.customer_name or "")
     )
+
+
+def is_treasury_only_reply(leg: ParsedLeg | None) -> bool:
+    """رسالة ثانية «رقم إشاري + خزينة **فقط**» بلا مبلغ (§7.3) — رد خزينة بحت يُحفَظ ردًّا معلّقًا
+    عند غياب صفقته. «بلا مبلغ» يميّزه عن تسوية الخصم (تحمل المبلغ بعد الخصم)."""
+    return is_treasury_second_reply(leg) and leg.amount is None
 
 
 def is_incomplete_first_message(leg: ParsedLeg | None) -> bool:
@@ -316,24 +322,31 @@ class QueueService:
         """رسالة ثانية بنفس الرقم الإشاري تحمل **خزينة فقط** (بلا كود/اسم زبون): تُكمِّل خزينة
         صفقة معلّقة مطابقة للرقم في نفس الغرفة (§7.3) — لا صفقة جديدة ولا هدرزة.
 
-        الشرط: للرسالة رقم إشاري + خزينة محلولة + **بلا مبلغ** + بلا هوية زبون (is_treasury_only_reply)،
-        وتُطابق صفقة WAITING بنفس الرقم خزينتها غائبة ضمن نافذة الربط. يُرجع الصفقة المكتملة أو None.
+        الشرط: للرسالة رقم إشاري + خزينة محلولة + بلا هوية زبون (is_treasury_second_reply)، وتُطابق
+        صفقة WAITING بنفس الرقم خزينتها غائبة ضمن نافذة الربط. المطابقة **بالرقم الإشاري** (لا
+        ref+phone) فتُدمَج حتى لو اختلف الهاتف بين الرسالتين. يُرجع الصفقة المكتملة أو None.
 
-        🔴 «بلا مبلغ» يصون مسار تسوية الخصم (Aخصم §6.3). (Fix 2 §7.3) لو وصلت الخزينة **قبل** الأولى
-        (لا صفقة معلّقة بنفس الرقم) → تُحفَظ ردًّا معلّقًا 90s (PENDING_REPLY_MAX_SECONDS) لتُربَط
-        تلقائيًّا عند إنشاء الأولى (_pull_pending_reply في _create_deal) — فالترتيب لا يهمّ."""
-        if not raw.chat_jid or not is_treasury_only_reply(leg):
+        🔴 لو شكّلت الرسالة والصفقة **زوج خصم** (Aخصم §6.3: هوية بمبلغ قبل + تسوية بمبلغ بعد بنفس
+        الرقم) → تُدمَج كخصم (_merge_discount) لا كخزينة عادية، فلا يضيع المبلغ بعد الخصم ولا العمولة.
+        (Fix 2 §7.3) لو وصلت خزينة-فقط (بلا مبلغ) قبل الأولى (لا صفقة معلّقة) → تُحفَظ ردًّا معلّقًا 90s
+        (PENDING_REPLY_MAX_SECONDS) لتُربَط تلقائيًّا عند إنشاء الأولى — فالترتيب لا يهمّ."""
+        if not raw.chat_jid or not is_treasury_second_reply(leg):
             return None
         ref = _norm_ref(leg.reference_number)
         if not ref:
             return None
+        if not leg.source_message_key:
+            leg.source_message_key = raw.message_key
         horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
         for deal in await self.db.deals.waiting_in_room(raw.chat_jid):
             sell = deal.sell_leg
             if (sell is not None and sell.treasury is None
                     and _norm_ref(sell.reference_number) == ref
                     and _as_naive_utc(deal.created_at) >= horizon):
-                sell.treasury = leg.treasury
+                pair = discount_pair(sell, leg)          # صيغة خصم بنفس الرقم (Aخصم §6.3)؟
+                if pair is not None:
+                    return await self._merge_discount(deal, pair[0], pair[1], now)
+                sell.treasury = leg.treasury             # خزينة عادية: أكمل الخزينة فقط
                 deal.status = Status.PARSED
                 deal.waiting_deadline = None
                 if raw.message_key and raw.message_key not in deal.source_message_keys:
@@ -343,13 +356,13 @@ class QueueService:
                 log.info("صفقة %s: رسالة ثانية بخزينة «%s» (نفس الرقم %s) → أُكملت الخزينة",
                          deal.deal_id, leg.treasury.name, ref)
                 return deal
-        # لا صفقة معلّقة بنفس الرقم — وصلت الخزينة قبل الأولى → احفظها ردًّا معلّقًا (Fix 2 §7.3)
-        leg.source_message_key = raw.message_key
-        await self.db.pending_replies.add(
-            message_key=raw.message_key, chat_jid=raw.chat_jid, leg=leg, received_at=now,
-        )
-        log.info("رد خزينة بنفس الرقم %s بلا صفقة معلّقة — حُفِظ ردًّا معلّقًا (%ss، سيُربَط عند وصول الأولى)",
-                 ref, PENDING_REPLY_MAX_SECONDS)
+        # لا صفقة معلّقة بنفس الرقم — خزينة-فقط (بلا مبلغ) وصلت قبل الأولى → احفظها ردًّا معلّقًا (Fix 2)
+        if leg.amount is None:
+            await self.db.pending_replies.add(
+                message_key=raw.message_key, chat_jid=raw.chat_jid, leg=leg, received_at=now,
+            )
+            log.info("رد خزينة بنفس الرقم %s بلا صفقة معلّقة — حُفِظ ردًّا معلّقًا (%ss، سيُربَط لاحقًا)",
+                     ref, PENDING_REPLY_MAX_SECONDS)
         return None
 
     async def waiting_candidates_for_second(
