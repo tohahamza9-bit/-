@@ -299,6 +299,15 @@ def _fish_a_anchors(text: str, f: dict) -> None:
                 f["amount"] = amt
                 return
 
+    # fallback: مبلغ ملصق بالعملة بلا مسافة («50000مصر»/«مصر50000»/«50000م.ج»/«50000مج») — «مصر»
+    # وحدها (لا «مصري») لا يلتقطها detect_currency. يُفحَص **بعد** النمط أعلاه فقط، ولا يغيّره (§3.5).
+    m = re.search(r"(\d[\d,]*)(?:مصري|مصر|م\.ج|مج)", text) or re.search(r"(?:مصري|مصر)([\d,]+)", text)
+    if m:
+        amt = parse_amount(m.group(1))
+        if amt is not None:
+            f.setdefault("currency", Currency.EGP)
+            f.setdefault("amount", amt)
+
 
 def _add_note(f: dict, text: str) -> None:
     """يُراكم نصًّا حرًّا (مؤشّر خصم/ملاحظة) في حقل الملاحظات (§3.2 خانة الملاحظات §11.1)."""

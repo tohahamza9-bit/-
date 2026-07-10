@@ -73,6 +73,15 @@ async def test_case_j_saafi_single(db):
     assert res.leg.expects_pair is False
 
 
+# ── المبلغ ملصق بالعملة بلا مسافة («مصر50000»/«50000م.ج») → يُلتقط في _fish_a_anchors ──
+@pytest.mark.parametrize("glued", ["مصر50000", "50000مصر", "50000م.ج", "50000مج", "50,000مصر"])
+async def test_glued_currency_amount(db, glued):
+    # «مصر» وحدها (لا «مصري») لا يلتقطها detect_currency → fallback المبلغ الملصق بالعملة
+    res = parse_message(f"A1\n{glued}\n01000000000", await _treas(db), [])
+    assert res.leg.amount == 50000
+    assert res.leg.currency == Currency.EGP
+
+
 # ── #1 عملة ملتصقة بالرقم «541ج» → المبلغ يُلتقط (كان xfail) ──────────────────
 async def test_case_j_glued_currency_slash(db):
     text = "بلس / A5183 / فودافون / 01094589619 / 541ج / صافي"

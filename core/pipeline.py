@@ -209,6 +209,11 @@ class Pipeline:
                 return await self.queue.absorb_fragment(
                     frag, raw.chat_jid, raw.message_key, now
                 )
+            # 🔴 رسالة ثانية بنفس الرقم الإشاري تحمل **خزينة فقط** (بلا هوية زبون): تُكمِّل خزينة
+            #    الصفقة المعلّقة المطابقة للرقم — لا صفقة جديدة ولا هدرزة (§7.3).
+            completed = await self.queue.try_absorb_treasury_second(result.leg, raw, now)
+            if completed is not None:
+                return await self.process_deal(completed, now)
             log.info("هدرزة — تجاهل صامت: %s", raw.message_key)
             return None
         if result.kind == "control":

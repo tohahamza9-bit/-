@@ -102,6 +102,39 @@ async def test_chatter_is_not_fragment(db):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# رسالة ثانية بنفس الرقم الإشاري تحمل خزينة فقط → تُكمِّل الخزينة، لا صفقة جديدة (§7.3)
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_treasury_only_second_completes_pending_by_ref(db):
+    svc = QueueService(db)
+    # الرسالة الأولى: رقم إشاري + هاتف + مبلغ + هوية، بلا خزينة → معلّقة
+    first = parse_message("A8146\n01115233493\n5000 ج م\nفودافون\n1300 عبد الله 5.90",
+                          await _treas(db), []).leg
+    first.source_message_key = "a8146"
+    d1 = await svc.try_group(first, NOW, chat_jid=CENTRAL)
+    assert d1.status == Status.WAITING_SECOND_LEG and d1.sell_leg.treasury is None
+
+    # الرسالة الثانية: نفس الرقم + خزينة فقط (بلا كود/اسم/مبلغ)
+    leg2 = parse_message("A8146\nبلس", await _treas(db), []).leg
+    assert leg2.reference_number == "A8146" and leg2.treasury.code == "74"
+    assert leg2.customer_code is None and leg2.amount is None
+    raw = _raw("a8146b", "A8146\nبلس", NOW + timedelta(seconds=20))
+    d2 = await svc.try_absorb_treasury_second(leg2, raw, NOW + timedelta(seconds=20))
+    assert d2 is not None and d2.deal_id == d1.deal_id            # نفس الصفقة
+    assert d2.status == Status.PARSED
+    assert d2.sell_leg.treasury is not None and d2.sell_leg.treasury.code == "74"  # بلاس فون
+    assert "a8146b" in d2.source_message_keys
+    assert await db.deals.col.count_documents({}) == 1           # لا صفقة جديدة
+
+
+async def test_treasury_only_second_no_match_returns_none(db):
+    # لا صفقة معلّقة بنفس الرقم → None (تتبع المسار العادي، لا تُكمِّل صفقة خطأ)
+    svc = QueueService(db)
+    leg2 = parse_message("A9999\nبلس", await _treas(db), []).leg
+    raw = _raw("x", "A9999\nبلس", NOW)
+    assert await svc.try_absorb_treasury_second(leg2, raw, NOW) is None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # الخطأ ٣ — SI بخزينة غير محلولة: PARSED فورًا (لا WAITING 90s) ثم HELD فوري
 # ═════════════════════════════════════════════════════════════════════════════
 async def test_si_unresolved_treasury_does_not_wait_in_queue(db):

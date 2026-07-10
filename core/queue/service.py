@@ -297,6 +297,40 @@ class QueueService:
         )
         return deal
 
+    async def try_absorb_treasury_second(
+        self, leg: ParsedLeg, raw: RawMessage, now: datetime,
+    ) -> Deal | None:
+        """رسالة ثانية بنفس الرقم الإشاري تحمل **خزينة فقط** (بلا كود/اسم زبون): تُكمِّل خزينة
+        صفقة معلّقة مطابقة للرقم في نفس الغرفة (§7.3) — لا صفقة جديدة ولا هدرزة.
+
+        الشرط: للرسالة رقم إشاري + خزينة محلولة + بلا هوية زبون، وتُطابق صفقة WAITING بنفس
+        الرقم خزينتها غائبة ضمن نافذة الربط. يُرجع الصفقة المكتملة أو None (فتتبع المسار العادي)."""
+        if not raw.chat_jid or not leg.reference_number or leg.treasury is None:
+            return None
+        from ..matching.fuzzy import normalize_ar  # استيراد محليّ: تفادي دورة استيراد الحزمة
+        if leg.customer_code or normalize_ar(leg.customer_name or ""):
+            return None                              # فيه هوية زبون → ليس رد خزينة فقط
+        ref = _norm_ref(leg.reference_number)
+        if not ref:
+            return None
+        horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        for deal in await self.db.deals.waiting_in_room(raw.chat_jid):
+            sell = deal.sell_leg
+            if (sell is not None and sell.treasury is None
+                    and _norm_ref(sell.reference_number) == ref
+                    and _as_naive_utc(deal.created_at) >= horizon):
+                sell.treasury = leg.treasury
+                deal.status = Status.PARSED
+                deal.waiting_deadline = None
+                if raw.message_key and raw.message_key not in deal.source_message_keys:
+                    deal.source_message_keys.append(raw.message_key)
+                deal.updated_at = now
+                await self.db.deals.upsert(deal)
+                log.info("صفقة %s: رسالة ثانية بخزينة «%s» (نفس الرقم %s) → أُكملت الخزينة",
+                         deal.deal_id, leg.treasury.name, ref)
+                return deal
+        return None
+
     async def waiting_candidates_for_second(
         self, chat_jid: str | None, now: datetime,
     ) -> list[Deal]:
