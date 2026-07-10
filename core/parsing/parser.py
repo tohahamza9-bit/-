@@ -344,8 +344,11 @@ def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_he
 
 
 def _parse_customer_line(seg: str) -> Optional[tuple[str, Optional[str], Optional[str]]]:
-    """سطر الزبون: `كود + اسم + [سعر]`. يُرجع (code, name, price) أو None."""
-    m = re.match(r"^(\d{1,6})\s+(.+)$", seg)
+    """سطر الزبون: `كود + اسم + [سعر]`. يُرجع (code, name, price) أو None.
+
+    الكود قد يكون ملصقًا بالاسم بلا مسافة («1188زبون عام») — الفراغ اختياري، والاسم يبدأ **بحرف
+    عربيّ** (§3.2) فلا يُلتقط سطر مبلغ عشريّ «8.391» كزبون. الهاتف يُرفَض (الحدّ 6 خانات)."""
+    m = re.match(r"^(\d{1,6})\s*([ء-ي].*)$", seg)
     if not m:
         return None
     code, rest = m.group(1), m.group(2).strip()
@@ -368,7 +371,7 @@ def extract_code_name_price_lines(text: str) -> list[tuple[str, str, Optional[st
     pairs: list[tuple[str, str, Optional[str]]] = []
     for ln in (text or "").splitlines():
         ln = ln.strip()
-        if not ln:
+        if not ln or detect_currency(ln):   # سطر مبلغ (فيه رمز عملة) → ليس سطر زبون
             continue
         r = _parse_customer_line(ln)
         if r is not None and r[0] and r[1]:   # كود + اسم (السعر اختياري)

@@ -74,6 +74,16 @@ def test_arabic_comma_in_price_normalized_to_dot():
     assert frag.price_raw == "5.82"
 
 
+def test_customer_line_code_glued_to_name():
+    """الكود ملصق بالاسم بلا مسافة: «1188زبون عام 5.84» → (1188, «زبون عام», «5.84») §3.2."""
+    from core.parsing.parser import _parse_customer_line, extract_code_name_price_lines
+    assert _parse_customer_line("1188زبون عام 5.84") == ("1188", "زبون عام", "5.84")
+    pairs = extract_code_name_price_lines("1188زبون عام 5.84\n1163 مومن عريبي 5.86")
+    assert pairs == [("1188", "زبون عام", "5.84"), ("1163", "مومن عريبي", "5.86")]
+    # الهاتف (مجرى أرقام طويل) لا يُقرأ كسطر زبون
+    assert _parse_customer_line("01225484288") is None
+
+
 @pytest.mark.parametrize("text, code, name, price, treasury_code", [
     # أ) كود+اسم+سعر في سطر، ثم وسيلة دفع (تُتجاهَل)، ثم خزينة
     ("750 ايهاب ابو حميد 5.70\nفودافون كاش\nابو يوسف", "750", "ايهاب ابو حميد", "5.70", "77"),

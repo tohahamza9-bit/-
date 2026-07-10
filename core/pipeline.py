@@ -142,6 +142,10 @@ class Pipeline:
         """هل الرسالة رد خزينة/مورد مكمّل (§7.3)؟ يُعالَج فورًا بلا انتظار استقرار «الحرف»."""
         if raw.chat_jid != self.bus.central_jid or not (raw.text or "").strip():
             return False
+        # رسالة ثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون+مورد) — تُربَط بحوالة معلّقة فورًا
+        # (لا تنتظر استقرار «الحرف» ولا نبضة تالية).
+        if len(extract_code_name_price_lines(raw.text)) >= 2:
+            return True
         treasuries = await self.db.treasuries.all_active()
         suppliers = await self.db.suppliers.all_active()
         res = parse_message(raw.text, treasuries, suppliers)
@@ -162,6 +166,26 @@ class Pipeline:
         # الفهم (§3-§5)
         treasuries = await self.db.treasuries.all_active()
         suppliers = await self.db.suppliers.all_active()
+
+        # 🔴 ربط الرسالة الثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون ثم مورد §7.3) بصفقة معلّقة
+        #    في نفس الغرفة خلال النافذة — **قبل التصنيف** كي لا تُسقَط noise/خارج-النطاق. لو نجح الربط
+        #    → return فورًا؛ وإلا نكمل المسار العادي. حماية الالتباس: تعدّد المعلّقات → تصعيد لا تخمين (§0).
+        pairs = extract_code_name_price_lines(raw.text)
+        if len(pairs) >= 2:
+            cands = await self.queue.waiting_candidates_for_second(raw.chat_jid, now)
+            if len(cands) == 1:
+                merged = await self.queue.absorb_customer_supplier(
+                    cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
+                return await self.process_deal(merged, now)   # عالج فورًا بلا انتظار نبضة/sweep
+            if len(cands) > 1:
+                await self.bus.notify_admin(
+                    f"⚠️ رسالة ثانية بلا رقم إشاري وتعدّد صفقات معلّقة ({len(cands)}) في الغرفة "
+                    f"— تعذّر الربط التلقائي؛ مراجعة يدوية: {(raw.text or '').strip()[:60]}",
+                    raw.message_key,
+                )
+                log.warning("رسالة ثانية بلا رقم + تعدّد معلّقات (%d) — تصعيد (§0).", len(cands))
+                return None
+
         result = parse_message(raw.text, treasuries, suppliers)
 
         if result.kind == "silent_ignore":
@@ -176,24 +200,6 @@ class Pipeline:
             )
             return None
         if result.kind == "noise":
-            # 🔴 رسالة ثانية بلا رقم إشاري بسطرين «كود+اسم+سعر» (زبون ثم مورد §7.3): تُربَط بصفقة
-            #    معلّقة في نفس الغرفة خلال النافذة (وقت+غرفة). حماية الالتباس: أكثر من صفقة معلّقة →
-            #    تصعيد للمسؤول لا تخمين (§0).
-            pairs = extract_code_name_price_lines(raw.text)
-            if len(pairs) >= 2:
-                cands = await self.queue.waiting_candidates_for_second(raw.chat_jid, now)
-                if len(cands) == 1:
-                    return await self.queue.absorb_customer_supplier(
-                        cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
-                if len(cands) > 1:
-                    await self.bus.notify_admin(
-                        f"⚠️ رسالة ثانية بلا رقم إشاري وتعدّد صفقات معلّقة ({len(cands)}) في الغرفة "
-                        f"— تعذّر الربط التلقائي؛ مراجعة يدوية: {(raw.text or '').strip()[:60]}",
-                        raw.message_key,
-                    )
-                    log.warning("رسالة ثانية بلا رقم + تعدّد معلّقات (%d) — تصعيد (§0).", len(cands))
-                    return None
-
             # رد خزينة/مورد بلا رقم إشاري («بلس»/«صافي» وحدها) — ليس هدرزة بل جزء مكمّل
             # لحوالة معلّقة (§7.3): يُربَط بالمعلّقة (قرب زمني/نفس الغرفة) أو يُحفَظ ردًّا معلّقًا.
             if is_completion_fragment(result.leg):
@@ -222,10 +228,10 @@ class Pipeline:
             return None
 
         # 🔴 رسالة ثانية بنفس الرقم الإشاري لصفقة معلّقة في نفس الغرفة تحمل موردًا (§6): تُدمَج
-        #    كطرف مورد لا كصفقة جديدة — قبل try_group كي لا تُنشأ صفقة منفصلة.
+        #    كطرف مورد لا كصفقة جديدة — قبل try_group كي لا تُنشأ صفقة منفصلة، وتُعالَج فورًا.
         second = await self.queue.try_absorb_supplier_second(leg, raw, now, treasuries, suppliers)
         if second is not None:
-            return second
+            return await self.process_deal(second, now)   # عالج فورًا بلا انتظار نبضة/sweep
 
         # التجميع (§7.3): صفقة جديدة أو دمج طرف ثانٍ
         deal = await self.queue.try_group(leg, now, chat_jid=raw.chat_jid)

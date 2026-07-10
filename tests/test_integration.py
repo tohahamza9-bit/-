@@ -445,6 +445,41 @@ async def test_reference_less_second_links_customer_and_supplier(db):
     assert b is not None and b.customer_code == "1163" and b.is_supplier_counterpart is True
 
 
+async def test_second_message_processed_immediately_without_tick(db):
+    """الرسالة الثانية تُربَط وتُعالَج **فورًا** في process_inbox — بلا انتظار tick/sweep (§7.3)."""
+    await _enable_storage(db)
+    await db.suppliers.upsert(SupplierRecordFactory("طه", "760"))
+    writer = FakeWriter()
+    pipe = _make_pipeline(db, writer, StubVerifier(), rooms=False)
+    msg1 = "A8136\n01115233493\n1010 ج م\nفودافون كاش\n1300 عبد الله معتيق 5.90"
+    msg2 = "A8136\n01115233493\n1000 ج م\nفودافون كاش\n760 طه 5.86"
+    await pipe.capture(_raw("m1", msg1, at=PAST))
+    await pipe.capture(_raw("m2", msg2, at=PAST + timedelta(seconds=3)))
+    now = PAST + timedelta(seconds=120)
+    await pipe.process_inbox(now)                 # 🔴 بلا tick
+    completed = await db.deals.by_status(Status.COMPLETED)
+    assert len(completed) == 1, "تكتمل داخل process_inbox بلا انتظار نبضة"
+    assert writer.calls == [("sell", 0, True), ("buy", 1, True)]
+
+
+async def test_reference_less_second_linked_before_classification(db):
+    """الربط يجري في _ingest **قبل التصنيف**: رسالة سطرين (كود ملصق) تُربَط ولا تُسقَط noise."""
+    from core.constants import Currency
+    from core.models import Deal, ParsedLeg
+    now = PAST + timedelta(seconds=1000)
+    sell = ParsedLeg(operation=OperationType.SELL, reference_number="A8137", amount=37050.0,
+                     currency=Currency.EGP)
+    await db.deals.upsert(Deal(deal_id="d1", status=Status.WAITING_SECOND_LEG,
+                               created_at=now - timedelta(seconds=10), updated_at=now,
+                               chat_jid=CENTRAL, sell_leg=sell))
+    pipe = _make_pipeline(db, rooms=False)
+    raw = _raw("m2", "1188زبون عام 5.84\n1163 مومن عريبي 5.86", jid=CENTRAL, at=now)
+    result = await pipe._ingest(raw, now)
+    assert result is not None and result.deal_id == "d1"
+    assert result.sell_leg.customer_code == "1188"                 # الكود الملصق استُخرج
+    assert result.sell_leg.supplier is not None and result.sell_leg.supplier.code == "1163"
+
+
 async def test_reference_less_second_ambiguous_escalates(db):
     """رسالة ثانية بلا رقم + **أكثر من صفقة معلّقة** في الغرفة → تصعيد للمسؤول لا تخمين (§0)."""
     from core.constants import Currency
