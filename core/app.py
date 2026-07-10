@@ -140,7 +140,15 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
 
         if run_worker_now:
             state["worker"] = asyncio.create_task(_worker_loop(pipeline, state["stop"]))
-        log.info("MONEYADO Bot جاهز — dry_run=%s، تخزين افتراضي: إيقاف (§13).", settings.dry_run)
+        # القيمة الحقيقية المحفوظة في DB (§13) — لا نصّ ثابت مضلِّل: التخزين يُقرأ حيًّا من bot_control،
+        # فالإعداد يبقى بعد إعادة التشغيل (اللوق كان يطبع «إيقاف» دائمًا بغضّ النظر عن DB).
+        ctrl = await _db.control.get()
+        log.info(
+            "MONEYADO Bot جاهز — dry_run=%s، التخزين: %s، auto_trust=%s، state=%s (§13).",
+            settings.dry_run,
+            "تشغيل" if ctrl.storage_enabled else "إيقاف",
+            ctrl.auto_trust, ctrl.state,
+        )
 
     async def _shutdown() -> None:
         if "stop" in state:
