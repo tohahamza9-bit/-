@@ -66,6 +66,14 @@ async def test_si_saafi_treasury_is_ignored(db):
     assert leg.customer_code == "1284"              # باقي الحقول سليمة
 
 
+def test_arabic_comma_in_price_normalized_to_dot():
+    """الفاصلة العربية «،» في السعر تُعامَل كعشرية «.» (§3.6): «5،82» → «5.82»."""
+    from core.parsing.parser import _parse_customer_line, parse_completion_fragment
+    assert _parse_customer_line("1300 عبد الله معتيق 5،82") == ("1300", "عبد الله معتيق", "5.82")
+    frag = parse_completion_fragment("760 طه 5،82", [], [])
+    assert frag.price_raw == "5.82"
+
+
 @pytest.mark.parametrize("text, code, name, price, treasury_code", [
     # أ) كود+اسم+سعر في سطر، ثم وسيلة دفع (تُتجاهَل)، ثم خزينة
     ("750 ايهاب ابو حميد 5.70\nفودافون كاش\nابو يوسف", "750", "ايهاب ابو حميد", "5.70", "77"),

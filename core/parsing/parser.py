@@ -354,7 +354,7 @@ def _parse_customer_line(seg: str) -> Optional[tuple[str, Optional[str], Optiona
     tokens = rest.split()
     price: Optional[str] = None
     if tokens and _NUMERIC_TOKEN_RE.match(tokens[-1]):
-        price = tokens[-1]
+        price = tokens[-1].replace("،", ".")   # الفاصلة العربية → عشرية (5،82 → 5.82 §3.6)
         tokens = tokens[:-1]
     name = " ".join(tokens).strip()
     if not name:
@@ -468,9 +468,9 @@ def parse_completion_fragment(
             elif "بنك" not in ntok and _ARABIC_RE.search(tok):
                 name_tokens.append(tok)          # كلمة عربية = جزء من الاسم
 
-    # السعر = أصغر رقم عشري (السعر لا المبلغ)
+    # السعر = أصغر رقم عشري (السعر لا المبلغ) — الفاصلة العربية «،» → عشرية (§3.6)
     price_raw = (
-        min(prices, key=lambda p: float(p.replace("،", ".").replace(",", ".")))
+        min(prices, key=lambda p: float(p.replace("،", ".").replace(",", "."))).replace("،", ".")
         if prices else None
     )
     name = " ".join(name_tokens).strip() or None
