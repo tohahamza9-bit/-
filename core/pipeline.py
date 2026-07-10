@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
@@ -80,6 +81,9 @@ class Pipeline:
             db, bus, customer_room_jids, treasury_room_jids
         )
         self.guard = guard or Guard(db)
+        # 🔴 قفل تسلسليّ لمعالجة الوارد (§7.3): يمنع تشابك استدعاءات process_inbox المتزامنة
+        #    فتُعالَج كل رسالة وتُكتب بالكامل قبل بدء التالية (سباق: الثانية تقرأ DB قبل كتابة الأولى).
+        self._inbox_lock = asyncio.Lock()
         # seed من env/الإنشاء — fallback إن تعذّر قراءة تصنيف الغرف من DB. المصدر الحيّ
         # للتصنيف هو DB (hot-reload §شرط 5)؛ يُقرأ ديناميكيًّا في _matching_rooms_configured.
         self._has_rooms_seed = bool(
@@ -115,28 +119,32 @@ class Pipeline:
         """
         يمرّ على الرسائل الخام غير المعالَجة المستقرّة (§7.2)، يفكّكها ويجمّعها.
         يُرجع الصفقات التي أصبحت جاهزة للمعالجة (PARSED). لا يوقفه أي تعليق فردي.
+
+        🔴 محميّ بقفل تسلسليّ (_inbox_lock): استدعاءان متزامنان لا يتشابكان — تُعالَج كل رسالة
+        وتُكتب في DB بالكامل قبل بدء التالية، فلا تقرأ الثانية (try_absorb) قبل كتابة الأولى (§7.3).
         """
-        ready: list[Deal] = []
-        for raw in await self.db.raw.unprocessed():
-            # رسائل التحكّم (Reply: إلغاء/تعديل/تصحيح/تم) إجراءات مكتملة متعمّدة — تُعالَج فورًا،
-            # ولا تُعامَل كـ«حرف» placeholder ينتظر تعديلًا (§7.2 يخصّ حوالات جديدة قصيرة).
-            is_control_reply = bool(raw.reply_to_key) and detect_control(raw.text) is not None
-            if not is_control_reply and not is_stable(raw, now):
-                # لم تستقرّ بعد — «الحرف» قد يُعدَّل (§7.2). لا تخطٍّ صامت (T5): نسجّل السبب.
-                # استثناء (§7.3): رد خزينة/مورد مكمّل («بلس»/«صافي» وحدها) ليس حرفًا ينتظر
-                # تعديلًا — يحلّ خزينة/موردًا صراحةً ويجب ربطه بحوالته المعلّقة فورًا (لا انتظار).
-                if not await self._is_completion_reply(raw):
-                    log.debug("تخطٍّ مؤقّت (لم تستقرّ بعد): %s", raw.message_key)
-                    continue
-            try:
-                deal = await self._ingest(raw, now)
-                if deal is not None and deal.status == Status.PARSED:
-                    ready.append(deal)
-            except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل للتالية (الطابور لا يتوقّف)
-                log.exception("فشل معالجة الرسالة %s: %s — تجاوز للتالية", raw.message_key, exc)
-            finally:
-                await self.db.raw.mark_processed(raw.message_key)
-        return ready
+        async with self._inbox_lock:
+            ready: list[Deal] = []
+            for raw in await self.db.raw.unprocessed():
+                # رسائل التحكّم (Reply: إلغاء/تعديل/تصحيح/تم) إجراءات مكتملة متعمّدة — تُعالَج فورًا،
+                # ولا تُعامَل كـ«حرف» placeholder ينتظر تعديلًا (§7.2 يخصّ حوالات جديدة قصيرة).
+                is_control_reply = bool(raw.reply_to_key) and detect_control(raw.text) is not None
+                if not is_control_reply and not is_stable(raw, now):
+                    # لم تستقرّ بعد — «الحرف» قد يُعدَّل (§7.2). لا تخطٍّ صامت (T5): نسجّل السبب.
+                    # استثناء (§7.3): رد خزينة/مورد مكمّل («بلس»/«صافي» وحدها) ليس حرفًا ينتظر
+                    # تعديلًا — يحلّ خزينة/موردًا صراحةً ويجب ربطه بحوالته المعلّقة فورًا (لا انتظار).
+                    if not await self._is_completion_reply(raw):
+                        log.debug("تخطٍّ مؤقّت (لم تستقرّ بعد): %s", raw.message_key)
+                        continue
+                try:
+                    deal = await self._ingest(raw, now)
+                    if deal is not None and deal.status == Status.PARSED:
+                        ready.append(deal)
+                except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل للتالية (الطابور لا يتوقّف)
+                    log.exception("فشل معالجة الرسالة %s: %s — تجاوز للتالية", raw.message_key, exc)
+                finally:
+                    await self.db.raw.mark_processed(raw.message_key)
+            return ready
 
     async def _is_completion_reply(self, raw: RawMessage) -> bool:
         """هل الرسالة رد خزينة/مورد مكمّل (§7.3)؟ يُعالَج فورًا بلا انتظار استقرار «الحرف»."""
