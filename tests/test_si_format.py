@@ -142,6 +142,20 @@ async def test_si_customer_code_trailing_no_keyword(db):
     assert leg.customer_name == "عبد القادر حبيب"
 
 
+async def test_si_customer_code_trailing_before_kod_keyword(db):
+    """حقل «اسم الزبون» بكود يسبق كلمة «كود» الختامية: «عبد القادر حبيب 769 كود»
+    → كود=769، الاسم='عبد القادر حبيب' (§3.2)."""
+    text = (
+        "رقم العملية: SI1903\nرقم المستلم: 01093232832\n"
+        "اسم الزبون: عبد القادر حبيب 769 كود\n"
+        "القيمة قبل الخصم: 3540 ج.م\nالقيمة بعد الخصم 1%: 3505 ج.م\n"
+        "السعر: 5.9\nنوع التحويل: فودافون كاش\nالخزينة: بلاس فون"
+    )
+    leg = parse_message(text, await _treas(db), []).leg
+    assert leg.customer_code == "769"
+    assert leg.customer_name == "عبد القادر حبيب"
+
+
 async def test_si_customer_code_merged_with_dot(db):
     """صيغة جديدة: كود مدموج بسطر الاسم بنقطة «حميد بن غارات كود.793» → كود=793، الاسم بلا الكود."""
     text = (
