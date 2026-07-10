@@ -199,6 +199,15 @@ class Pipeline:
                 raw.message_key,
             )
             return None
+
+        # 🔴 رسالة ثانية بنفس الرقم الإشاري تحمل **خزينة فقط** (بلا هوية زبون): تُكمِّل خزينة الصفقة
+        #    المعلّقة المطابقة للرقم — **قبل** تصنيف noise/transfer كي لا تُنشأ صفقة جديدة (حين تحمل
+        #    مبلغًا) ولا تُسقَط هدرزة (بلا مبلغ). تُعالَج فورًا (بلا انتظار sweep). مثل try_absorb_supplier_second.
+        if result.leg is not None:
+            completed = await self.queue.try_absorb_treasury_second(result.leg, raw, now)
+            if completed is not None:
+                return await self.process_deal(completed, now)
+
         if result.kind == "noise":
             # رد خزينة/مورد بلا رقم إشاري («بلس»/«صافي» وحدها) — ليس هدرزة بل جزء مكمّل
             # لحوالة معلّقة (§7.3): يُربَط بالمعلّقة (قرب زمني/نفس الغرفة) أو يُحفَظ ردًّا معلّقًا.
@@ -209,11 +218,6 @@ class Pipeline:
                 return await self.queue.absorb_fragment(
                     frag, raw.chat_jid, raw.message_key, now
                 )
-            # 🔴 رسالة ثانية بنفس الرقم الإشاري تحمل **خزينة فقط** (بلا هوية زبون): تُكمِّل خزينة
-            #    الصفقة المعلّقة المطابقة للرقم — لا صفقة جديدة ولا هدرزة (§7.3).
-            completed = await self.queue.try_absorb_treasury_second(result.leg, raw, now)
-            if completed is not None:
-                return await self.process_deal(completed, now)
             log.info("هدرزة — تجاهل صامت: %s", raw.message_key)
             return None
         if result.kind == "control":

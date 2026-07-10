@@ -303,9 +303,13 @@ class QueueService:
         """رسالة ثانية بنفس الرقم الإشاري تحمل **خزينة فقط** (بلا كود/اسم زبون): تُكمِّل خزينة
         صفقة معلّقة مطابقة للرقم في نفس الغرفة (§7.3) — لا صفقة جديدة ولا هدرزة.
 
-        الشرط: للرسالة رقم إشاري + خزينة محلولة + بلا هوية زبون، وتُطابق صفقة WAITING بنفس
-        الرقم خزينتها غائبة ضمن نافذة الربط. يُرجع الصفقة المكتملة أو None (فتتبع المسار العادي)."""
-        if not raw.chat_jid or not leg.reference_number or leg.treasury is None:
+        الشرط: للرسالة رقم إشاري + خزينة محلولة + **بلا مبلغ** + بلا هوية زبون، وتُطابق صفقة
+        WAITING بنفس الرقم خزينتها غائبة ضمن نافذة الربط. يُرجع الصفقة المكتملة أو None.
+
+        🔴 شرط «بلا مبلغ» يصون مسار تسوية الخصم (Aخصم §6.3): رسالة «ref + خزينة + مبلغ بعد
+        الخصم» تحمل مبلغًا فتتبع try_group/_merge_discount، لا تُبتَلع هنا كخزينة-فقط."""
+        if (not raw.chat_jid or not leg.reference_number
+                or leg.treasury is None or leg.amount is not None):
             return None
         from ..matching.fuzzy import normalize_ar  # استيراد محليّ: تفادي دورة استيراد الحزمة
         if leg.customer_code or normalize_ar(leg.customer_name or ""):
