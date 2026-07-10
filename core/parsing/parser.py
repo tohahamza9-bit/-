@@ -47,6 +47,9 @@ _ARABIC_RE = re.compile(r"[ء-ي]")
 # فاصل العنوان/القيمة في السطور المعنونة: «:» أو «=» («القيمة = 25000» = «القيمة: 25000»)
 _LABEL_SEP_RE = re.compile(r"[:=]")
 
+# وسوم المبلغ المُعنون في حوالة A: «القيمة =»/«المبلغ :»/«القيمة:» → قيمة رقمية (§3.5)
+_AMOUNT_LABELS = ("القيمه", "المبلغ")
+
 # سطر تعليمات بشري (طلب لا بيانات): «ارجو تحويل…» / «برجاء…» → يُتجاهَل (§7.2).
 # مطابقة بالكلمة الكاملة المطبَّعة (لا بادئة) كي لا تُطابَق أسماء مثل «رجائي/مرجان».
 _REQUEST_NOISE_WORDS = {
@@ -230,7 +233,15 @@ def _split_supplier(val: str) -> tuple[Optional[str], Optional[str], Optional[st
 
 # ── الصيغة A (§3.2) ──────────────────────────────────────────────────────────
 def _parse_a_fields(text: str, treasuries: list[TreasuryRecord]) -> dict:
+    """الصيغة A بمنهج **pattern-fishing** (§3.2 §7.3): المرابط الحاسمة تُفتَّش على **كامل النصّ**
+    بلا اعتماد على ترتيب الأسطر، ثم تُصنَّف المقاطع للحقول البنيوية.
+
+    المرابط المُفتَّشة كليًّا (`_fish_a_anchors`): الرقم الإشاري (Axxxx)، الهاتف (10-13 خانة)،
+    والمبلغ المُعنون («القيمة=»/«المبلغ:»/«القيمة:»). الحقول البنيوية (كود+اسم الزبون، الخزينة،
+    المبلغ+العملة الملتصقة، وسيلة الدفع، البلد) تبقى على تصنيف المقاطع لأنها تعتمد على تجاور
+    الرموز داخل المقطع. وكلّ ما لا يُطابِق (نصّ حرّ/تعليمات/مدن غير معروفة) يُتجاهَل تلقائيًّا."""
     f: dict = {}
+    _fish_a_anchors(text, f)                 # تفتيش كليّ للمرابط أولًا — يفوز على المقاطع (setdefault)
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -241,6 +252,41 @@ def _parse_a_fields(text: str, treasuries: list[TreasuryRecord]) -> dict:
             if seg:
                 _classify_segment(seg, f, treasuries, is_header)
     return f
+
+
+def _fish_a_anchors(text: str, f: dict) -> None:
+    """يُفتّش **كامل نصّ** الرسالة الأولى (حوالة A §7.3) عن المرابط بلا اعتماد على ترتيب الأسطر:
+
+    ١. الرقم الإشاري (Axxxx): أوّل رمز مستقلّ يطابق `_REFERENCE_RE`.
+    ٢. الهاتف: أوّل مجرى أرقام 10-13 خانة (يميّزه عن الكود 2-4 والمبلغ ≤7).
+    ٣. المبلغ المُعنون: «القيمة = 25000» / «المبلغ : 5000» / «القيمة: 25000» → المبلغ (+عملة إن وُجدت).
+
+    المبلغ+العملة الملتصقة («541ج») تبقى على تصنيف المقاطع (§3.5). كلّ ما لا يُطابِق يُتجاهَل."""
+    for tok in re.split(r"[\s/]+", text.strip()):
+        if not tok:
+            continue
+        if "reference" not in f and _REFERENCE_RE.match(tok):
+            f["reference"] = tok
+        if "phone" not in f:
+            digits = re.sub(r"\D", "", tok)
+            if 10 <= len(digits) <= 13:      # هاتف: 10-13 خانة (§3.4)
+                f["phone"] = digits
+
+    if "amount" in f:
+        return
+    for line in text.splitlines():
+        label = _split_label(line.strip())
+        if label is None:
+            continue
+        head = normalize_ar(label[0])
+        if any(head.startswith(lb) for lb in _AMOUNT_LABELS):
+            amt = parse_amount(label[1])
+            if amt is not None:
+                cur = detect_currency(label[1])
+                if cur is not None:
+                    f.setdefault("currency", cur)
+                f["amount"] = amt
+                return
 
 
 def _add_note(f: dict, text: str) -> None:
@@ -319,7 +365,7 @@ def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_he
         return
 
     # 3) المبلغ + العملة (§3.5) — يُفحص قبل الهاتف/الزبون لتجنّب الالتباس
-    if detect_currency(seg) or n.startswith("القيمه"):
+    if detect_currency(seg) or n.startswith("القيمه") or n.startswith("المبلغ"):
         cur = detect_currency(seg)
         if cur:
             f.setdefault("currency", cur)
