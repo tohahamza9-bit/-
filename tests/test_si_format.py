@@ -108,13 +108,27 @@ async def test_completion_fragment_fishing(db, text, code, name, price, treasury
     "793 حميد بن غارات",          # أ: الكود في البداية بلا «كود»
     "حميد بن غارات كود.793",      # ب: الكود في النهاية مع «كود.»
     "كود.793 حميد بن غارات",      # ج: الكود في البداية مع «كود.»
+    "حميد بن غارات 793",          # د: الكود في النهاية بلا كلمة «كود»
 ])
 def test_extract_code_name_all_positions(val):
-    """يستخرج الكود=793 والاسم='حميد بن غارات' في المواضع الثلاثة (بداية/نهاية، مع «كود.» أو بلا)."""
+    """يستخرج الكود=793 والاسم='حميد بن غارات' في المواضع الأربعة (بداية/نهاية، مع «كود.» أو بلا)."""
     from core.parsing.parser import _extract_code_name
     code, name = _extract_code_name(val)
     assert code == "793"
     assert name == "حميد بن غارات"
+
+
+async def test_si_customer_code_trailing_no_keyword(db):
+    """حقل «اسم الزبون» بكود في النهاية بلا كلمة «كود»: «عبد القادر حبيب 769» → كود=769، الاسم بلا الكود."""
+    text = (
+        "رقم العملية: SI1902\nرقم المستلم: 01093232832\n"
+        "اسم الزبون: عبد القادر حبيب 769\n"
+        "القيمة قبل الخصم: 3540 ج.م\nالقيمة بعد الخصم 1%: 3505 ج.م\n"
+        "السعر: 5.9\nنوع التحويل: فودافون كاش\nالخزينة: بلاس فون"
+    )
+    leg = parse_message(text, await _treas(db), []).leg
+    assert leg.customer_code == "769"
+    assert leg.customer_name == "عبد القادر حبيب"
 
 
 async def test_si_customer_code_merged_with_dot(db):
