@@ -126,12 +126,32 @@ async def test_treasury_only_second_completes_pending_by_ref(db):
     assert await db.deals.col.count_documents({}) == 1           # لا صفقة جديدة
 
 
-async def test_treasury_only_second_no_match_returns_none(db):
-    # لا صفقة معلّقة بنفس الرقم → None (تتبع المسار العادي، لا تُكمِّل صفقة خطأ)
+async def test_treasury_only_second_no_match_is_stored_as_pending(db):
+    # لا صفقة معلّقة بنفس الرقم (الخزينة وصلت قبل الأولى) → تُحفَظ ردًّا معلّقًا (Fix 2)، لا هدرزة
     svc = QueueService(db)
     leg2 = parse_message("A9999\nبلس", await _treas(db), []).leg
     raw = _raw("x", "A9999\nبلس", NOW)
     assert await svc.try_absorb_treasury_second(leg2, raw, NOW) is None
+    assert await db.pending_replies.col.count_documents({}) == 1   # حُفِظ ردًّا معلّقًا
+
+
+async def test_treasury_only_before_first_stored_and_linked_on_arrival(db):
+    # 🔴 خارج الترتيب: الخزينة تصل قبل الأولى → تُحفَظ ردًّا معلّقًا، ثم تُربَط تلقائيًّا عند وصول الأولى.
+    svc = QueueService(db)
+    leg_tre = parse_message("A8154\nبلس", await _treas(db), []).leg
+    raw_tre = _raw("mT", "A8154\nبلس", NOW)
+    assert await svc.try_absorb_treasury_second(leg_tre, raw_tre, NOW) is None
+    assert await db.pending_replies.col.count_documents({}) == 1
+
+    # الأولى (زبون + مبلغ، بلا خزينة) خلال 90s → صفقة تسحب الرد المعلّق فتكتمل خزينتها
+    first = parse_message("A8154\n01029051735\nمصر\n50000\n562 بوجناح 5.96",
+                          await _treas(db), []).leg
+    first.source_message_key = "mF"
+    deal = await svc.try_group(first, NOW + timedelta(seconds=30), chat_jid=CENTRAL)
+    assert deal.status == Status.PARSED
+    assert deal.sell_leg.treasury is not None and deal.sell_leg.treasury.code == "74"  # بلاس فون
+    assert deal.sell_leg.customer_code == "562" and deal.sell_leg.amount == 50000
+    assert "mT" in deal.source_message_keys
 
 
 # ═════════════════════════════════════════════════════════════════════════════

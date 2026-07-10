@@ -42,7 +42,12 @@ from .parsing import (
 from .parsing.normalize import normalize_price
 from .parsing.resolve import resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
-from .queue.service import QueueService, _as_naive_utc, is_completion_fragment
+from .queue.service import (
+    QueueService,
+    _as_naive_utc,
+    is_completion_fragment,
+    is_treasury_only_reply,
+)
 from .queue.stabilization import is_stable
 from .verification.sql_verifier import SqlVerifier
 from .writers.base import Writer
@@ -215,6 +220,9 @@ class Pipeline:
             completed = await self.queue.try_absorb_treasury_second(result.leg, raw, now)
             if completed is not None:
                 return await self.process_deal(completed, now)
+            if is_treasury_only_reply(result.leg):
+                # وصلت الخزينة قبل الأولى → حُفِظت ردًّا معلّقًا (§7.3) — لا هدرزة، ستُربَط عند وصول الأولى.
+                return None
 
         if result.kind == "noise":
             # رد خزينة/مورد بلا رقم إشاري («بلس»/«صافي» وحدها) — ليس هدرزة بل جزء مكمّل
