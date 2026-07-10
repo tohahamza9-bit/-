@@ -73,6 +73,15 @@ _SI_LABELS = [
 ]
 
 
+def _has_reference(text: str) -> bool:
+    """§0: هل يحمل النصّ رقمًا إشاريًا (Axxxx/SIxxxx) كرمز مستقلّ؟ — مرساة معاملة قاطعة."""
+    return any(
+        _REFERENCE_RE.match(tok)
+        for tok in re.split(r"[\s/]+", (text or "").strip())
+        if tok
+    )
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # الواجهة العامّة
 # ═════════════════════════════════════════════════════════════════════════════
@@ -85,8 +94,10 @@ def parse_message(
     if not text or not text.strip():
         return ParseResult(kind="noise", reason="رسالة فارغة", confidence=1.0)
 
-    # خارج النطاق (§0): تسليم يدوي/باليد → أولوية فوق «حوالة» → يُصعَّد لا يُدخَل.
-    if is_out_of_scope(text):
+    # خارج النطاق (§0): تسليم يدوي/باليد → يُصعَّد لا يُدخَل.
+    # 🔴 قرار المستخدم: وجود رقم إشاري (Axxxx) مرساة معاملة قاطعة → حوالة (pattern-fishing)
+    # وتتقدّم على out_of_scope. فحص التسليم اليدوي يقتصر على الرسائل **بلا** رقم إشاري.
+    if not _has_reference(text) and is_out_of_scope(text):
         return ParseResult(
             kind="out_of_scope",
             reason="تسليم يدوي/باليد — خارج نطاق البوت (§0)", confidence=1.0,

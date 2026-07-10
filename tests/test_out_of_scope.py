@@ -20,8 +20,20 @@ async def _treas(db):
     "A6363\nتسليم\nانستا باي\nمحمود ابراهيم\nالقيمة 59574 ج م",          # حالة ح
     "A5187\nتسليم السيد علي الطيب مبلغ 100 د ت جربة",                     # حالة ز
 ])
-async def test_manual_delivery_is_out_of_scope(text, db):
-    # حتى مع ref+مبلغ (بنية حوالة كاملة) → خارج النطاق يتقدّم على «حوالة»
+async def test_reference_overrides_out_of_scope(text, db):
+    # 🔴 قرار المستخدم: وجود رقم إشاري (Axxxx) مرساة معاملة قاطعة → حوالة (pattern-fishing)
+    # وتتقدّم على «تسليم يدوي/باليد». (كانت out_of_scope؛ الآن transfer لأنها تحمل ref.)
+    res = parse_message(text, await _treas(db), [])
+    assert res.kind == "transfer"
+
+
+@pytest.mark.parametrize("text", [
+    "ارجو تسليم باليد / احمد السيد / 8.800 ج م / قاهرة باليد",   # نفس صورة ٢ بلا ref
+    "قاهره بيد / 40.000 جنيه مصري",                              # نفس صورة ٣ بلا ref
+    "تسليم السيد علي الطيب مبلغ 100 د ت جربة",                    # نفس الحالة ز بلا ref
+])
+async def test_manual_delivery_without_reference_is_out_of_scope(text, db):
+    # بلا رقم إشاري → التسليم اليدوي يبقى out_of_scope (يُصعَّد لا يُدخَل §0)
     res = parse_message(text, await _treas(db), [])
     assert res.kind == "out_of_scope"
 

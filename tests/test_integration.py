@@ -944,7 +944,8 @@ async def test_reference_anchored_transfer_not_noise_in_inbox(db):
 # ═════════════════════════════════════════════════════════════════════════════
 async def test_out_of_scope_escalates_to_admin(db):
     pipe = _make_pipeline(db)
-    text = "A6363\nتسليم باليد\nمحمود ابراهيم\n01203187000\nالقيمة 59574 ج م"
+    # 🔴 بلا رقم إشاري: التسليم اليدوي يبقى خارج النطاق (وجود Axxxx يقلبها إلى حوالة — قرار المستخدم)
+    text = "تسليم باليد\nمحمود ابراهيم\n01203187000\nالقيمة 59574 ج م"
     await pipe.capture(_raw("oos1", text, jid=CENTRAL))
     await pipe.process_inbox(PAST + timedelta(seconds=120))
 
