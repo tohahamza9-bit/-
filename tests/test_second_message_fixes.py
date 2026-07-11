@@ -140,6 +140,22 @@ async def test_mark_reacts_on_all_message_keys(db):
     assert keys == ["k1", "k2"]                       # ✅ على الرسالتين
 
 
+async def test_yellow_mark_reacts_on_first_message_only(db):
+    # 🟡 (MATCHED) على الرسالة الأولى فقط (لا الثانية) — بخلاف ✅/🔴
+    from core.constants import Mark
+    from core.matching.service import MatchingService
+    from core.models import Deal
+    bus = Bus(db, {CENTRAL, ADMIN}, CENTRAL, ADMIN)
+    mt = MatchingService(db, bus, [], [])
+    deal = Deal(deal_id="y", status=Status.MATCHED, created_at=NOW, updated_at=NOW,
+                chat_jid=CENTRAL, source_message_keys=["k1", "k2"],
+                sell_leg=ParsedLeg(operation=OperationType.SELL, source_message_key="k1"))
+    await mt.apply_mark(deal, Mark.MATCHED)
+    outs = await db.outgoing.next_unsent(100)
+    keys = [o["reply_to_key"] for o in outs if o.get("reaction") == Mark.MATCHED.value]
+    assert keys == ["k1"]                             # 🟡 على الأولى فقط
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # رد خزينة بلا ref يُفضّل الصفقة المعلّقة من **نفس المُرسِل** (sender_jid) §7.3
 # ═════════════════════════════════════════════════════════════════════════════

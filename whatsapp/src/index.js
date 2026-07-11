@@ -208,6 +208,7 @@ async function main() {
   sender = makeSender({
     sock: new Proxy({}, { get: (_t, p) => (...a) => sock[p](...a) }), // يشير دومًا لأحدث مقبس بعد إعادة الاتصال
     outgoing: dbh.outgoing,
+    raw: dbh.raw,                    // لجلب الرسالة الأصلية عند forward (تصعيد الفشل §8.3)
     dests: cfg.allowedDests,
     breaker,
     warmup,

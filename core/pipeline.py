@@ -322,7 +322,7 @@ class Pipeline:
             log.info("تنبيه خفيف: حوالة A ناقصة %s تجاوزت 90s بلا رسالة ثانية", self._ref(deal))
         for deal in to_escalate:
             await self.bus.notify_admin(
-                f"⚠️ حوالة A ({self._ref(deal)}) لم تكتمل خلال 15 دقيقة — لم تصل الرسالة "
+                f"🚨 حوالة A ({self._ref(deal)}) لم تكتمل خلال 15 دقيقة — لم تصل الرسالة "
                 f"الثانية (كود الزبون + الاسم + السعر + الخزينة). مراجعة يدوية.",
                 self._deal_key(deal),
             )
@@ -354,15 +354,15 @@ class Pipeline:
             leg0 = deal.sell_leg or deal.buy_leg
             if leg0 is not None and leg0.is_si_format and leg0.treasury is None:
                 deal.status = Status.ESCALATED
-                deal.mark = Mark.WARN
-                deal.hold_reason = "SI بخزينة غير محلولة — تصعيد للمراجعة اليدوية"
+                deal.mark = Mark.FAILED
+                deal.hold_reason = "لا خزينة (SI بخزينة غير محلولة)"
                 await self.db.deals.upsert(deal)
+                await self.matcher.apply_mark(deal, Mark.FAILED)   # 🔴 على المركزية (§8.3)
                 await self.bus.notify_admin(
-                    f"🚫 حوالة SI بخزينة غير محلولة ({self._ref(deal)}) — "
-                    f"اسم الخزينة خارج القوائم أو خطأ إملائي؛ مراجعة يدوية فورية (§0).",
-                    self._deal_key(deal),
+                    f"🔴 فشل: {self._ref(deal)} — لا خزينة (اسم الخزينة خارج القوائم أو خطأ إملائي §0).",
+                    self._deal_key(deal), forward_key=self._deal_key(deal),
                 )
-                log.warning("SI بخزينة غير محلولة %s — تصعيد لغرفة المسؤول", deal.deal_id)
+                log.warning("SI بخزينة غير محلولة %s — 🔴 + تصعيد لغرفة المسؤول", deal.deal_id)
                 return deal
 
             # (6a) الخصم وخزينة الطرفين بمورد (§6) — تُحسم عند اكتمال صفقة طرفين بمورد فقط.
@@ -393,6 +393,22 @@ class Pipeline:
             ok, reason = self._trust_gate(deal)
             if not ok:
                 deal.hold_reason = reason
+                # «لا خزينة» (non-SI): خزينة غير محلولة أصلًا → 🔴 فشل + تصعيد (قرار المستخدم).
+                # غير ذلك (كود/مبلغ ناقص، أو خزينة بلا كود) → ⚠️ تعليق كالسابق.
+                no_treasury = any(
+                    lg is not None and lg.treasury is None for lg in (deal.sell_leg, deal.buy_leg)
+                )
+                if no_treasury:
+                    deal.status = Status.ESCALATED
+                    deal.mark = Mark.FAILED
+                    await self.db.deals.upsert(deal)
+                    await self.matcher.apply_mark(deal, Mark.FAILED)   # 🔴 على المركزية (§8.3)
+                    await self.bus.notify_admin(
+                        f"🔴 فشل: {self._ref(deal)} — لا خزينة محلولة (تعذّر تحديد الحساب).",
+                        self._deal_key(deal), forward_key=self._deal_key(deal),
+                    )
+                    log.warning("🔴 لا خزينة (non-SI) للصفقة %s — تصعيد لغرفة المسؤول", deal.deal_id)
+                    return deal
                 deal.status = Status.HELD
                 deal.mark = Mark.WARN
                 await self.db.deals.upsert(deal)
@@ -553,9 +569,9 @@ class Pipeline:
                 await self.db.deals.set_status(deal.deal_id, deal.status, mark=Mark.FAILED.value)
                 await self.matcher.apply_mark(deal, Mark.FAILED)   # 🔴 على الرسالتين (§8.3)
                 await self.bus.notify_admin(
-                    f"🔴 فشل {job.operation.value} للصفقة {self._ref(deal)}: {res.error} "
-                    f"{'(لقطة محفوظة)' if res.screenshot_path else ''} — مراجعة يدوية.",
-                    key,
+                    f"🔴 فشل: {self._ref(deal)} — فشل {job.operation.value}: {res.error} "
+                    f"{'(لقطة محفوظة)' if res.screenshot_path else ''}.",
+                    key, forward_key=self._deal_key(deal),
                 )
                 return deal
 
@@ -581,8 +597,8 @@ class Pipeline:
                 await self.db.deals.set_status(deal.deal_id, deal.status, mark=Mark.FAILED.value)
                 await self.matcher.apply_mark(deal, Mark.FAILED)   # 🔴 على الرسالتين (§8.3)
                 await self.bus.notify_admin(
-                    f"🔴 لم يتأكّد حفظ {job.operation.value} للصفقة {self._ref(deal)} في SQL — مراجعة (§11.4).",
-                    key,
+                    f"🔴 فشل: {self._ref(deal)} — لم يتأكّد حفظ {job.operation.value} في SQL (§11.4).",
+                    key, forward_key=self._deal_key(deal),
                 )
                 return deal
             if job.operation == OperationType.SELL:

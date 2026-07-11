@@ -10,7 +10,7 @@ import { assertAllowedDestination, OutputBlockedError } from './whitelist.js';
 import { decodeKey } from './keys.js';
 import { sendDelayMs, roomGapMs, sleep } from './antiban.js';
 
-export function makeSender({ sock, outgoing, dests, breaker, warmup, logger }) {
+export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger }) {
   let running = false;
   let lastJid = null;
 
@@ -30,6 +30,21 @@ export function makeSender({ sock, outgoing, dests, breaker, warmup, logger }) {
     }
     await sock.sendMessage(d.chat_jid, { text: d.text || '' }, opts);
     logger.info('Reply → %s: %s', d.chat_jid, (d.text || '').slice(0, 60));
+
+    // forward الرسالة الأصلية بعد نصّ التنبيه (تصعيد الفشل §8.3): نجلبها من raw ونعيد توجيهها.
+    if (d.forward_key && raw) {
+      try {
+        const orig = await raw.findOne({ message_key: d.forward_key });
+        if (orig && orig.raw && orig.raw.message) {
+          await sock.sendMessage(d.chat_jid, { forward: orig.raw });
+          logger.info('forward → %s (%s)', d.chat_jid, d.forward_key);
+        } else {
+          logger.warn({ key: d.forward_key }, 'forward: الرسالة الأصلية غير متوفّرة');
+        }
+      } catch (e) {
+        logger.error({ err: e, key: d.forward_key }, 'فشل forward — التنبيه النصّي أُرسِل'); // T5
+      }
+    }
   }
 
   /** جولة واحدة على الطابور. */

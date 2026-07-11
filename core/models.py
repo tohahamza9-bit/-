@@ -235,4 +235,5 @@ class OutgoingMessage(BaseModel):
     chat_jid: str
     text: str
     reply_to_key: Optional[str] = None          # Reply بمفتاح الرسالة (§8.3)
-    reaction: Optional[str] = None              # علامة صامتة (🔸/✅)
+    reaction: Optional[str] = None              # علامة صامتة (🟡/✅/🔴)
+    forward_key: Optional[str] = None           # forward للرسالة الأصلية (مفتاحها) — لتصعيد الفشل (§8.3)

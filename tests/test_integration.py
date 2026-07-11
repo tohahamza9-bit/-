@@ -961,19 +961,25 @@ async def test_out_of_scope_escalates_to_admin(db):
 # ═════════════════════════════════════════════════════════════════════════════
 # option B (§0): بيع بخزينة لا تُحلّ → ⚠️ تعليق، لا يُكتب بخزينة فارغة/خاطئة (#2)
 # ═════════════════════════════════════════════════════════════════════════════
-async def test_unresolved_treasury_held_not_written(db):
+async def test_unresolved_treasury_escalates_red_not_written(db):
+    # non-SI بخزينة غير محلولة → 🔴 «لا خزينة» + تصعيد (قرار المستخدم)، لا يُكتب بخزينة فارغة (§0)
     await _enable_storage(db)
     writer = FakeWriter()
     pipe = _make_pipeline(db, writer, rooms=False)   # بلا غرف → يصل مباشرة لبوابة الثقة
     text = "A55\n1234 احمد علي 5.9\n01000000000\n5000 مصري\nخزينةمجهولة"
     await pipe.capture(_raw("ut1", text))
     await pipe.process_inbox(PAST + timedelta(seconds=120))    # خزينة None → WAITING
-    await pipe.tick(PAST + timedelta(seconds=220))             # المهلة → PARSED مفرد → بوابة الثقة → HELD
+    await pipe.tick(PAST + timedelta(seconds=220))             # المهلة → PARSED مفرد → بوابة الثقة → 🔴
 
     d = await db.deals.find_by_source_key("ut1")
-    assert d.status == Status.HELD               # لم يُدخَل بخزينة فارغة (§0)
-    assert d.mark == Mark.WARN
+    assert d.status == Status.ESCALATED          # لم يُدخَل بخزينة فارغة (§0)
+    assert d.mark == Mark.FAILED
     assert writer.calls == []                    # لم تُكتب
+    outs = await db.outgoing.next_unsent(100)
+    central_red = [o for o in outs
+                   if o.get("reaction") == Mark.FAILED.value and o["chat_jid"] == CENTRAL]
+    assert central_red, "🔴 على المركزية عند لا خزينة"
+    assert any(o["chat_jid"] == ADMIN for o in outs), "تصعيد للمسؤول"
 
 
 # ═════════════════════════════════════════════════════════════════════════════

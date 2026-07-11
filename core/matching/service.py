@@ -503,12 +503,10 @@ class MatchingService:
     # ── وضع العلامات (§8.3) ─────────────────────────────────────────────────
     async def apply_mark(self, deal: Deal, mark: Mark) -> None:
         """
-        يضع العلامة على رسالة/رسائل المركزية (§8.3). التفاعلات (reactions) الثلاث (قرار المستخدم):
-          🟡 MATCHED (وصلت للمراجعة/الانتظار)، ✅ DONE (سُجِّلت)، 🔴 FAILED (فشل تقني) — تفاعل صامت.
+        يضع العلامة على رسالة/رسائل المركزية (§8.3). التفاعلات الثلاث (قرار المستخدم):
+          🟡 MATCHED (مراجعة/انتظار) → **الرسالة الأولى فقط**.
+          ✅ DONE (سُجِّلت) و🔴 FAILED (فشل تقني) → **كل** رسائل الصفقة (الأولى + الثانية).
           ⚠️ WARN → Reply نصّي بالسبب (ليس تفاعلًا) على الرسالة الأولى فقط.
-
-        🔴 التفاعل يُوضَع على **كل** مفاتيح الصفقة (الأولى + الثانية عند وجود source_message_keys)
-           كي تظهر العلامة على الرسالتين؛ وإلّا على _deal_key المفرد.
         """
         if mark is Mark.WARN:
             key = self._deal_key(deal)
@@ -519,11 +517,15 @@ class MatchingService:
             await self._bus.reply_central(f"⚠️ {reason}", key)
             return
 
-        # 🟡/✅/🔴 → تفاعل صامت على كل رسائل الصفقة (§8.3)
-        keys = list(deal.source_message_keys)
-        if not keys:
+        # 🟡 على الأولى فقط؛ ✅/🔴 على كل الرسائل (§8.3)
+        if mark is Mark.MATCHED:
             single = self._deal_key(deal)
             keys = [single] if single else []
+        else:                                        # DONE / FAILED
+            keys = list(deal.source_message_keys)
+            if not keys:
+                single = self._deal_key(deal)
+                keys = [single] if single else []
         if not keys:
             log.error("🔴 لا مفتاح رسالة للصفقة %s — تعذّر وضع العلامة %s", deal.deal_id, mark)
             return

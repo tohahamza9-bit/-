@@ -74,10 +74,17 @@ class Bus:
         """تنبيه/تذكير في المركزية (Reply)."""
         await self.reply(self.central_jid, text, reply_to_key)
 
-    async def notify_admin(self, text: str, reply_to_key: Optional[str] = None) -> None:
-        """تصعيد لغرفة المسؤول (§8.1 §7.3 §10)."""
-        await self.reply(self.admin_jid, text, reply_to_key)
+    async def notify_admin(
+        self, text: str, reply_to_key: Optional[str] = None, forward_key: Optional[str] = None,
+    ) -> None:
+        """تصعيد لغرفة المسؤول (§8.1 §7.3 §10). forward_key: مفتاح الرسالة الأصلية لإعادة توجيهها
+        (forward) مع التنبيه — يُستعمَل عند فشل الصفقة كي يرى المسؤول الحوالة نفسها (§8.3)."""
+        self._guard(self.admin_jid)
+        await self._db.outgoing.enqueue(OutgoingMessage(
+            chat_jid=self.admin_jid, text=text, reply_to_key=reply_to_key, forward_key=forward_key,
+        ))
+        log.info("تصعيد للمسؤول%s: %s", " (+forward)" if forward_key else "", text[:80])
 
     async def mark_central(self, message_key: str, emoji: str) -> None:
-        """علامة 🔸/✅ على الحوالة في المركزية (§8.3)."""
+        """علامة 🟡/✅/🔴 على الحوالة في المركزية (§8.3)."""
         await self.react(self.central_jid, message_key, emoji)
