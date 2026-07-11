@@ -20,7 +20,7 @@ from typing import Optional
 
 from .bus import Bus
 from .constants import (
-    SECOND_MESSAGE_LINK_SECONDS,
+    INCOMPLETE_DATA_ESCALATE_SECONDS,
     Currency,
     Mark,
     OperationType,
@@ -287,18 +287,19 @@ class Pipeline:
     # (5·أ) حجْر الإقلاع: صفقات معلّقة قديمة لا تُعالَج تلقائيًّا بعد إعادة التشغيل
     # ═════════════════════════════════════════════════════════════════════════
     async def expire_stale_on_startup(self, now: datetime) -> list[Deal]:
-        """عند بدء تشغيل النواة: أي صفقة معلّقة (WAITING_SECOND_LEG أو PARSED) عمرها (من
-        created_at) أكثر من SECOND_MESSAGE_LINK_SECONDS (120s) → **تُحجَر** (ESCALATED) بلا
-        معالجة ولا كتابة في MONEYADO، مع تنبيه واحد للمسؤول لكل صفقة (§7.3، §12).
+        """عند بدء تشغيل النواة: صفقة معلّقة (WAITING_SECOND_LEG أو PARSED) —
+        - عمرها (من created_at) **≤ 15 دقيقة** (INCOMPLETE_DATA_ESCALATE_SECONDS) → **تبقى كما هي**
+          فيلتقطها العامل (tick/sweep_waiting) ويُعالَجها طبيعيًّا (استرجاع رسائل وقت العطل §12).
+        - عمرها **> 15 دقيقة** → **تُحجَر** (ESCALATED) بلا معالجة ولا كتابة، مع تنبيه المسؤول (§7.3).
 
-        السبب: بعد إطفاء/إعادة تشغيل قد تكون النافذة الزمنية للربط انقضت أو سبق تنبيه المسؤول؛
-        فمعالجتها تلقائيًّا تُدخِل حوالة قديمة/مكرّرة. القاعدة الذهبية (§0): عند الشكّ لا نكتب —
-        نصعّد للإنسان. تُستدعى مرّة عند الإقلاع قبل تشغيل العامل، فلا يلتقطها sweep_waiting/tick."""
-        cutoff = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        السبب: بعد إطفاء قصير (≤15د) النافذة ما زالت مفتوحة فنُكمل المعالجة لا نُهدرها؛ أمّا الأقدم
+        فمعالجتها تلقائيًّا تُدخِل حوالة قديمة/مكرّرة → القاعدة الذهبية (§0): عند الشكّ نصعّد للإنسان.
+        تُستدعى مرّة عند الإقلاع قبل تشغيل العامل، فلا يلتقطها sweep_waiting/tick قبل الفرز."""
+        cutoff = _as_naive_utc(now) - timedelta(seconds=INCOMPLETE_DATA_ESCALATE_SECONDS)
         quarantined: list[Deal] = []
         for deal in await self.db.deals.by_status(Status.WAITING_SECOND_LEG, Status.PARSED):
             if _as_naive_utc(deal.created_at) >= cutoff:
-                continue                      # حديثة (≤120s) → تُعالَج طبيعيًّا
+                continue                      # ≤15د → تبقى، يُعيد العامل معالجتها (§12)
             deal.status = Status.ESCALATED
             deal.mark = Mark.WARN
             deal.hold_reason = (
@@ -307,7 +308,7 @@ class Pipeline:
             await self.db.deals.upsert(deal)  # حجْر صامت (بلا كتابة في MONEYADO)
             await self.bus.notify_admin(
                 f"⏰ صفقة معلّقة قديمة ({self._ref(deal)}) عند إعادة التشغيل — لم تُعالَج تلقائيًّا "
-                f"(عمرها > {SECOND_MESSAGE_LINK_SECONDS}s)؛ مراجعة يدوية.",
+                f"(عمرها > {INCOMPLETE_DATA_ESCALATE_SECONDS // 60} دقيقة)؛ مراجعة يدوية.",
                 self._deal_key(deal),
             )
             quarantined.append(deal)

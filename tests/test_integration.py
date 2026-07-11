@@ -297,11 +297,11 @@ async def test_golden_path_simple_egp_sell(db):
 
 
 async def test_expire_stale_pending_on_startup(db):
-    """حجْر الإقلاع: WAITING/PARSED عمرها >120s → ESCALATED + تنبيه؛ الحديثة (≤120s) تبقى."""
+    """حجْر الإقلاع: WAITING/PARSED عمرها >15د → ESCALATED + تنبيه؛ ما ≤15د يبقى ليُعاد معالجته."""
     pipe = _make_pipeline(db)
-    now = PAST + timedelta(seconds=1000)
-    old = now - timedelta(seconds=200)        # > 120s → تُحجَر
-    fresh = now - timedelta(seconds=30)        # ≤ 120s → تبقى
+    now = PAST + timedelta(seconds=2000)
+    old = now - timedelta(minutes=16)          # > 15د → تُحجَر
+    fresh = now - timedelta(minutes=5)         # ≤ 15د → تبقى (يُعيد العامل معالجتها §12)
 
     def _leg(ref):
         return ParsedLeg(operation=OperationType.SELL, customer_code="1208",
