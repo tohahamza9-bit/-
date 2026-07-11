@@ -269,3 +269,36 @@ async def test_case_w_explicit_buy(db):
                         await _treas(db), await db.suppliers.all_active())
     assert res.kind == "transfer"
     assert res.leg.operation == OperationType.BUY
+
+
+# ── الرسالة الأولى: سطر عربيّ منفرد بلا أرقام = اسم المستلم (§11.1) ────────────
+async def test_first_message_bare_arabic_line_is_recipient(db):
+    """«خيرية» في سطر منفرد بعد الرقم الإشاري → recipient_name، بلا ابتلاع الدفع/المبلغ/الهاتف."""
+    from core.constants import SEED_SUPPLIERS
+    await db.suppliers.seed_if_missing(SEED_SUPPLIERS)
+    sp = await db.suppliers.all_active()
+    msg = "A8676\nارجو تنفيذ\nخيرية\n+20 115 2936804\nالقيمة: 14.288 ج م\nانستا باي"
+    leg = parse_message(msg, await _treas(db), sp).leg
+    assert leg.recipient_name == "خيرية"          # السطر العربيّ المنفرد التُقِط اسمَ مستلم
+    assert leg.payment_method == "إنستا باي"       # «انستا باي» بقيت دفعًا (لم تُبتلَع كاسم مستلم)
+    assert leg.phone == "01152936804"
+    assert leg.amount == 14288
+    assert leg.currency == Currency.EGP
+
+
+# ── الرسالة الثانية: «اسم كود سعر» (الكود في الوسط §3.2) ──────────────────────
+def test_name_code_price_pattern_only():
+    """«احمد بوزويص 876 5.88» (اسم + كود وسط + سعر) → زوج زبون؛ و«كود أولاً» لا يتأثّر."""
+    from core.parsing.parser import extract_code_name_price_lines
+    assert extract_code_name_price_lines("احمد بوزويص 876 5.88") == [("876", "احمد بوزويص", "5.88")]
+    assert extract_code_name_price_lines("1300 عبدالله معتيق 5.90") == [("1300", "عبدالله معتيق", "5.90")]
+
+
+async def test_second_message_name_code_price_plus_supplier_two_pairs(db):
+    """«احمد بوزويص 876 5.88 / البراق» → زوجان (زبون بكود وسط + مورد) فيعمل ربط Path A (§7.3)."""
+    from core.constants import SEED_SUPPLIERS
+    from core.parsing.parser import extract_code_name_price_lines
+    await db.suppliers.seed_if_missing(SEED_SUPPLIERS)
+    sp = await db.suppliers.all_active()
+    pairs = extract_code_name_price_lines("احمد بوزويص 876 5.88\nالبراق", sp)
+    assert pairs == [("876", "احمد بوزويص", "5.88"), ("1280", "البراق", None)]

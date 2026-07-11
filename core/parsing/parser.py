@@ -531,8 +531,12 @@ def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_he
             f["treasury_record"] = rec
             return
 
-    # 9) في سطر الترويسة (/): نص عربي غير مصنّف = اسم المستلم
-    if is_header and _ARABIC_RE.search(seg):
+    # 9) نص عربي غير مصنّف = اسم المستلم:
+    #    - سطر ترويسة «/» (كالسابق)، أو
+    #    - سطر عربيّ منفرد **بلا أرقام** (مثل «خيرية» بعد الرقم الإشاري في الرسالة الأولى §11.1).
+    #    يصل هنا فقط بعد فشل كل التصنيفات (الضجيج 5.5 والدفع/المدينة/البلد/الخزينة 6-8)، فلا يبتلع
+    #    صنفًا معروفًا («انستا باي»/«بلس»/«صافي» عُولجت ورجعت قبله؛ ومنعُ الأرقام يستبعد المبلغ/الهاتف).
+    if _ARABIC_RE.search(seg) and (is_header or not re.search(r"\d", seg)):
         f.setdefault("recipient_name", seg.strip())
         return
 
@@ -581,6 +585,11 @@ def _parse_name_price_supplier(
     return srec.code, srec.name, price
 
 
+# سطر «اسم كود سعر» (الكود في **الوسط** §3.2): «احمد بوزويص 876 5.88» → (code, name, price).
+# نطاق الأحرف العربية الصحيح [ء-ي] (لا [ي-ء] المقلوب). يُجرَّب بعد نمط «كود أولاً» (_parse_customer_line).
+_NAME_CODE_PRICE_RE = re.compile(r"^([ء-ي].+?)\s+(\d{2,4})\s+(\d+(?:[.,،]\d+)?)$")
+
+
 def extract_code_name_price_lines(
     text: str, suppliers: Optional[list[SupplierRecord]] = None,
 ) -> list[tuple[str, str, Optional[str]]]:
@@ -600,6 +609,10 @@ def extract_code_name_price_lines(
             r = _parse_customer_line(ln)
             if r is not None and r[0] and r[1]:   # كود رقمي + اسم (السعر اختياري)
                 pairs.append(r)
+                continue
+            m = _NAME_CODE_PRICE_RE.match(ln)     # «اسم كود سعر» (الكود في الوسط §3.2)
+            if m:
+                pairs.append((m.group(2), m.group(1).strip(), m.group(3).replace("،", ".")))
                 continue
             if suppliers:                        # بلا كود: طابِق موردًا مسجّلًا بالاسم (كوده من db)
                 s = _parse_name_price_supplier(ln, suppliers)
