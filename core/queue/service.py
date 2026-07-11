@@ -572,6 +572,12 @@ class QueueService:
         if doc is None:
             return False
         frag = ParsedLeg(**doc["leg"])
+        # 🔴 شرط العملة (§4.1): رد معلّق بعملة معروفة (من خزينته أو **سعره** 35→TND/5.90→EGP) لا
+        #    يُسحَب إلى صفقة بعملة مختلفة — يمنع تلوّث حادثة A8755(TND)↔A8756(EGP): رد تونسي (فتحي/
+        #    سعر 35) كان يُدمَج في صفقة مصرية عبر هذا المسار (لا يمرّ بـfragment_link_candidates).
+        frag_cur = self._leg_currency(frag) or self._currency_from_price(frag.price_raw)
+        if not self._currency_compatible(deal, frag_cur):
+            return False
         self._apply_fragment(deal, frag)
         deal.status = Status.PARSED
         deal.waiting_deadline = None

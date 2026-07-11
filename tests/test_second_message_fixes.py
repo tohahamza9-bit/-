@@ -521,3 +521,24 @@ async def test_fragment_tnd_price_not_contaminate_egp_only(db):
         created_at=NOW - timedelta(seconds=5), updated_at=NOW, chat_jid=CENTRAL, sell_leg=egp))
     f35 = ParsedLeg(operation=OperationType.SELL, customer_code="55", customer_name="عطيه", price_raw="35")
     assert await svc._find_recent_waiting(CENTRAL, NOW, f35) is None
+
+
+async def test_pending_reply_not_pulled_into_mismatched_currency(db):
+    """رد معلّق تونسي (خزينة/سعر TND) لا يُسحَب إلى صفقة مصرية جديدة عبر _pull_pending_reply —
+    منع تلوّث حادثة A8755(TND)/A8756(EGP): رد فتحي/سعر 35 كان يدخل صفقة مصرية (§4.1)."""
+    from core.constants import Currency
+    from core.parsing import parse_message
+    from core.parsing.parser import parse_completion_fragment
+    svc = QueueService(db)
+    treas = await _treas(db)
+    # رد خزينة تونسية «55 عليه 35 / فتحي» وصل قبل حوالته → يُحفَظ ردًّا معلّقًا (TND)
+    frag = parse_completion_fragment("55 عليه 35\nفتحي", treas, [])
+    assert frag.currency == Currency.TND
+    assert await svc.absorb_fragment(frag, CENTRAL, "pr", NOW) is None   # لا صفقة → معلّق
+    # صفقة مصرية جديدة (EGP) → لا تسحب الرد التونسي (عملة مختلفة)
+    egp = parse_message("A8756\nمصر\nفودافون كاش\n01013047070\n30000 ج.م", treas, []).leg
+    egp.source_message_key = "e1"
+    deal = await svc.try_group(egp, NOW, chat_jid=CENTRAL)
+    assert deal.status == Status.WAITING_SECOND_LEG    # ما زالت تنتظر (لم يُسحَب الرد)
+    assert deal.sell_leg.treasury is None              # لا خزينة فتحي التونسية
+    assert deal.sell_leg.customer_code is None         # ولا كود 55 التونسي
