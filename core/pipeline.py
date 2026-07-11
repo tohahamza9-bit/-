@@ -220,6 +220,10 @@ class Pipeline:
 
         result = parse_message(raw.text, treasuries, suppliers)
 
+        # 🔴 خزينة SI معنونة لم تُحلّ (§4.5): تُلتقط مجهولةً للإسناد اليدويّ من اللوحة (بلا تخمين §0).
+        if result.leg is not None and result.leg.unresolved_treasury:
+            await self.db.unknown_terms.record(result.leg.unresolved_treasury, "treasury")
+
         if result.kind == "silent_ignore":
             log.info("تجاهل صامت (صرف/قبض): %s", raw.message_key)
             return None

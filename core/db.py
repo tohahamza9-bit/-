@@ -370,6 +370,36 @@ class EmployeeListRepo(_Repo):
         return doc is not None
 
 
+class UnknownTermRepo(_Repo):
+    """كلمات خزينة/مورد تعذّر حلّها (§4.5 §5.4) — للمراجعة والإسناد اليدويّ (بلا تخمين §0)."""
+
+    async def record(self, term: str, context: str) -> None:
+        """يسجّل كلمة مجهولة أو يزيد عدّادها. المفتاح = (term, context). يُطبَّع الفراغ ويُتجاهَل الفارغ."""
+        term = (term or "").strip()
+        if not term or context not in ("treasury", "supplier"):
+            return
+        await self.col.update_one(
+            {"term": term, "context": context},
+            {"$inc": {"count": 1}, "$set": {"last_seen": utcnow()},
+             "$setOnInsert": {"term": term, "context": context}},
+            upsert=True,
+        )
+
+    async def list_recent(self, limit: int = 20) -> list[dict]:
+        """آخر الكلمات المجهولة (الأحدث ظهورًا أولًا)."""
+        cur = self.col.find({}).sort("last_seen", -1).limit(limit)
+        out: list[dict] = []
+        async for d in cur:
+            d.pop("_id", None)
+            out.append(d)
+        return out
+
+    async def remove(self, term: str, context: str) -> int:
+        """يحذف كلمة مجهولة بعد إسنادها (يُرجع عدد المحذوف)."""
+        res = await self.col.delete_one({"term": term, "context": context})
+        return res.deleted_count
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 7) التحكّم — Kill Switch (§13). الافتراضي عند التشغيل: إيقاف.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,6 +507,7 @@ class Database:
         self.control = ControlRepo(self.mdb, "bot_control", "_key")
         self.dead_letter = DeadLetterRepo(self.mdb, "dead_letter", "_id")
         self.pending_replies = PendingReplyRepo(self.mdb, "pending_replies", "message_key")
+        self.unknown_terms = UnknownTermRepo(self.mdb, "unknown_terms", "term")
         log.info("اتصال MongoDB: %s / %s", self._uri, self._db_name)
 
     async def ensure_indexes(self) -> None:
@@ -508,6 +539,8 @@ class Database:
         await self.outbox.col.create_index([("created_at", 1), ("order_index", 1)])
         await self.outgoing.col.create_index([("sent", 1), ("created_at", 1)])
         await self.employees.col.create_index("whatsapp_number", unique=True)
+        await self.unknown_terms.col.create_index([("term", 1), ("context", 1)], unique=True)
+        await self.unknown_terms.col.create_index("last_seen")
         log.info("تمّت تهيئة الفهارس")
 
     async def close(self) -> None:

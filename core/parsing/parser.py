@@ -829,8 +829,13 @@ def _build_leg(
     # treasury=None وتُعامَل كملاحظة (§3.2 §6.1). خزينة الطرفين الحسابية تُسنَد لاحقًا لا من هنا.
     trec: Optional[TreasuryRecord] = f.get("treasury_record")
     tname = f.get("treasury_name")
+    unresolved_treasury: Optional[str] = None
     if trec is None and tname and not _is_discount_indicator(tname):
         trec = resolve_treasury(tname, treasuries)
+        if trec is None:
+            # خزينة SI معنونة صراحةً («الخزينة: …») لم تُحلّ → نيّة خزينة واضحة → تُلتقط مجهولةً
+            #   (db.unknown_terms في الأنبوب) للإسناد اليدويّ، بلا تخمين فضفاض (§0 §4.5).
+            unresolved_treasury = tname.strip() or None
     tref: Optional[TreasuryRef] = None
     if trec is not None:
         if currency is None:
@@ -920,6 +925,7 @@ def _build_leg(
         explicit_operation=explicit,
         is_supplier_counterpart=is_supplier,
         is_si_format=is_si,
+        unresolved_treasury=unresolved_treasury,
     )
     return leg, _confidence(leg, tref, currency)
 

@@ -1,10 +1,20 @@
 """
-حلّ الخزينة/المورد بالاسم الجزئي (§4.5) مع تسامح إملائي عربي.
-- الخزينة: الاسم الجزئي يكفي («بلاس»=بلاس فون، «وليد»=وليد تونس العاصمة) — §4.5.
-- المورد: قائمة بيضاء صارمة (§5.4) — مطابقة دقيقة أو كلمة واحدة كاملة (لا substring فضفاض).
+حلّ الخزينة/المورد بالاسم الجزئي (§4.5) مع تسامح إملائي عربي + مطابقة تقريبية (fuzzy).
+
+المراحل بالترتيب (resolve_treasury / resolve_supplier):
+  ١. تطبيع عربي للمطابقة (normalize_arabic_for_matching): تشكيل/همزات/ة-ى + إزالة «ال» + مسافات.
+  ٢. مطابقة تامّة (exact) بعد التطبيع — تبقى الأدقّ (تشمل fallback المدن للخزينة).
+  ٣. مطابقة البداية (prefix): النص يبدأ بالاسم أو العكس.
+  ٤. مطابقة الكلمات (subsequence): كل كلمات الاسم موجودة في النص.
+  ٥. مطابقة تقريبية (fuzzy) بـ rapidfuzz WRatio، عتبة 80، تتخطّى ما دون 3 أحرف.
+  ٦. فشل كلّ شيء → None (تسجيل الكلمة المجهولة يتمّ في طبقة الأنبوب حيث تتوفّر DB — §db.unknown_terms).
+
+🔴 أمان ماليّ (§0): المطابقة الفضفاضة (3-5) تُجرّب **فقط بعد فشل التامّة تمامًا**، وأيّ **التباس**
+   (أكثر من سجلّ مطابق) → None (لا تخمين) — كي لا تُدخَل الحوالة في خزينة خاطئة.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from core.logging_setup import get_logger
@@ -14,12 +24,103 @@ from .normalize import normalize_ar
 
 log = get_logger(__name__)
 
+try:
+    from rapidfuzz import fuzz
+except ImportError:  # المطابقة التقريبية اختيارية — المراحل 1-4 تعمل بدونها (T5: نسجّل، لا نبتلع)
+    fuzz = None
+    log.warning("rapidfuzz غير مثبّت — المطابقة التقريبية (fuzzy §5) معطّلة؛ المراحل 1-4 تعمل.")
+
+_FUZZY_THRESHOLD = 80        # عتبة التطابق التقريبي (§5)
+_MATCH_MIN_LEN = 3          # لا مطابقة بادئة/تقريبية على نصوص أقصر من 3 أحرف
+# «ال» التعريف في بداية كلمة (يتبعها حرفان على الأقلّ) — تُزال للمطابقة («العاصمه»→«عاصمه»)
+_AL_PREFIX = re.compile(r"^ال(?=..)")
+
+
+def normalize_arabic_for_matching(s: Optional[str]) -> str:
+    """تطبيع عربيّ للمطابقة التقريبية (§1): يبني على normalize_ar (تشكيل/همزات/ة→ه/ى→ي/مسافات)
+    ويزيل «ال» التعريف من بداية كل كلمة، ثم يوحّد المسافات."""
+    base = normalize_ar(s)
+    if not base:
+        return ""
+    words = [_AL_PREFIX.sub("", w) for w in base.split()]
+    return " ".join(w for w in words if w)
+
 
 def _candidates(name: str, aliases: list[str]) -> list[str]:
-    """كل الأشكال المطبَّعة للمطابقة: الاسم + الإملاءات البديلة."""
+    """كل الأشكال المطبَّعة (normalize_ar) للمطابقة التامّة: الاسم + الإملاءات البديلة."""
     cands = [normalize_ar(name)]
     cands.extend(normalize_ar(a) for a in aliases)
     return [c for c in cands if c]
+
+
+def _match_forms(rec: TreasuryRecord | SupplierRecord) -> list[str]:
+    """أشكال الاسم + aliases مطبَّعة لمطابقة (normalize_arabic_for_matching) — للمراحل 3-5."""
+    forms = [normalize_arabic_for_matching(rec.name)]
+    forms.extend(normalize_arabic_for_matching(a) for a in getattr(rec, "aliases", []))
+    return [f for f in forms if f]
+
+
+def _distinct(records: list) -> list:
+    """سجلّات مميّزة بالاسم — aliases متعدّدة لنفس السجلّ لا تُعدّ التباسًا."""
+    seen: set[str] = set()
+    out: list = []
+    for r in records:
+        if r.name not in seen:
+            seen.add(r.name)
+            out.append(r)
+    return out
+
+
+def _loose_match(token: Optional[str], records: list):
+    """المراحل 3-5 (بادئة → كلمات → تقريبيّ) على النص المطبَّع للمطابقة. تُرجع سجلًّا وحيدًا، أو
+    None عند غياب المطابقة **أو التباسها** (أكثر من سجلّ — §0 لا تخمين)."""
+    qn = normalize_arabic_for_matching(token)
+    if not qn:
+        return None
+    qtok = set(qn.split())
+
+    # (٣) البادئة: النص يبدأ بالاسم أو الاسم يبدأ بالنص (بحدّ أدنى للطول)
+    if len(qn) >= _MATCH_MIN_LEN:
+        def _prefix(cn: str) -> bool:
+            return len(cn) >= _MATCH_MIN_LEN and (qn.startswith(cn) or cn.startswith(qn))
+        hits = _distinct([r for r in records if any(_prefix(c) for c in _match_forms(r))])
+        if hits:
+            return hits[0] if len(hits) == 1 else _ambiguous(token, hits)
+
+    # (٤) الكلمات: كل كلمات الاسم موجودة في النص (subsequence)
+    def _subseq(cn: str) -> bool:
+        ctok = set(cn.split())
+        return bool(ctok) and ctok <= qtok
+    hits = _distinct([r for r in records if any(_subseq(c) for c in _match_forms(r))])
+    if hits:
+        return hits[0] if len(hits) == 1 else _ambiguous(token, hits)
+
+    # (٥) fuzzy (rapidfuzz WRatio) — تتخطّى النصوص < 3 أحرف والمُسجِّل المعطّل
+    if fuzz is None or len(qn) < _MATCH_MIN_LEN:
+        return None
+    scored = []
+    for r in records:
+        best = max(
+            (fuzz.WRatio(qn, c) for c in _match_forms(r) if len(c) >= _MATCH_MIN_LEN),
+            default=0.0,
+        )
+        if best >= _FUZZY_THRESHOLD:
+            scored.append(r)
+    hits = _distinct(scored)
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        return _ambiguous(token, hits)
+    return None
+
+
+def _ambiguous(token: Optional[str], hits: list):
+    """التباس مطابقة فضفاضة (§0): يُسجَّل تحذير ويُرجَع None (لا تخمين)."""
+    log.warning(
+        "مطابقة فضفاضة ملتبسة للنص %r: %s — لا تخمين (§0)، تُترك للمراجعة.",
+        token, [r.name for r in hits],
+    )
+    return None
 
 
 # مدن تونسية معروفة (مطبَّعة) — تُجرَّد من **نهاية** النص كـfallback فقط حين تفشل المطابقة
@@ -46,21 +147,18 @@ def _strip_trailing_cities(q: str) -> str:
 
 
 def resolve_treasury(token: Optional[str], treasuries: list[TreasuryRecord]) -> Optional[TreasuryRecord]:
-    """يحلّ الخزينة بمطابقة **تامّة فقط** (§0 — لا تخمين): السطر (بعد التطبيع) يساوي بالضبط
-    اسم خزينة أو أحد aliasها.
+    """يحلّ الخزينة (§4.5): مطابقة تامّة أولًا (الأدقّ)، ثم تقريبية (بادئة/كلمات/fuzzy §80) عند فشلها.
 
-    🔴 أُلغيت المطابقة الفضفاضة (كلمة-داخل-اسم / substring / subset) — كانت تُطابِق اسم
-    الزبون أو المدينة بخزينة خطأً فتُدخِل الحوالة في خزينة خاطئة (خطر مالي). التنويعات
-    والأخطاء الإملائية تُغطّى حصريًا عبر aliases دقيقة. التباس (تطابُق خزينتين مختلفتين) →
-    None + تحذير (تُترك لبوابة الثقة → تعليق/تصعيد، لا تخمين).
+    🔴 أمان ماليّ (§0): التقريبية تُجرّب **فقط بعد فشل التامّة تمامًا**، وأيّ التباس → None (لا تخمين)
+       كي لا تُدخَل الحوالة في خزينة خاطئة. التنويعات الشائعة تبقى مُغطّاة بـ aliases دقيقة أيضًا.
 
-    fallback المدن (الرسالة التونسية «وليد العاصمة»): إن فشلت المطابقة التامّة تمامًا،
-    تُجرَّد لاحقة المدينة المعروفة من نهاية النص وتُعاد المطابقة **تامّةً** على الباقي.
-    يُطبَّق فقط عند غياب أي تطابق (لا يمسّ التباسًا قائمًا) فيبقى «تونس العاصمة»→«تونس»→None.
+    fallback المدن (الرسالة التونسية «وليد العاصمة»): إن فشلت المطابقة التامّة تمامًا، تُجرَّد لاحقة
+    المدينة المعروفة من نهاية النص وتُعاد المطابقة **تامّةً** على الباقي — قبل اللجوء للتقريبية.
     """
     q = normalize_ar(token)
     if not q:
         return None
+    # (١-٢) مطابقة تامّة + fallback المدن (الأدقّ، السلوك القائم)
     matches = _find_exact(q, treasuries)
     if not matches:                          # فشل تامّ فقط → جرّب بعد تجريد لاحقة المدينة
         stripped = _strip_trailing_cities(q)
@@ -70,25 +168,24 @@ def resolve_treasury(token: Optional[str], treasuries: list[TreasuryRecord]) -> 
         return next(iter(matches.values()))
     if len(matches) > 1:
         log.warning(
-            "خزينة ملتبسة للنص %r: %s — لا تخمين (§0)، تُترك للمراجعة.",
+            "خزينة ملتبسة (مطابقة تامّة) للنص %r: %s — لا تخمين (§0)، تُترك للمراجعة.",
             token, list(matches.keys()),
         )
+    # 🔴 الخزائن: **مطابقة تامّة فقط** (لا fuzzy) — الفضفاضة تُدخِل الحوالة في خزينة خاطئة
+    #    (خطر ماليّ مُثبَت: «محمد»→«محمد حمامات»). التنويعات تُغطّى بـ aliases + التقاط المجهول
+    #    (§db.unknown_terms) وإسناده يدويًّا من اللوحة — لا تخمين تلقائيّ (§0).
     return None
 
 
 def resolve_supplier(token: Optional[str], suppliers: list[SupplierRecord]) -> Optional[SupplierRecord]:
-    """يحلّ اسمًا إلى مورد من القائمة البيضاء (§5.4) — مطابقة صارمة لتفادي الخلط بالزبائن."""
+    """يحلّ اسمًا إلى مورد من القائمة البيضاء (§5.4): مطابقة تامّة أولًا، ثم تقريبية (بادئة/كلمات/fuzzy)
+    عند فشلها — مع حارس التباس (§0) كي لا يُخلَط مورد بآخر."""
     q = normalize_ar(token)
     if not q:
         return None
-    qtok = set(q.split())
+    # (٢) مطابقة تامّة
     for s in suppliers:
-        for c in _candidates(s.name, s.aliases):
-            ctok = c.split()
-            if q == c:
-                return s
-            if len(ctok) == 1 and ctok[0] in qtok:   # اسم مورد كلمة واحدة يظهر كاملًا
-                return s
-            if len(ctok) > 1 and set(ctok) <= qtok:   # كل كلمات المورد موجودة
-                return s
-    return None
+        if any(q == c for c in _candidates(s.name, s.aliases)):
+            return s
+    # (٣-٥) مطابقة تقريبية
+    return _loose_match(token, suppliers)

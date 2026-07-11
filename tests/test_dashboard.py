@@ -336,3 +336,32 @@ async def test_rooms_endpoint_sorted_by_type(db):
             "central", "admin", "customer", "treasury", "unclassified",
         ]
         assert {"name", "jid", "type", "active"} <= set(rows[0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# الكلمات المجهولة (§4.5) — GET القائمة + POST الإسناد كـ alias
+# ─────────────────────────────────────────────────────────────────────────────
+async def test_unknown_terms_list_and_assign(db):
+    pytest.importorskip("fastapi")
+    await db.unknown_terms.record("فودافون تجريبي", "treasury")   # خزينة 74 (بلاس فون) مزروعة
+    async with await _client(db, "s3cret") as ac:
+        h = {"X-Internal-Token": "s3cret"}
+        r = await ac.get("/api/unknown-terms")
+        assert r.status_code == 200
+        assert any(x["term"] == "فودافون تجريبي" for x in r.json())
+        r = await ac.post("/api/unknown-terms/فودافون تجريبي/assign",
+                          json={"type": "treasury", "target_code": "74"}, headers=h)
+        assert r.status_code == 200 and "فودافون تجريبي" in r.json()["aliases"]
+    doc = await db.treasuries.col.find_one({"code": "74"})
+    assert "فودافون تجريبي" in doc["aliases"]                      # صار alias
+    assert not any(x["term"] == "فودافون تجريبي"                   # وحُذف من المجهولات
+                   for x in await db.unknown_terms.list_recent(20))
+
+
+async def test_assign_unknown_term_requires_token(db):
+    pytest.importorskip("fastapi")
+    await db.unknown_terms.record("خزينه ما", "treasury")
+    async with await _client(db, "s3cret") as ac:
+        r = await ac.post("/api/unknown-terms/خزينه ما/assign",
+                          json={"type": "treasury", "target_code": "74"})   # بلا رمز
+        assert r.status_code == 401

@@ -71,6 +71,12 @@ class EmployeeIn(BaseModel):
     active: bool = True
 
 
+class UnknownTermAssignIn(BaseModel):
+    """إسناد كلمة مجهولة كـ alias لخزينة/مورد محدَّد بالكود (§4.5 §5.4)."""
+    type: str = Field(..., pattern="^(treasury|supplier)$")
+    target_code: str = Field(..., min_length=1)
+
+
 class RoomClassifyIn(BaseModel):
     """تصنيف غرفة مكتشَفة. 🔴 لا يغيّر حدود الكتابة (المركزية/المسؤول من env فقط)."""
     type: RoomType
@@ -231,6 +237,31 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
             raise HTTPException(status_code=404, detail=f"مورد غير موجود: {name}")
         log.info("إيقاف مورد (بلا حذف): %s", name)
         return {"name": name, "active": False}
+
+    # ── الكلمات المجهولة (§4.5 §5.4) — خزائن/موردون تعذّر حلّهم → إسناد يدويّ كـ alias ─────
+    @router.get("/unknown-terms")
+    async def list_unknown_terms() -> list[dict]:
+        """آخر ٢٠ كلمة (خزينة/مورد) تعذّر حلّها — للمراجعة والإسناد اليدويّ (بلا تخمين §0)."""
+        return await db.unknown_terms.list_recent(20)
+
+    @router.post("/unknown-terms/{term}/assign", dependencies=[guard])
+    async def assign_unknown_term(term: str, body: UnknownTermAssignIn) -> dict:
+        """يُسنِد كلمة مجهولة كـ alias للخزينة/المورد ذي `target_code`، ثم يحذفها من المجهولات."""
+        repo = db.treasuries if body.type == "treasury" else db.suppliers
+        doc = await repo.col.find_one({"code": body.target_code})
+        if doc is None:
+            raise HTTPException(
+                status_code=404, detail=f"لا {body.type} بالكود {body.target_code}",
+            )
+        aliases = list(doc.get("aliases") or [])
+        if term not in aliases:
+            aliases.append(term)                     # يُطابَق لاحقًا عبر تطبيع resolve (§4.5)
+        await repo.col.update_one({"code": body.target_code}, {"$set": {"aliases": aliases}})
+        removed = await db.unknown_terms.remove(term, body.type)
+        log.info("إسناد كلمة مجهولة «%s» كـ alias لـ %s كود %s (حُذف من المجهولات=%d)",
+                 term, body.type, body.target_code, removed)
+        return {"term": term, "type": body.type, "target_code": body.target_code,
+                "name": doc.get("name"), "aliases": aliases}
 
     # ── إدارة الموظفين المعتمدين (§8.3 §13) — «تم» تُقبل من هؤلاء فقط ─────────
     @router.get("/employees")

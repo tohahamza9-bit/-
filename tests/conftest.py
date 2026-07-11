@@ -40,6 +40,7 @@ async def db():
             self.control = dbmod.ControlRepo(self.mdb, "bot_control", "_key")
             self.dead_letter = dbmod.DeadLetterRepo(self.mdb, "dead_letter", "_id")
             self.pending_replies = dbmod.PendingReplyRepo(self.mdb, "pending_replies", "message_key")
+            self.unknown_terms = dbmod.UnknownTermRepo(self.mdb, "unknown_terms", "term")
 
     d = _MockDatabase("mongodb://mock", "moneyado_test")
     await d.connect()

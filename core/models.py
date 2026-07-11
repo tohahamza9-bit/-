@@ -98,6 +98,7 @@ class ParsedLeg(BaseModel):
     explicit_operation: bool = False           # §5.1: كلمة «بيع»/«شراء» صريحة (تتجاوز الافتراضي)
     is_supplier_counterpart: bool = False      # §5.3: الطرف اسمه مورد (⇒ شراء) لا زبون
     is_si_format: bool = False                 # §3.3: حوالة SI معنونة مكتملة برسالة واحدة (لا تنتظر طرفًا ثانيًا)
+    unresolved_treasury: Optional[str] = None  # اسم خزينة SI معنون لم يُحلّ → يُلتقط مجهولًا (db.unknown_terms)
 
 
 class ParseResult(BaseModel):
@@ -216,6 +217,17 @@ class EmployeeRecord(BaseModel):
     whatsapp_number: str
     name: str
     active: bool = True
+
+
+class UnknownTerm(BaseModel):
+    """كلمة (خزينة/مورد) تعذّر حلّها — تُلتقط للمراجعة والإسناد اليدويّ من اللوحة (§4.5 §5.4).
+
+    بدل التخمين الفضفاض (خطر ماليّ §0)، يُجمَع الاسم غير المعروف مع سياقه وعدّاده وآخر ظهور،
+    فيُسنِده المشرف يدويًّا كـ alias للخزينة/المورد الصحيح (POST /api/unknown-terms/{term}/assign)."""
+    term: str                                    # النص المطبَّع للمطابقة (مفتاح مع context)
+    context: str                                 # 'treasury' | 'supplier'
+    count: int = 1                               # مرّات الظهور (يُزاد عند التكرار)
+    last_seen: Optional[datetime] = None
 
 
 class BotControl(BaseModel):

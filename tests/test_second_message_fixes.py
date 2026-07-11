@@ -461,3 +461,18 @@ async def test_fragment_ambiguous_multiple_pending_no_guess(db):
     cands = await svc.fragment_link_candidates(CENTRAL, NOW, frag)
     assert len(cands) == 2                                  # التباس: مرشّحان
     assert await svc._find_recent_waiting(CENTRAL, NOW, frag) is None   # لا تخمين
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# التقاط الخزينة المجهولة (§4.5): خزينة SI معنونة غير معروفة → db.unknown_terms
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_si_unknown_treasury_recorded_in_unknown_terms(db):
+    """خزينة SI معنونة لا تُحلّ → تُلتقط في db.unknown_terms (بلا تخمين، للإسناد اليدويّ)."""
+    pipe = _pipeline(db)
+    text = ("رقم العملية: SI9002\nرقم المستلم: 01000000000\n"
+            "اسم الزبون: زبون تجريبي كود 1500\nالقيمة: 1000 ج.م\nالسعر: 5.9\n"
+            "الخزينة: خزينه مجهوله تماما")
+    raw = RawMessage(message_key="u1", chat_jid=CENTRAL, sender_jid=EMP, text=text, received_at=NOW)
+    await pipe._ingest(raw, NOW)
+    rows = await db.unknown_terms.list_recent(20)
+    assert any(r["context"] == "treasury" and "مجهول" in r["term"] for r in rows)
