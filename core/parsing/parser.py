@@ -815,6 +815,21 @@ def parse_completion_fragment(
 # ═════════════════════════════════════════════════════════════════════════════
 # بناء الطرف (leg) — نوع العملية §5، السعر §3.6، الخزينة §4
 # ═════════════════════════════════════════════════════════════════════════════
+def _is_egyptian_phone(phone: Optional[str]) -> bool:
+    """هاتف مصريّ محلّي (11 خانة يبدأ 01) — يُستنبَط منه EGP افتراضيًّا عند غياب عملة صريحة (§3.4)."""
+    return bool(phone) and len(phone) == 11 and phone.startswith("01")
+
+
+def _first_bare_amount(text: str) -> Optional[float]:
+    """أوّل سطر رقميّ مجرّد يُقرأ مبلغًا («2051»→2051)، مع تجاوز مجاري الهاتف (§3.5). للسياق الذي
+    استُنبطت فيه العملة من الهاتف (بلا رمز عملة صريح)."""
+    for ln in (text or "").splitlines():
+        amt = _bare_amount(ln.strip())
+        if amt is not None:
+            return amt
+    return None
+
+
 def _build_leg(
     f: dict, full_text: str, treasuries: list[TreasuryRecord], suppliers: list[SupplierRecord],
     is_si: bool = False,
@@ -844,6 +859,11 @@ def _build_leg(
             code=trec.code, name=trec.name, type=trec.type,
             currency=trec.currency or currency,
         )
+
+    # 🔴 استنتاج EGP من الهاتف المصري (01… 11 خانة) عند غياب عملة صريحة (§3.4، قرار المستخدم):
+    #    حوالة بهاتف مصريّ بلا «ج.م» تُعامَل مصرية افتراضيًّا. (SI عملتها صريحة دائمًا فلا تتأثّر.)
+    if currency is None and not is_si and _is_egyptian_phone(f.get("phone")):
+        currency = Currency.EGP
 
     # نوع العملية (§5) — الأصل بيع؛ الكلمة الصريحة تحكم؛ ثم تمييز الطرف (§5.3)
     op, explicit = detect_explicit_operation(full_text)
@@ -895,6 +915,10 @@ def _build_leg(
     # 🔴 الطرفان (A) وAخصم من رسالتين: amount_after هنا None (يصلان لاحقًا) → تُحسب عمولتهما
     #    في _resolve_two_leg / _merge_discount. لذا هذا يخصّ SI المعنونة بقيمتين حصرًا.
     amount = f.get("amount")
+    # في سياق EGP المستنتجة من الهاتف المصري: يُقبَل رقم مجرّد مبلغًا («2051»→2051) — إذ المسار
+    # العاديّ يشترط رمز عملة، فالرقم بلا «ج.م» يسقط. fallback (بعد فشل الالتقاط العاديّ فقط، §3.4).
+    if amount is None and currency == Currency.EGP and not is_si:
+        amount = _first_bare_amount(full_text)
     amount_after = f.get("amount_after")
     commission = (
         round(amount_after - amount, 2)

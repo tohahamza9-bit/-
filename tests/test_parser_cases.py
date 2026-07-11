@@ -302,3 +302,33 @@ async def test_second_message_name_code_price_plus_supplier_two_pairs(db):
     sp = await db.suppliers.all_active()
     pairs = extract_code_name_price_lines("احمد بوزويص 876 5.88\nالبراق", sp)
     assert pairs == [("876", "احمد بوزويص", "5.88"), ("1280", "البراق", None)]
+
+
+# ── استنتاج EGP من الهاتف المصري (01…) + الرقم المجرّد مبلغًا (§3.4) ───────────
+def test_is_egyptian_phone():
+    from core.parsing.parser import _is_egyptian_phone
+    assert _is_egyptian_phone("01000204661") is True
+    assert _is_egyptian_phone("0925135252") is False    # 10 خانات
+    assert _is_egyptian_phone("92512345") is False       # تونسي 8
+    assert _is_egyptian_phone(None) is False
+
+
+async def test_egyptian_phone_infers_egp_and_bare_amount(db):
+    """هاتف مصري (01…) بلا «ج.م» → EGP افتراضيًّا + رقم مجرّد يُقبَل مبلغًا («2051»→2051)."""
+    res = parse_message("A8859\n01000204661\n2051\nفودافون", await _treas(db), [])
+    assert res.kind == "transfer"
+    assert res.leg.amount == 2051
+    assert res.leg.currency == Currency.EGP
+    assert res.leg.phone == "01000204661"
+
+
+async def test_egyptian_phone_keeps_explicit_currency_and_amount(db):
+    """عملة صريحة «ج م» لا يُلغيها الاستنتاج؛ المبلغ من رمز العملة لا الرقم المجرّد."""
+    res = parse_message("A200\n01012345678\n3950 ج م\nصافي", await _treas(db), [])
+    assert res.leg.amount == 3950 and res.leg.currency == Currency.EGP
+
+
+async def test_non_egyptian_phone_no_egp_inference(db):
+    """هاتف غير مصري لا يُستنتَج منه EGP، فالرقم المجرّد لا يُلتقَط (بلا عملة)."""
+    res = parse_message("A100\n0925135252\n2000\nصافي", await _treas(db), [])
+    assert res.leg.currency is None and res.leg.amount is None
