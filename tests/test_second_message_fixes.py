@@ -16,7 +16,7 @@ from core.parsing import parse_message
 from core.pipeline import Pipeline
 from core.queue.service import QueueService, is_completion_fragment
 
-from core.models import RawMessage, WriteResult
+from core.models import ParsedLeg, RawMessage, WriteResult
 
 NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=timezone.utc)
 CENTRAL = "central@g.us"
@@ -99,6 +99,49 @@ async def test_strong_transfer_is_not_fragment(db):
 async def test_chatter_is_not_fragment(db):
     frag = parse_message("صباح الخير يا شباب", await _treas(db), []).leg
     assert is_completion_fragment(frag) is False
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A8304: رسالة ثانية «/» فيها ref + هاتف + مبلغ أقل + خزينة → تُدمَج كخصم لا صفقة جديدة
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_a8304_slash_second_merges_discount(db):
+    svc = QueueService(db)
+    first = parse_message("A8304\n01095231350\n5.560 مصري\n603 بن ناصر 5.77",
+                          await _treas(db), []).leg
+    first.source_message_key = "m1"
+    d1 = await svc.try_group(first, NOW, chat_jid=CENTRAL)
+    assert d1.status == Status.WAITING_SECOND_LEG
+
+    txt2 = "A8304 / 01095231350 / 5.549 مصري / بلس"      # ref+هاتف+مبلغ أقل+خزينة، بلا زبون
+    leg2 = parse_message(txt2, await _treas(db), []).leg
+    d2 = await svc.try_absorb_treasury_second(leg2, _raw("m2", txt2, NOW + timedelta(seconds=20)),
+                                              NOW + timedelta(seconds=20))
+    assert d2 is not None and d2.deal_id == d1.deal_id            # صفقة واحدة (لا جديدة)
+    assert d2.sell_leg.amount == 5560 and d2.sell_leg.amount_after_discount == 5549
+    assert d2.sell_leg.commission == -11                          # الخصم مطبَّق
+    assert d2.sell_leg.treasury is not None and d2.sell_leg.treasury.code == "74"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# رد خزينة بلا ref يُربَط بالمعلّقة **المطابِقة للعملة** عند تعدّد المعلّقات (§4.1)
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_bare_treasury_links_by_currency(db):
+    from core.constants import Currency
+    from core.models import Deal
+    from core.parsing.parser import parse_completion_fragment
+    svc = QueueService(db)
+    tnd = ParsedLeg(operation=OperationType.SELL, reference_number="A8305", amount=2000.0,
+                    currency=Currency.TND, customer_code="526", phone="02000000000")
+    egp = ParsedLeg(operation=OperationType.SELL, reference_number="A8304", amount=5000.0,
+                    currency=Currency.EGP, customer_code="603", phone="01000000000")
+    await db.deals.upsert(Deal(deal_id="dT", status=Status.WAITING_SECOND_LEG,
+        created_at=NOW - timedelta(seconds=30), updated_at=NOW, chat_jid=CENTRAL, sell_leg=tnd))
+    await db.deals.upsert(Deal(deal_id="dE", status=Status.WAITING_SECOND_LEG,   # أحدث (مصرية)
+        created_at=NOW - timedelta(seconds=10), updated_at=NOW, chat_jid=CENTRAL, sell_leg=egp))
+
+    frag = parse_completion_fragment("وليد", await _treas(db), [])   # خزينة تونسية (51, TND)
+    d = await svc.absorb_fragment(frag, CENTRAL, "wmk", NOW)
+    assert d is not None and d.deal_id == "dT"                       # التونسية، لا الأحدث المصرية
 
 
 # ═════════════════════════════════════════════════════════════════════════════

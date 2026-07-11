@@ -427,7 +427,7 @@ class QueueService:
                 (PENDING_REPLY_MAX_SECONDS) ريثما تصل الأولى.
         """
         frag.source_message_key = message_key
-        deal = await self._find_recent_waiting(chat_jid, now)
+        deal = await self._find_recent_waiting(chat_jid, now, frag)
         if deal is not None:
             self._apply_fragment(deal, frag)
             deal.status = Status.PARSED
@@ -446,14 +446,38 @@ class QueueService:
                  message_key, PENDING_REPLY_MAX_SECONDS)
         return None
 
-    async def _find_recent_waiting(self, chat_jid: str | None, now: datetime) -> Deal | None:
-        """أحدث صفقة معلّقة تنتظر خزينتها في نفس الغرفة خلال نافذة الربط (§7.3)."""
+    @staticmethod
+    def _leg_currency(leg: ParsedLeg | None) -> Currency | None:
+        """عملة الطرف: الصريحة إن وُجدت، وإلّا عملة خزينته (§4.1)."""
+        if leg is None:
+            return None
+        if leg.currency is not None:
+            return leg.currency
+        return leg.treasury.currency if leg.treasury is not None else None
+
+    @classmethod
+    def _currency_compatible(cls, deal: Deal, frag_cur: Currency | None) -> bool:
+        """توافق عملة الرد مع الصفقة: رد بلا عملة → بلا تقييد؛ وإلّا يجب تطابق العملتين (§4.1)."""
+        if frag_cur is None:
+            return True
+        deal_cur = cls._leg_currency(deal.sell_leg or deal.buy_leg)
+        return deal_cur is None or deal_cur == frag_cur
+
+    async def _find_recent_waiting(
+        self, chat_jid: str | None, now: datetime, frag: ParsedLeg | None = None,
+    ) -> Deal | None:
+        """أحدث صفقة معلّقة تنتظر خزينتها في نفس الغرفة خلال نافذة الربط (§7.3).
+
+        🔴 شرط العملة (§4.1): عند وجود عملة للرد (خزينة تونسية/مصرية) تُطابَق عملة المعلّقة — فرد
+        خزينة تونسية («وليد» TND) لا يُربَط بحوالة مصرية معلّقة، بل بالتونسية (منع خلط عند تعدّدها)."""
         if not chat_jid:
             return None
+        frag_cur = self._leg_currency(frag)
         horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
         candidates = [
             d for d in await self.db.deals.waiting_in_room(chat_jid)
             if self._needs_completion(d) and _as_naive_utc(d.created_at) >= horizon
+            and self._currency_compatible(d, frag_cur)
         ]
         if not candidates:
             return None
