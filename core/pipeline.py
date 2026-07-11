@@ -328,17 +328,20 @@ class Pipeline:
     # (5·أ) حجْر الإقلاع: صفقات معلّقة قديمة لا تُعالَج تلقائيًّا بعد إعادة التشغيل
     # ═════════════════════════════════════════════════════════════════════════
     async def expire_stale_on_startup(self, now: datetime) -> list[Deal]:
-        """عند بدء تشغيل النواة: صفقة معلّقة (WAITING_SECOND_LEG أو PARSED) —
+        """عند بدء تشغيل النواة: صفقة معلّقة (WAITING_SECOND_LEG / PARSED / MATCHING / HELD) —
         - عمرها (من created_at) **≤ 15 دقيقة** (INCOMPLETE_DATA_ESCALATE_SECONDS) → **تبقى كما هي**
           فيلتقطها العامل (tick/sweep_waiting) ويُعالَجها طبيعيًّا (استرجاع رسائل وقت العطل §12).
         - عمرها **> 15 دقيقة** → **تُحجَر** (ESCALATED) بلا معالجة ولا كتابة، مع تنبيه المسؤول (§7.3).
 
         السبب: بعد إطفاء قصير (≤15د) النافذة ما زالت مفتوحة فنُكمل المعالجة لا نُهدرها؛ أمّا الأقدم
         فمعالجتها تلقائيًّا تُدخِل حوالة قديمة/مكرّرة → القاعدة الذهبية (§0): عند الشكّ نصعّد للإنسان.
-        تُستدعى مرّة عند الإقلاع قبل تشغيل العامل، فلا يلتقطها sweep_waiting/tick قبل الفرز."""
+        🔴 تشمل MATCHING/HELD أيضًا: tick يُعيد معالجتها (process_deal/escalation_tick)، فبلا حجْرها
+        تُعالَج صفقة عمرها ساعات عند الإقلاع. تُستدعى مرّة قبل تشغيل العامل فلا يلتقطها tick قبل الفرز."""
         cutoff = _as_naive_utc(now) - timedelta(seconds=INCOMPLETE_DATA_ESCALATE_SECONDS)
         quarantined: list[Deal] = []
-        for deal in await self.db.deals.by_status(Status.WAITING_SECOND_LEG, Status.PARSED):
+        for deal in await self.db.deals.by_status(
+            Status.WAITING_SECOND_LEG, Status.PARSED, Status.MATCHING, Status.HELD
+        ):
             if _as_naive_utc(deal.created_at) >= cutoff:
                 continue                      # ≤15د → تبقى، يُعيد العامل معالجتها (§12)
             deal.status = Status.ESCALATED

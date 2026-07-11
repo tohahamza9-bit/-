@@ -297,7 +297,7 @@ async def test_golden_path_simple_egp_sell(db):
 
 
 async def test_expire_stale_pending_on_startup(db):
-    """حجْر الإقلاع: WAITING/PARSED عمرها >15د → ESCALATED + تنبيه؛ ما ≤15د يبقى ليُعاد معالجته."""
+    """حجْر الإقلاع: WAITING/PARSED/MATCHING/HELD عمرها >15د → ESCALATED + تنبيه؛ ما ≤15د يبقى."""
     pipe = _make_pipeline(db)
     now = PAST + timedelta(seconds=2000)
     old = now - timedelta(minutes=16)          # > 15د → تُحجَر
@@ -312,6 +312,10 @@ async def test_expire_stale_pending_on_startup(db):
              chat_jid=CENTRAL, sell_leg=_leg("A1")),
         Deal(deal_id="p1", status=Status.PARSED, created_at=old, updated_at=old,
              chat_jid=CENTRAL, sell_leg=_leg("A2")),
+        Deal(deal_id="m1", status=Status.MATCHING, created_at=old, updated_at=old,
+             chat_jid=CENTRAL, sell_leg=_leg("A4")),   # 🔴 قديمة قيد المطابقة → تُحجَر أيضًا
+        Deal(deal_id="h1", status=Status.HELD, created_at=old, updated_at=old,
+             chat_jid=CENTRAL, sell_leg=_leg("A5")),   # 🔴 قديمة معلّقة → تُحجَر أيضًا
         Deal(deal_id="p2", status=Status.PARSED, created_at=fresh, updated_at=fresh,
              chat_jid=CENTRAL, sell_leg=_leg("A3")),   # حديثة
     ]
@@ -319,14 +323,14 @@ async def test_expire_stale_pending_on_startup(db):
         await db.deals.upsert(d)
 
     quarantined = await pipe.expire_stale_on_startup(now)
-    assert {d.deal_id for d in quarantined} == {"w1", "p1"}
-    assert (await db.deals.get("w1")).status == Status.ESCALATED
-    assert (await db.deals.get("p1")).status == Status.ESCALATED
+    assert {d.deal_id for d in quarantined} == {"w1", "p1", "m1", "h1"}
+    for did in ("w1", "p1", "m1", "h1"):
+        assert (await db.deals.get(did)).status == Status.ESCALATED
     assert (await db.deals.get("p2")).status == Status.PARSED       # الحديثة لم تُحجَر
     # تنبيه واحد للمسؤول لكل صفقة محجورة (لا كتابة في MONEYADO)
     outs = await db.outgoing.next_unsent(50)
     admin_notifs = [o for o in outs if o["chat_jid"] == ADMIN]
-    assert len(admin_notifs) == 2
+    assert len(admin_notifs) == 4
 
 
 async def test_two_message_supplier_second_merges_not_new_deal(db):
