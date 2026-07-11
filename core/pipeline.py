@@ -20,6 +20,7 @@ from typing import Optional
 
 from .bus import Bus
 from .constants import (
+    BATCH_PAIR_SECONDS,
     INCOMPLETE_DATA_ESCALATE_SECONDS,
     Currency,
     Mark,
@@ -136,11 +137,14 @@ class Pipeline:
             #    (حفظ ترتيب الغرفة). الغرف الأخرى مستقلّة فتُكمَّل بلا تأثّر (الرسائل مرتّبة حتميًّا §db).
             #    ردود التحكّم/الإكمال (إجراءات فورية على صفقات قائمة، لا حوالات جديدة) تُستثنى من الحجب.
             blocked_rooms: set[str] = set()
-            for raw in await self.db.raw.unprocessed():
+            batch = await self.db.raw.unprocessed()
+            for raw in batch:
                 # رسائل التحكّم (Reply: إلغاء/تعديل/تصحيح/تم) إجراءات مكتملة متعمّدة — تُعالَج فورًا،
                 # ولا تُعامَل كـ«حرف» placeholder ينتظر تعديلًا (§7.2 يخصّ حوالات جديدة قصيرة).
                 is_control_reply = bool(raw.reply_to_key) and detect_control(raw.text) is not None
-                stable = is_control_reply or is_stable(raw, now)
+                # §7.3-أ زوج متلاحق: رسالة يتلوها في نفس الغرفة رسالة خلال 3ث (نفس الدفعة) استقرّت
+                # فورًا (لا تعديل قادم) → تُعالَج هذه الدورة فيُربَط الزوج بلا انتظار الاستقرار/النبضة.
+                stable = is_control_reply or is_stable(raw, now) or self._has_rapid_followup(raw, batch)
                 # رد خزينة/مورد مكمّل («بلس»/«صافي» §7.3): ليس «حرفًا» ينتظر تعديلًا — يُربَط بحوالته
                 # المعلّقة فورًا. يُحسَب (بوصول DB) مرّة فقط حين تكون غير مستقرّة وليست تحكّمًا.
                 completion = (not stable) and await self._is_completion_reply(raw)
@@ -166,6 +170,19 @@ class Pipeline:
                 finally:
                     await self.db.raw.mark_processed(raw.message_key)
             return ready
+
+    @staticmethod
+    def _has_rapid_followup(raw: RawMessage, batch: list[RawMessage]) -> bool:
+        """§7.3-أ: هل يتلو `raw` في **نفس الغرفة** رسالةٌ خلال BATCH_PAIR_SECONDS (<3ث) ضمن نفس
+        الدفعة؟ لو نعم فقد استقرّت (لا تعديل قادم — المُرسِل انتقل للرسالة التالية)، فتُعالَج فورًا
+        كي يُربَط الزوج (الأولى+الثانية) في نفس دورة process_inbox بلا انتظار الاستقرار/النبضة."""
+        t0 = _as_naive_utc(raw.received_at)
+        for other in batch:
+            if other.message_key != raw.message_key and other.chat_jid == raw.chat_jid:
+                dt = (_as_naive_utc(other.received_at) - t0).total_seconds()
+                if 0 < dt < BATCH_PAIR_SECONDS:
+                    return True
+        return False
 
     async def _is_completion_reply(self, raw: RawMessage) -> bool:
         """هل الرسالة رد خزينة/مورد مكمّل (§7.3)؟ يُعالَج فورًا بلا انتظار استقرار «الحرف»."""
@@ -353,12 +370,11 @@ class Pipeline:
             )
             log.info("تنبيه خفيف: حوالة A ناقصة %s تجاوزت 90s بلا رسالة ثانية", self._ref(deal))
         for deal in to_escalate:
-            await self.bus.notify_admin(
-                f"🚨 حوالة A ({self._ref(deal)}) لم تكتمل خلال 15 دقيقة — لم تصل الرسالة "
-                f"الثانية (كود الزبون + الاسم + السعر + الخزينة). مراجعة يدوية.",
-                self._deal_key(deal),
-            )
-            log.warning("تصعيد: حوالة A ناقصة %s تجاوزت 15 دقيقة بلا رسالة ثانية", self._ref(deal))
+            # حوالة A ناقصة 15د بلا رسالة ثانية (قرار المستخدم): ❌ على المركزية فقط — بلا تصعيد
+            # للمسؤول. الصفقة صارت ESCALATED (نهائية) في sweep_incomplete_a فلا تُعاد معالجتها.
+            await self.matcher.apply_mark(deal, Mark.INCOMPLETE)
+            log.warning("حوالة A ناقصة %s تجاوزت 15 دقيقة بلا رسالة ثانية → ❌ على المركزية",
+                        self._ref(deal))
 
         # صفقات تجاوزت 90s بلا طرف ثانٍ → تُنهى كطرف واحد (لا تصعيد) وتمشي مع PARSED أدناه (§7.3)
         for deal in await self.queue.sweep_waiting(now):

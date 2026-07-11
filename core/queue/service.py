@@ -626,14 +626,14 @@ class QueueService:
             elapsed = (_as_naive_utc(now) - _as_naive_utc(deal.created_at)).total_seconds()
             if elapsed >= INCOMPLETE_DATA_ESCALATE_SECONDS:
                 deal.status = Status.ESCALATED
-                deal.mark = Mark.WARN
+                deal.mark = Mark.INCOMPLETE            # ❌ على المركزية (بلا تصعيد للمسؤول)
                 deal.waiting_deadline = None
                 deal.hold_reason = "حوالة A ناقصة — لم تصل الرسالة الثانية خلال 15 دقيقة"
                 deal.updated_at = now
                 await self.db.deals.upsert(deal)
                 to_escalate.append(deal)
                 log.warning(
-                    "صفقة %s: حوالة A ناقصة تجاوزت 15 دقيقة بلا رسالة ثانية → تصعيد للمسؤول",
+                    "صفقة %s: حوالة A ناقصة تجاوزت 15 دقيقة بلا رسالة ثانية → ❌ على المركزية",
                     deal.deal_id,
                 )
             elif elapsed >= SECOND_LEG_MAX_SECONDS and not deal.incomplete_warned:

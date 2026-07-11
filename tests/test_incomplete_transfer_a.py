@@ -208,22 +208,25 @@ async def test_pipeline_warns_central_at_ninety_seconds(db):
     assert all(o["chat_jid"] in {CENTRAL, ADMIN} for o in outs)
 
 
-async def test_pipeline_escalates_admin_at_fifteen_minutes(db):
+async def test_pipeline_marks_incomplete_at_fifteen_minutes(db):
+    """15 دقيقة بلا رسالة ثانية → ❌ على المركزية، بلا تصعيد للمسؤول (قرار المستخدم)."""
+    from core.constants import Mark
     pipe = _pipeline(db, rooms=False)
     await pipe.capture(_raw("hdr", HEADER_ONLY, NOW))
     await pipe.process_inbox(NOW)
 
-    await pipe.tick(NOW + timedelta(seconds=91))        # تنبيه أولًا
-    await pipe.tick(NOW + timedelta(minutes=15, seconds=1))  # ثم تصعيد
+    await pipe.tick(NOW + timedelta(seconds=91))        # ⚠️ تنبيه أولًا (يبقى)
+    await pipe.tick(NOW + timedelta(minutes=15, seconds=1))  # ثم ❌
 
     d = await db.deals.find_by_source_key("hdr")
     assert d.status == Status.ESCALATED
 
     outs = await db.outgoing.next_unsent(100)
-    admin_alerts = [o for o in outs
-                    if o["chat_jid"] == ADMIN and "15 دقيقة" in (o.get("text") or "")]
-    assert admin_alerts, "لم يصل تصعيد لغرفة المسؤول"
-    assert all(o["chat_jid"] in {CENTRAL, ADMIN} for o in outs)
+    # ❌ تفاعل على رسالة المركزية «hdr»
+    assert any(o.get("reaction") == Mark.INCOMPLETE.value and o["reply_to_key"] == "hdr"
+               for o in outs)
+    # بلا تصعيد لغرفة المسؤول عن الـ15 دقيقة
+    assert not [o for o in outs if o["chat_jid"] == ADMIN and "15 دقيقة" in (o.get("text") or "")]
 
 
 async def test_pipeline_no_warn_when_completed_in_time(db):
@@ -248,12 +251,12 @@ async def test_room_ordering_blocks_when_head_unstable(db):
     تُسجَّل قبل سابقتها؛ وغرفة أخرى تُكمَّل بلا تأثّر؛ وبعد استقرار الرأس تُصرَّف بالترتيب."""
     pipe = _pipeline(db, rooms=False)
     OTHER = "other@g.us"
-    # نفس الغرفة (CENTRAL): «حرف» غير مستقرّة (رأس، تنتظر حتى 90s) ثم حوالة كاملة بعدها بثانية
+    # نفس الغرفة (CENTRAL): «حرف» غير مستقرّة (رأس) ثم حوالة كاملة بعدها بـ5ث (>3ث فلا rapid-followup)
     await pipe.capture(_raw("harf", "حرف", NOW))
-    await pipe.capture(_raw("full", HEADER_ONLY, NOW + timedelta(seconds=1)))
+    await pipe.capture(_raw("full", HEADER_ONLY, NOW + timedelta(seconds=5)))
     # غرفة أخرى: رسالة مستقرّة — يجب أن تُعالَج (تُعلَّم) رغم حجب CENTRAL (الاستثناء: غرفة مختلفة)
     await pipe.capture(RawMessage(message_key="other", chat_jid=OTHER, sender_jid=EMP,
-                                  text=HEADER_ONLY, received_at=NOW + timedelta(seconds=1)))
+                                  text=HEADER_ONLY, received_at=NOW + timedelta(seconds=5)))
 
     await pipe.process_inbox(NOW + timedelta(seconds=30))   # «حرف» لم تستقرّ بعد (تحتاج 90s)
 
@@ -269,6 +272,31 @@ async def test_room_ordering_blocks_when_head_unstable(db):
     assert (await db.raw.get("harf")).processed is True
     assert (await db.raw.get("full")).processed is True
     assert await db.deals.find_by_source_key("full") is not None   # سُجّلت الآن بعد سابقتها
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# الزوج المتلاحق (§7.3-أ): رسالتان بفرق <3ث في نفس الدفعة → ربط فوريّ في نفس الدورة
+# ═════════════════════════════════════════════════════════════════════════════
+def test_has_rapid_followup_window():
+    r0 = _raw("a", "حرف", NOW)
+    near = _raw("b", HEADER_ONLY, NOW + timedelta(seconds=2))       # <3ث نفس الغرفة
+    far = _raw("c", HEADER_ONLY, NOW + timedelta(seconds=5))        # ≥3ث
+    other = RawMessage(message_key="d", chat_jid="x@g.us", sender_jid=EMP,
+                       text=HEADER_ONLY, received_at=NOW + timedelta(seconds=2))  # غرفة أخرى
+    assert Pipeline._has_rapid_followup(r0, [r0, near]) is True
+    assert Pipeline._has_rapid_followup(r0, [r0, far]) is False
+    assert Pipeline._has_rapid_followup(r0, [r0, other]) is False
+
+
+async def test_rapid_pair_linked_in_same_cycle(db):
+    """رسالة أولى + ثانية بفرق <3ث → تُربَطان وتُسجَّلان في **نفس** دورة process_inbox (بلا sweep)."""
+    pipe = _pipeline(db, rooms=False)
+    await pipe.capture(_raw("hdr", HEADER_ONLY, NOW))
+    await pipe.capture(_raw("sec", SECOND_MESSAGE, NOW + timedelta(seconds=2)))
+    await pipe.process_inbox(NOW + timedelta(seconds=2))            # دورة واحدة، بلا انتظار sweep
+    d = await db.deals.find_by_source_key("hdr")
+    assert d is not None and d.status != Status.WAITING_SECOND_LEG  # اكتملت في نفس الدورة
+    assert (await db.raw.get("hdr")).processed and (await db.raw.get("sec")).processed
 
 
 # ═════════════════════════════════════════════════════════════════════════════
