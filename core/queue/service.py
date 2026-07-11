@@ -251,9 +251,13 @@ class QueueService:
         (كود+اسم+سعر+مبلغ بعد الخصم §6): تُدمَج كطرف مورد في تلك الصفقة — لا صفقة جديدة (§6).
 
         🔴 المشكلة: الرسالة الثانية تبدأ بنفس الرقم الإشاري فتُقرأ كحوالة جديدة. الحلّ: إن طابق
-        رقمها الإشاري صفقةً لها طرف بيع بكود زبون (الرسالة الأولى) وبلا طرف شراء في نفس الغرفة →
-        تُستخرج بيانات المورد بـ **pattern-fishing** (متينة للترتيب المختلف)، ومبلغها الأصغر =
-        بعد الخصم. يُرجع الصفقة المكتملة أو None (فتتبع الرسالة المسار العادي try_group)."""
+        رقمها الإشاري صفقةَ بيعٍ معلّقةً بلا طرف شراء في نفس الغرفة → تُستخرج بيانات المورد بـ
+        **pattern-fishing** (متينة للترتيب المختلف: المورد آخر السطر «طه 5.93»)، ومبلغها الأصغر =
+        بعد الخصم. يُرجع الصفقة المكتملة أو None (فتتبع الرسالة المسار العادي try_group).
+
+        🔴 حالة الأولى **بلا كود زبون** (مستلم فقط مثل «نجوى» §7.3): تُمتَص أيضًا لكن **فقط** إن
+        حمل الطرفُ الثاني موردًا **مُدرَجًا** بالقائمة البيضاء (frag.supplier) — لا مجرّد كود — كي
+        لا يُخلَط كودُ إكمالِ الزبون بمورد. مع كود زبون قائم يكفي كود رقمي أو مورد (السلوك القائم)."""
         if not raw.chat_jid or not leg.reference_number:
             return None
         ref = _norm_ref(leg.reference_number)
@@ -261,7 +265,7 @@ class QueueService:
         target: Deal | None = None
         for deal in await self.db.deals.waiting_in_room(raw.chat_jid):
             sell = deal.sell_leg
-            if (sell is not None and deal.buy_leg is None and sell.customer_code
+            if (sell is not None and deal.buy_leg is None
                     and sell.supplier is None
                     and _norm_ref(sell.reference_number) == ref and ref
                     and _as_naive_utc(deal.created_at) >= horizon):
@@ -269,11 +273,17 @@ class QueueService:
                 break
         if target is None:
             return None
-        # المورد بـ pattern-fishing (يعالج الترتيب المختلف للرسالة الثانية: الكود آخرًا…)
+        # المورد بـ pattern-fishing (يعالج الترتيب المختلف للرسالة الثانية: الكود/المورد آخر السطر…)
         frag = parse_completion_fragment(raw.text, treasuries, suppliers)
         # هوية المورد = كود رقمي في الرسالة («760 طه») **أو** اسم مُدرَج بالقائمة البيضاء بلا كود
-        # («طه» وحده → يُحلّ كودُه من القائمة). غياب الاثنين → ليست طرف مورد (تتبع المسار العادي).
-        if not frag.customer_code and frag.supplier is None:
+        # («طه» وحده → يُحلّ كودُه من القائمة).
+        # 🔴 لو صفقة الوجهة **بلا كود زبون** (رسالة أولى بمستلم فقط مثل «نجوى») نشترط مورداً
+        #    **مُدرَجًا** (frag.supplier) صراحةً — كي لا يُخلَط كودُ إكمالِ زبونٍ بمورد (§6). أمّا مع
+        #    كود زبون قائم فيكفي كود رقمي أو مورد مُدرَج (السلوك القائم). بلا الاثنين → مسار عادي.
+        if target.sell_leg.customer_code:
+            if not frag.customer_code and frag.supplier is None:
+                return None
+        elif frag.supplier is None:
             return None
         return await self._absorb_supplier_leg(target, frag, raw.message_key, treasuries, now)
 

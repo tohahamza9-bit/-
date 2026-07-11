@@ -139,6 +139,14 @@ class Pipeline:
             blocked_rooms: set[str] = set()
             batch = await self.db.raw.unprocessed()
             for raw in batch:
+                # 🔴 استرجاع بعد الإطفاء (§12): رسالة عمرها > 15 دقيقة (INCOMPLETE_DATA_ESCALATE_SECONDS)
+                #    — قديمة من قبل التوقّف → تُعلَّم معالَجة **بلا معالجة ولا ردود**، فلا يردّ البوت
+                #    على رسائل قديمة عند إعادة التشغيل. متماثل مع حجْر الصفقات القديمة (expire_stale).
+                age = (_as_naive_utc(now) - _as_naive_utc(raw.received_at)).total_seconds()
+                if age > INCOMPLETE_DATA_ESCALATE_SECONDS:
+                    log.info("تخطٍّ نهائيّ (رسالة أقدم من 15د — استرجاع §12): %s", raw.message_key)
+                    await self.db.raw.mark_processed(raw.message_key)
+                    continue
                 # رسائل التحكّم (Reply: إلغاء/تعديل/تصحيح/تم) إجراءات مكتملة متعمّدة — تُعالَج فورًا،
                 # ولا تُعامَل كـ«حرف» placeholder ينتظر تعديلًا (§7.2 يخصّ حوالات جديدة قصيرة).
                 is_control_reply = bool(raw.reply_to_key) and detect_control(raw.text) is not None

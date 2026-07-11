@@ -299,6 +299,16 @@ async def test_rapid_pair_linked_in_same_cycle(db):
     assert (await db.raw.get("hdr")).processed and (await db.raw.get("sec")).processed
 
 
+async def test_old_message_marked_processed_without_processing(db):
+    """رسالة أقدم من 15د (من قبل التوقّف §12) → تُعلَّم معالَجة بلا معالجة ولا صفقة — لا ردّ متأخّر."""
+    pipe = _pipeline(db, rooms=False)
+    await pipe.capture(_raw("old", HEADER_ONLY, NOW - timedelta(minutes=16)))
+    await pipe.process_inbox(NOW)
+    assert (await db.raw.get("old")).processed is True             # عُلِّمت معالَجة
+    assert await db.deals.find_by_source_key("old") is None        # بلا صفقة (لم تُعالَج)
+    assert not await db.outgoing.next_unsent(10)                   # بلا ردود
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # انحدار الإنتاج (A11–A16): خزينة محلولة في الرسالة الأولى + هوية غائبة
 # كان يذهب فورًا إلى trust_gate → «كود ناقص»؛ الإصلاح: ينتظر الرسالة الثانية.

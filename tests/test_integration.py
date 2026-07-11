@@ -470,6 +470,63 @@ async def test_supplier_second_pattern_fishing_code_last(db):
     assert sell.amount_after_discount == 1000 and sell.supplier_price_raw == "5.90"
 
 
+async def test_supplier_second_completes_deal_without_customer_code(db):
+    """صيغة جديدة: الأولى بمستلم بلا كود («نجوى») + الثانية بنفس الرقم + مبلغ خصم + مورد بالاسم
+    في آخر سطر («طه 5.93») → تُمتَص كطرف مورد (بعد الخصم + supplier 760 + خزينة 85) رغم غياب
+    كود الزبون — لأن الطرف الثاني مورد **مُدرَج** صراحةً (§6)."""
+    from core.parsing import parse_message
+    from core.queue.service import QueueService
+    treas = await db.treasuries.all_active()
+    await db.suppliers.upsert(SupplierRecordFactory("طه", "760"))
+    suppliers = await db.suppliers.all_active()
+    svc = QueueService(db)
+    now = PAST + timedelta(seconds=1000)
+
+    leg1 = parse_message("A8752\n+20 122 1225261\nنجوى\n3000 مصري\nفودافون", treas, suppliers).leg
+    assert leg1.customer_code is None and leg1.recipient_name == "نجوى"   # مستلم لا زبون مُرمَّز
+    leg1.source_message_key = "m1"
+    deal1 = await svc.try_group(leg1, now, chat_jid=CENTRAL)
+    assert deal1.status == Status.WAITING_SECOND_LEG
+
+    msg2 = "A8752 / 2.970 مصري / طه 5.93"
+    leg2 = parse_message(msg2, treas, suppliers).leg
+    leg2.source_message_key = "m2"
+    merged = await svc.try_absorb_supplier_second(leg2, _raw("m2", msg2), now, treas, suppliers)
+    assert merged is not None and merged.deal_id == deal1.deal_id
+
+    sell = merged.sell_leg
+    assert sell.amount == 3000 and sell.amount_after_discount == 2970    # الأصغر = بعد الخصم
+    assert sell.supplier is not None and (sell.supplier.code, sell.supplier.name) == ("760", "طه")
+    assert sell.supplier_price_raw == "5.93"
+    assert sell.treasury is not None and sell.treasury.code == "85"      # فودافون بالخصم
+    assert merged.is_two_legged is True
+
+    # الطرف الثاني (شراء) يُشتقّ من المورد: مبلغ بعد الخصم + كود المورد + سعره
+    pipe = _make_pipeline(db)
+    pipe._maybe_synthesize_buy_leg(merged)
+    buy = merged.buy_leg
+    assert buy is not None and buy.customer_code == "760" and buy.amount == 2970
+    assert buy.price_normalized == "5.93" and buy.is_supplier_counterpart is True
+
+
+async def test_supplier_second_no_code_deal_ignored_without_registered_supplier(db):
+    """صفقة بلا كود زبون + رسالة ثانية بكود غير مُدرَج مورّدًا (تسوية/خزينة) → لا تُمتَص كمورد."""
+    from core.parsing import parse_message
+    from core.queue.service import QueueService
+    treas = await db.treasuries.all_active()
+    svc = QueueService(db)
+    now = PAST + timedelta(seconds=1000)
+    leg1 = parse_message("A8760\n+20 122 1225261\nنجوى\n3000 مصري\nفودافون", treas, []).leg
+    assert leg1.customer_code is None
+    leg1.source_message_key = "m1"
+    await svc.try_group(leg1, now, chat_jid=CENTRAL)
+    # ثانية بخزينة (بلاس فون) بلا مورد مُدرَج → لا تُمتَص كطرف مورد (المسار العادي)
+    msg2 = "A8760\n2900 مصري\nبلاس فون"
+    leg2 = parse_message(msg2, treas, []).leg
+    leg2.source_message_key = "m2"
+    assert await svc.try_absorb_supplier_second(leg2, _raw("m2", msg2), now, treas, []) is None
+
+
 async def test_reference_less_second_links_customer_and_supplier(db):
     """رسالة ثانية بلا رقم إشاري (سطر زبون + سطر مورد) → تُكمِّل صفقة معلّقة واحدة في الغرفة (§7.3)."""
     from core.constants import Currency
