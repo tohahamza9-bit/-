@@ -469,35 +469,59 @@ class QueueService:
         leg = deal.sell_leg or deal.buy_leg
         return leg.sender_jid if leg is not None else None
 
-    async def _find_recent_waiting(
+    async def fragment_link_candidates(
         self, chat_jid: str | None, now: datetime, frag: ParsedLeg | None = None,
-    ) -> Deal | None:
-        """أحدث صفقة معلّقة تنتظر خزينتها في نفس الغرفة خلال نافذة الربط (§7.3).
+    ) -> list[Deal]:
+        """المرشّحون لربط الرسالة الثانية `frag` بصفقة معلّقة في نفس الغرفة، **بعد كل المميّزات**
+        (§7.3، §0):
 
-        الأولوية: (١) نفس **المُرسِل** (sender_jid) — «وليد» من «مهيمن» تُربَط بصفقة «مهيمن» المعلّقة
-        أولًا؛ إن لم توجد → (٢) الربط العادي بالوقت + الغرفة + العملة.
+        (١) **رقم إشاري صريح** في الرسالة الثانية → يُطابَق **بالـref حصرًا**.
+        (٢) بلا ref → تُصفّى بنفس **المُرسِل** (sender_jid) إن وُجد مطابق، ثم تبقى **العملة**.
 
-        🔴 شرط العملة (§4.1): رد بعملة معروفة (خزينة تونسية/مصرية) يُطابِق عملة المعلّقة — فرد
-        خزينة تونسية («وليد» TND) لا يُربَط بحوالة مصرية معلّقة، بل بالتونسية (منع خلط عند تعدّدها)."""
+        🔴 تُستبعَد الصفقة: مُصعَّدة (ESCALATED)، أو أقدم من 15د (INCOMPLETE_DATA_ESCALATE_SECONDS)،
+        أو خارج نافذة الربط (SECOND_MESSAGE_LINK_SECONDS) — فرد قديم/مُصعَّد لا يُعاد ربطه فيُدخِل
+        حوالة خاطئة (حادثة A8667: 258 → 996). 🔴 شرط العملة (§4.1): تطابق العملتين.
+
+        تعدّد الناتج (>1) = **التباس** → يُصعّده الأنبوب بلا تخمين؛ الناتج الوحيد = ربط آمن."""
         if not chat_jid:
-            return None
+            return []
         frag_cur = self._leg_currency(frag)
         horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        # حارس العمر الأقصى (15د): زائد فعليًّا فوق horizon الأضيق (120s)، لكن نُصرّح به صراحةً
+        # كي يبقى الثابت صحيحًا لو وُسّعت النافذة مستقبلًا (لا يُربَط رد بصفقة أقدم من 15د).
+        max_age = _as_naive_utc(now) - timedelta(seconds=INCOMPLETE_DATA_ESCALATE_SECONDS)
         candidates = [
             d for d in await self.db.deals.waiting_in_room(chat_jid)
-            if self._needs_completion(d) and _as_naive_utc(d.created_at) >= horizon
+            if self._needs_completion(d)
+            and d.status != Status.ESCALATED                       # لا ربط بصفقة مُصعَّدة (§0)
+            and _as_naive_utc(d.created_at) >= horizon             # داخل نافذة الربط (120s)
+            and _as_naive_utc(d.created_at) >= max_age             # وليست أقدم من 15د
             and self._currency_compatible(d, frag_cur)
         ]
         if not candidates:
-            return None
-        # (١) تفضيل نفس المُرسِل إن توفّر
+            return []
+        # (١) رقم إشاري صريح → طابِق بالـref حصرًا (لا تخمين زمنيّ)
+        frag_ref = _norm_ref(frag.reference_number) if frag is not None and frag.reference_number else None
+        if frag_ref:
+            return [
+                d for d in candidates
+                if d.sell_leg is not None and _norm_ref(d.sell_leg.reference_number) == frag_ref
+            ]
+        # (٢) بلا ref: نفس المُرسِل يميّز إن وُجد مطابق (العملة مُطبَّقة أعلاه)
         sender = frag.sender_jid if frag is not None else None
         if sender:
             same_sender = [d for d in candidates if self._leg_sender(d) == sender]
             if same_sender:
-                candidates = same_sender
-        candidates.sort(key=lambda d: _as_naive_utc(d.created_at), reverse=True)
-        return candidates[0]
+                return same_sender
+        return candidates
+
+    async def _find_recent_waiting(
+        self, chat_jid: str | None, now: datetime, frag: ParsedLeg | None = None,
+    ) -> Deal | None:
+        """الصفقة المعلّقة **الوحيدة** المطابِقة للرسالة الثانية (§7.3). لا شيء أو التباس (>1) → None
+        (لا تخمين §0 — الأنبوب يُصعّد التعدّد عبر fragment_link_candidates قبل الوصول هنا)."""
+        cands = await self.fragment_link_candidates(chat_jid, now, frag)
+        return cands[0] if len(cands) == 1 else None
 
     async def _pull_pending_reply(self, deal: Deal, chat_jid: str | None, now: datetime) -> bool:
         """رد معلّق سابق في نفس الغرفة يُكمِّل هذه الصفقة الجديدة (Fix 2). يُرجع True إن اكتملت."""

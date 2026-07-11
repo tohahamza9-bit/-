@@ -251,6 +251,18 @@ class Pipeline:
                 #    للصيغ المتنوّعة (الكود آخر السطر، السعر بسطر مستقلّ…) — تلتقط كود/اسم/سعر/خزينة.
                 frag = parse_completion_fragment(raw.text, treasuries, suppliers)
                 frag.sender_jid = raw.sender_jid          # مُرسِل الرد (يُفضَّل ربطه بصفقة نفس المُرسِل §7.3)
+                # 🔴 تعدّد الصفقات المعلّقة المطابقة (بعد ref/مُرسِل/عملة) = التباس → تصعيد بلا تخمين
+                #    (§0). كان «الأحدث يفوز» يُدخِل حوالة خاطئة عند الدفعات المتزامنة (حادثة A8667).
+                cands = await self.queue.fragment_link_candidates(raw.chat_jid, now, frag)
+                if len(cands) > 1:
+                    await self.bus.notify_admin(
+                        f"⚠️ رسالة ثانية بلا رقم إشاري + تعدّد صفقات معلّقة ({len(cands)}) في الغرفة "
+                        f"— تعذّر الربط الآمن؛ مراجعة يدوية: {(raw.text or '').strip()[:60]}",
+                        raw.message_key,
+                    )
+                    log.warning("رسالة ثانية (fragment) + تعدّد معلّقات (%d) — تصعيد بلا تخمين (§0).",
+                                len(cands))
+                    return None
                 return await self.queue.absorb_fragment(
                     frag, raw.chat_jid, raw.message_key, now
                 )

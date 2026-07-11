@@ -410,3 +410,54 @@ async def test_early_reply_stored_then_linked_in_pipeline(db):
     d = await db.deals.find_by_source_key("hdrE")
     assert d is not None and d.status == Status.PARSED
     assert d.sell_leg.treasury is not None and d.sell_leg.treasury.name == "بلاس فون"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ربط الرسالة الثانية: ref صريح، لا ربط بمُصعَّدة، والتباس → لا تخمين (حادثة A8667)
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_fragment_links_by_explicit_ref_not_newest(db):
+    """رسالة ثانية بـref صريح (A100) تُربَط بصاحبة الـref لا بالأحدث (منع تقاطع الدفعات §0)."""
+    from core.constants import Currency
+    from core.models import Deal
+    svc = QueueService(db)
+    old = ParsedLeg(operation=OperationType.SELL, reference_number="A100", amount=1000.0,
+                    currency=Currency.EGP, customer_code="111")     # treasury None → ينتظر إكمالًا
+    new = ParsedLeg(operation=OperationType.SELL, reference_number="A200", amount=2000.0,
+                    currency=Currency.EGP, customer_code="222")
+    await db.deals.upsert(Deal(deal_id="dOld", status=Status.WAITING_SECOND_LEG,
+        created_at=NOW - timedelta(seconds=60), updated_at=NOW, chat_jid=CENTRAL, sell_leg=old))
+    await db.deals.upsert(Deal(deal_id="dNew", status=Status.WAITING_SECOND_LEG,       # الأحدث
+        created_at=NOW - timedelta(seconds=10), updated_at=NOW, chat_jid=CENTRAL, sell_leg=new))
+    frag = ParsedLeg(operation=OperationType.SELL, reference_number="A100", currency=Currency.EGP)
+    deal = await svc._find_recent_waiting(CENTRAL, NOW, frag)
+    assert deal is not None and deal.deal_id == "dOld"      # بالـref لا بالأحدث dNew
+
+
+async def test_fragment_no_link_to_escalated_deal(db):
+    """رسالة ثانية لا تُربَط بصفقة مُصعَّدة (ESCALATED) — لا يُعاد إحياؤها بإدخال خاطئ (§0)."""
+    from core.constants import Currency
+    from core.models import Deal
+    svc = QueueService(db)
+    esc = ParsedLeg(operation=OperationType.SELL, reference_number="A300", amount=5860.0,
+                    currency=Currency.EGP)                   # treasury None + هوية ناقصة
+    await db.deals.upsert(Deal(deal_id="dEsc", status=Status.ESCALATED,
+        created_at=NOW - timedelta(seconds=30), updated_at=NOW, chat_jid=CENTRAL, sell_leg=esc))
+    frag = ParsedLeg(operation=OperationType.SELL, currency=Currency.EGP)
+    assert await svc._find_recent_waiting(CENTRAL, NOW, frag) is None   # لا ربط بمُصعَّدة
+
+
+async def test_fragment_ambiguous_multiple_pending_no_guess(db):
+    """تعدّد معلّقات مطابقة (نفس العملة، بلا مُرسِل مميّز، بلا ref) → التباس: لا تخمين (None)."""
+    from core.constants import Currency
+    from core.models import Deal
+    svc = QueueService(db)
+    a = ParsedLeg(operation=OperationType.SELL, reference_number="A400", amount=1000.0, currency=Currency.EGP)
+    b = ParsedLeg(operation=OperationType.SELL, reference_number="A401", amount=2000.0, currency=Currency.EGP)
+    await db.deals.upsert(Deal(deal_id="dA", status=Status.WAITING_SECOND_LEG,
+        created_at=NOW - timedelta(seconds=40), updated_at=NOW, chat_jid=CENTRAL, sell_leg=a))
+    await db.deals.upsert(Deal(deal_id="dB", status=Status.WAITING_SECOND_LEG,
+        created_at=NOW - timedelta(seconds=10), updated_at=NOW, chat_jid=CENTRAL, sell_leg=b))
+    frag = ParsedLeg(operation=OperationType.SELL, currency=Currency.EGP)   # بلا ref، بلا مُرسِل
+    cands = await svc.fragment_link_candidates(CENTRAL, NOW, frag)
+    assert len(cands) == 2                                  # التباس: مرشّحان
+    assert await svc._find_recent_waiting(CENTRAL, NOW, frag) is None   # لا تخمين
