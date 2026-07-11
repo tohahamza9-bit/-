@@ -235,6 +235,7 @@ class Pipeline:
                 # 🔴 الرسالة الثانية تُعاد قراءتها بـ pattern-fishing (لا سطرًا-بسطر) — أمتن
                 #    للصيغ المتنوّعة (الكود آخر السطر، السعر بسطر مستقلّ…) — تلتقط كود/اسم/سعر/خزينة.
                 frag = parse_completion_fragment(raw.text, treasuries, suppliers)
+                frag.sender_jid = raw.sender_jid          # مُرسِل الرد (يُفضَّل ربطه بصفقة نفس المُرسِل §7.3)
                 return await self.queue.absorb_fragment(
                     frag, raw.chat_jid, raw.message_key, now
                 )
@@ -250,6 +251,7 @@ class Pipeline:
 
         leg = result.leg
         leg.source_message_key = raw.message_key
+        leg.sender_jid = raw.sender_jid          # مُرسِل الرسالة الأولى (لربط الرد بنفس المُرسِل §7.3)
 
         # الحارس (§9): نُزّلت من قبل؟ → تجاهل (منع تكرار)
         if await self.guard.already_downloaded(raw.message_key):
@@ -540,8 +542,7 @@ class Pipeline:
 
             if not res.ok:
                 # فشل/شكّ تقني → dead-letter + رسالة للمسؤول + وقف الصفقة (§11.3).
-                # 🔴 لا تفاعل على المركزية عند الفشل (قرار المستخدم): العلامتان الوحيدتان على
-                # المركزية 🔸/✅ فقط؛ الفشل يُبلَّغ في غرفة المسؤول وينتظر تدخّلًا يدويًا.
+                # 🔴 فشل تقنيّ: تفاعل 🔴 على المركزية (قرار المستخدم الجديد) + تصعيد للمسؤول.
                 await self.db.dead_letter.add(
                     deal.deal_id, res.error or "فشل كتابة",
                     screenshot_path=res.screenshot_path,
@@ -550,6 +551,7 @@ class Pipeline:
                 deal.status = Status.SELL_DONE if job.operation == OperationType.BUY else Status.TECH_FAILED
                 deal.mark = Mark.FAILED
                 await self.db.deals.set_status(deal.deal_id, deal.status, mark=Mark.FAILED.value)
+                await self.matcher.apply_mark(deal, Mark.FAILED)   # 🔴 على الرسالتين (§8.3)
                 await self.bus.notify_admin(
                     f"🔴 فشل {job.operation.value} للصفقة {self._ref(deal)}: {res.error} "
                     f"{'(لقطة محفوظة)' if res.screenshot_path else ''} — مراجعة يدوية.",
@@ -577,6 +579,7 @@ class Pipeline:
                 deal.status = Status.TECH_FAILED if job.operation == OperationType.SELL else Status.SELL_DONE
                 deal.mark = Mark.FAILED
                 await self.db.deals.set_status(deal.deal_id, deal.status, mark=Mark.FAILED.value)
+                await self.matcher.apply_mark(deal, Mark.FAILED)   # 🔴 على الرسالتين (§8.3)
                 await self.bus.notify_admin(
                     f"🔴 لم يتأكّد حفظ {job.operation.value} للصفقة {self._ref(deal)} في SQL — مراجعة (§11.4).",
                     key,

@@ -503,25 +503,32 @@ class MatchingService:
     # ── وضع العلامات (§8.3) ─────────────────────────────────────────────────
     async def apply_mark(self, deal: Deal, mark: Mark) -> None:
         """
-        يضع العلامة على رسالة المركزية (§8.3). التفاعلات (reactions) الوحيدة المسموحة:
-          🔸 MATCHED (تطابقت الغرفتان) و✅ DONE (أُدخِلت بنجاح) — تفاعل صامت (bus.mark_central).
-          ⚠️ WARN → Reply نصّي بالسبب (ليس تفاعلًا).
-        🔴 FAILED **لا يُوضَع تفاعلًا** (قرار المستخدم): الفشل يُبلَّغ في غرفة المسؤول فقط —
-           حصانة هنا كي لا يظهر أي تفاعل غير 🔸/✅ على المركزية حتى لو استُدعي خطأً.
-        """
-        key = self._deal_key(deal)
-        if key is None:
-            log.error("🔴 لا يوجد مفتاح رسالة للصفقة %s — تعذّر وضع العلامة %s", deal.deal_id, mark)
-            return
+        يضع العلامة على رسالة/رسائل المركزية (§8.3). التفاعلات (reactions) الثلاث (قرار المستخدم):
+          🟡 MATCHED (وصلت للمراجعة/الانتظار)، ✅ DONE (سُجِّلت)، 🔴 FAILED (فشل تقني) — تفاعل صامت.
+          ⚠️ WARN → Reply نصّي بالسبب (ليس تفاعلًا) على الرسالة الأولى فقط.
 
+        🔴 التفاعل يُوضَع على **كل** مفاتيح الصفقة (الأولى + الثانية عند وجود source_message_keys)
+           كي تظهر العلامة على الرسالتين؛ وإلّا على _deal_key المفرد.
+        """
         if mark is Mark.WARN:
+            key = self._deal_key(deal)
+            if key is None:
+                log.error("🔴 لا مفتاح رسالة للصفقة %s — تعذّر ⚠️", deal.deal_id)
+                return
             reason = deal.hold_reason or "شك — تحتاج مراجعة"
             await self._bus.reply_central(f"⚠️ {reason}", key)
-        elif mark in (Mark.MATCHED, Mark.DONE):
+            return
+
+        # 🟡/✅/🔴 → تفاعل صامت على كل رسائل الصفقة (§8.3)
+        keys = list(deal.source_message_keys)
+        if not keys:
+            single = self._deal_key(deal)
+            keys = [single] if single else []
+        if not keys:
+            log.error("🔴 لا مفتاح رسالة للصفقة %s — تعذّر وضع العلامة %s", deal.deal_id, mark)
+            return
+        for key in keys:
             await self._bus.mark_central(key, mark.value)
-        else:
-            # 🔴 (أو أي علامة أخرى) → لا تفاعل على المركزية؛ الفشل → غرفة المسؤول (منفصل).
-            log.debug("apply_mark: تجاهل تفاعل %s على المركزية (الفشل يُبلَّغ للمسؤول فقط)", mark)
 
     # ── مساعدات ─────────────────────────────────────────────────────────────
     @staticmethod

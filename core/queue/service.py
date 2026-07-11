@@ -463,12 +463,21 @@ class QueueService:
         deal_cur = cls._leg_currency(deal.sell_leg or deal.buy_leg)
         return deal_cur is None or deal_cur == frag_cur
 
+    @staticmethod
+    def _leg_sender(deal: Deal) -> str | None:
+        """مُرسِل الصفقة (sender_jid لطرف البيع/الشراء) — لربط الرد بنفس المُرسِل (§7.3)."""
+        leg = deal.sell_leg or deal.buy_leg
+        return leg.sender_jid if leg is not None else None
+
     async def _find_recent_waiting(
         self, chat_jid: str | None, now: datetime, frag: ParsedLeg | None = None,
     ) -> Deal | None:
         """أحدث صفقة معلّقة تنتظر خزينتها في نفس الغرفة خلال نافذة الربط (§7.3).
 
-        🔴 شرط العملة (§4.1): عند وجود عملة للرد (خزينة تونسية/مصرية) تُطابَق عملة المعلّقة — فرد
+        الأولوية: (١) نفس **المُرسِل** (sender_jid) — «وليد» من «مهيمن» تُربَط بصفقة «مهيمن» المعلّقة
+        أولًا؛ إن لم توجد → (٢) الربط العادي بالوقت + الغرفة + العملة.
+
+        🔴 شرط العملة (§4.1): رد بعملة معروفة (خزينة تونسية/مصرية) يُطابِق عملة المعلّقة — فرد
         خزينة تونسية («وليد» TND) لا يُربَط بحوالة مصرية معلّقة، بل بالتونسية (منع خلط عند تعدّدها)."""
         if not chat_jid:
             return None
@@ -481,6 +490,12 @@ class QueueService:
         ]
         if not candidates:
             return None
+        # (١) تفضيل نفس المُرسِل إن توفّر
+        sender = frag.sender_jid if frag is not None else None
+        if sender:
+            same_sender = [d for d in candidates if self._leg_sender(d) == sender]
+            if same_sender:
+                candidates = same_sender
         candidates.sort(key=lambda d: _as_naive_utc(d.created_at), reverse=True)
         return candidates[0]
 

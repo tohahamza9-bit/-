@@ -92,6 +92,7 @@ class ParsedLeg(BaseModel):
     commission_rate: float = 0.0               # 0 دائمًا (§6.2)
     amount_after_discount: Optional[float] = None  # §6: صيغة SI تعطي القيمة بعد الخصم صريحة
     source_message_key: Optional[str] = None   # الرسالة التي جاء منها هذا الطرف
+    sender_jid: Optional[str] = None           # مُرسِل الرسالة — لربط الرد بنفس المُرسِل (§7.3)
     # ── إشارات نوع العملية والتجميع (§5) — تحسبها وحدة الفهم، يستهلكها الطابور ──
     expects_pair: bool = False                 # §5.2/§5.3: ينتظر طرفًا ثانيًا (شراء/خزينة بيع-وشراء)
     explicit_operation: bool = False           # §5.1: كلمة «بيع»/«شراء» صريحة (تتجاوز الافتراضي)

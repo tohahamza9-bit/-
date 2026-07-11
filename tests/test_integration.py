@@ -998,10 +998,11 @@ async def test_write_failure_notifies_admin_no_central_reaction(db):
     outs = await db.outgoing.next_unsent(100)
     # رسالة السبب في غرفة المسؤول موجودة (انتظار تدخّل يدوي)
     assert any(o["chat_jid"] == ADMIN for o in outs), "فشل الإدخال يُبلَّغ للمسؤول"
-    # 🔴 لا أي تفاعل على المركزية عند الفشل — ولا حتى ✅ (لم يُدخَل)
-    reactions = [o.get("reaction") for o in outs if o.get("reaction")]
-    assert Mark.FAILED.value not in reactions, "ممنوع تفاعل 🔴 على المركزية عند الفشل"
-    assert Mark.DONE.value not in reactions, "لا ✅ لأن الإدخال لم ينجح"
+    # 🔴 تفاعل على المركزية عند الفشل (السياسة الجديدة)، ولا ✅ (لم يُدخَل)
+    central_reactions = [o.get("reaction") for o in outs
+                         if o.get("reaction") and o["chat_jid"] == CENTRAL]
+    assert Mark.FAILED.value in central_reactions, "🔴 يُوضَع على المركزية عند الفشل"
+    assert Mark.DONE.value not in central_reactions, "لا ✅ لأن الإدخال لم ينجح"
     # قاعدة الإخراج (§2.2): المركزية أو المسؤول فقط
     assert all(o["chat_jid"] in {CENTRAL, ADMIN} for o in outs)
 

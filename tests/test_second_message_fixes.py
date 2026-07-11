@@ -123,6 +123,46 @@ async def test_a8304_slash_second_merges_discount(db):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# العلامة (🟡/✅/🔴) تُوضَع على **كل** رسائل الصفقة (الأولى + الثانية) §8.3
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_mark_reacts_on_all_message_keys(db):
+    from core.constants import Mark
+    from core.matching.service import MatchingService
+    from core.models import Deal
+    bus = Bus(db, {CENTRAL, ADMIN}, CENTRAL, ADMIN)
+    mt = MatchingService(db, bus, [], [])
+    deal = Deal(deal_id="x", status=Status.PARSED, created_at=NOW, updated_at=NOW,
+                chat_jid=CENTRAL, source_message_keys=["k1", "k2"],
+                sell_leg=ParsedLeg(operation=OperationType.SELL))
+    await mt.apply_mark(deal, Mark.DONE)
+    outs = await db.outgoing.next_unsent(100)
+    keys = sorted(o["reply_to_key"] for o in outs if o.get("reaction") == Mark.DONE.value)
+    assert keys == ["k1", "k2"]                       # ✅ على الرسالتين
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# رد خزينة بلا ref يُفضّل الصفقة المعلّقة من **نفس المُرسِل** (sender_jid) §7.3
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_bare_treasury_prefers_same_sender(db):
+    from core.constants import Currency
+    from core.models import Deal
+    from core.parsing.parser import parse_completion_fragment
+    svc = QueueService(db)
+    mine = ParsedLeg(operation=OperationType.SELL, reference_number="A1", amount=2000.0,
+                     currency=Currency.TND, customer_code="526", sender_jid="mohaymen@s")
+    other = ParsedLeg(operation=OperationType.SELL, reference_number="A2", amount=3000.0,
+                      currency=Currency.TND, customer_code="603", sender_jid="other@s")
+    await db.deals.upsert(Deal(deal_id="dOther", status=Status.WAITING_SECOND_LEG,   # أحدث
+        created_at=NOW - timedelta(seconds=5), updated_at=NOW, chat_jid=CENTRAL, sell_leg=other))
+    await db.deals.upsert(Deal(deal_id="dMine", status=Status.WAITING_SECOND_LEG,
+        created_at=NOW - timedelta(seconds=30), updated_at=NOW, chat_jid=CENTRAL, sell_leg=mine))
+    frag = parse_completion_fragment("وليد", await _treas(db), [])
+    frag.sender_jid = "mohaymen@s"
+    d = await svc.absorb_fragment(frag, CENTRAL, "w", NOW)
+    assert d is not None and d.deal_id == "dMine"     # نفس المُرسِل، لا الأحدث
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # رد خزينة بلا ref يُربَط بالمعلّقة **المطابِقة للعملة** عند تعدّد المعلّقات (§4.1)
 # ═════════════════════════════════════════════════════════════════════════════
 async def test_bare_treasury_links_by_currency(db):
