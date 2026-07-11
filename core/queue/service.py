@@ -475,6 +475,23 @@ class QueueService:
             return leg.currency
         return leg.treasury.currency if leg.treasury is not None else None
 
+    @staticmethod
+    def _currency_from_price(price_raw: str | None) -> Currency | None:
+        """يستنبط عملة الرسالة الثانية من **السعر** حين لا خزينة/عملة صريحة (§3.6 §4.1): السعر
+        التونسي ~0.xx (يُكتب «35»→0.35 أو «0.35») → TND؛ المصري ~5-6 («5.90») → EGP. يمنع ربط
+        رسالة ثانية تونسية (سعر 35) بصفقة مصرية عند تعدّد المعلّقات (تلوّث العملة/الخزينة)."""
+        if not price_raw:
+            return None
+        try:
+            v = float(str(price_raw).replace("،", ".").replace(",", "."))
+        except (ValueError, TypeError):
+            return None
+        if v <= 0:
+            return None
+        if v < 1 or v >= 10:          # «0.35» أو «35» → سعر تونسي (0.xx بعد التطبيع)
+            return Currency.TND
+        return Currency.EGP           # «5.90» (1 ≤ v < 10) → سعر مصري
+
     @classmethod
     def _currency_compatible(cls, deal: Deal, frag_cur: Currency | None) -> bool:
         """توافق عملة الرد مع الصفقة: رد بلا عملة → بلا تقييد؛ وإلّا يجب تطابق العملتين (§4.1)."""
@@ -505,7 +522,11 @@ class QueueService:
         تعدّد الناتج (>1) = **التباس** → يُصعّده الأنبوب بلا تخمين؛ الناتج الوحيد = ربط آمن."""
         if not chat_jid:
             return []
-        frag_cur = self._leg_currency(frag)
+        # عملة الرد: الصريحة/خزينته، وإلّا **من سعره** (35→TND، 5.90→EGP §3.6) — كي لا تُربَط
+        # رسالة ثانية تونسية بصفقة مصرية (تلوّث العملة) عند تعدّد المعلّقات المتزامنة.
+        frag_cur = self._leg_currency(frag) or (
+            self._currency_from_price(frag.price_raw) if frag is not None else None
+        )
         horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
         # حارس العمر الأقصى (15د): زائد فعليًّا فوق horizon الأضيق (120s)، لكن نُصرّح به صراحةً
         # كي يبقى الثابت صحيحًا لو وُسّعت النافذة مستقبلًا (لا يُربَط رد بصفقة أقدم من 15د).

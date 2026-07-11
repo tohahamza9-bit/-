@@ -476,3 +476,48 @@ async def test_si_unknown_treasury_recorded_in_unknown_terms(db):
     await pipe._ingest(raw, NOW)
     rows = await db.unknown_terms.list_recent(20)
     assert any(r["context"] == "treasury" and "مجهول" in r["term"] for r in rows)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# العملة من السعر (§3.6 §4.1): رسالة ثانية بلا خزينة → السعر يحدّد العملة فالصفقة المناسبة
+# ═════════════════════════════════════════════════════════════════════════════
+def test_currency_from_price():
+    from core.constants import Currency
+    assert QueueService._currency_from_price("35") == Currency.TND      # 0.35
+    assert QueueService._currency_from_price("0.35") == Currency.TND
+    assert QueueService._currency_from_price("35.75") == Currency.TND
+    assert QueueService._currency_from_price("5.90") == Currency.EGP
+    assert QueueService._currency_from_price("5،84") == Currency.EGP    # فاصلة عربية
+    assert QueueService._currency_from_price(None) is None
+
+
+async def test_fragment_price_determines_currency_link(db):
+    """رسالة ثانية بلا خزينة: السعر يحدّد العملة (35→TND, 5.90→EGP) فتُربَط بالصفقة المناسبة
+    عملةً لا بالأحدث (منع تلوّث العملة عند تعدّد المعلّقات المتزامنة — حادثة A8755/A8756)."""
+    from core.constants import Currency
+    from core.models import Deal
+    svc = QueueService(db)
+    tnd = ParsedLeg(operation=OperationType.SELL, reference_number="A8755", amount=345.0, currency=Currency.TND)
+    egp = ParsedLeg(operation=OperationType.SELL, reference_number="A8756", amount=30000.0, currency=Currency.EGP)
+    await db.deals.upsert(Deal(deal_id="dT", status=Status.WAITING_SECOND_LEG,
+        created_at=NOW - timedelta(seconds=30), updated_at=NOW, chat_jid=CENTRAL, sell_leg=tnd))
+    await db.deals.upsert(Deal(deal_id="dE", status=Status.WAITING_SECOND_LEG,      # الأحدث (مصرية)
+        created_at=NOW - timedelta(seconds=5), updated_at=NOW, chat_jid=CENTRAL, sell_leg=egp))
+    f35 = ParsedLeg(operation=OperationType.SELL, customer_code="55", customer_name="عطيه", price_raw="35")
+    picked = await svc._find_recent_waiting(CENTRAL, NOW, f35)
+    assert picked is not None and picked.deal_id == "dT"               # 35 تونسي → التونسية لا الأحدث
+    f590 = ParsedLeg(operation=OperationType.SELL, customer_code="55", customer_name="عطيه", price_raw="5.90")
+    picked2 = await svc._find_recent_waiting(CENTRAL, NOW, f590)
+    assert picked2 is not None and picked2.deal_id == "dE"            # 5.90 مصري → المصرية
+
+
+async def test_fragment_tnd_price_not_contaminate_egp_only(db):
+    """سعر تونسي (35) + صفقة مصرية فقط → لا يُربَط (يُستبعَد بالعملة) فلا تتلوّث المصرية (§4.1)."""
+    from core.constants import Currency
+    from core.models import Deal
+    svc = QueueService(db)
+    egp = ParsedLeg(operation=OperationType.SELL, reference_number="A8756", amount=30000.0, currency=Currency.EGP)
+    await db.deals.upsert(Deal(deal_id="dE", status=Status.WAITING_SECOND_LEG,
+        created_at=NOW - timedelta(seconds=5), updated_at=NOW, chat_jid=CENTRAL, sell_leg=egp))
+    f35 = ParsedLeg(operation=OperationType.SELL, customer_code="55", customer_name="عطيه", price_raw="35")
+    assert await svc._find_recent_waiting(CENTRAL, NOW, f35) is None
