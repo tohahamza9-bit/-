@@ -560,9 +560,33 @@ class QueueService:
         self, chat_jid: str | None, now: datetime, frag: ParsedLeg | None = None,
     ) -> Deal | None:
         """الصفقة المعلّقة **الوحيدة** المطابِقة للرسالة الثانية (§7.3). لا شيء أو التباس (>1) → None
-        (لا تخمين §0 — الأنبوب يُصعّد التعدّد عبر fragment_link_candidates قبل الوصول هنا)."""
+        (لا تخمين §0 — الأنبوب يُصعّد التعدّد عبر fragment_link_candidates قبل الوصول هنا).
+
+        🔴 قاعدة التجاور (§7.3): تُربَط الثانية فقط بالصفقة التي رسالتها هي **السابقة مباشرةً** في
+        الغرفة. لو تخلّلت رسالةٌ أخرى (حوالة مختلفة/SI) بين الأولى والثانية → لا ربط (تبقى الأولى
+        معلّقة لتُصعَّد). يمنع التصاق الثانية بصفقة ليست جارتها عند تداخل الدفعات."""
         cands = await self.fragment_link_candidates(chat_jid, now, frag)
+        if not cands:
+            return None
+        cands = await self.adjacent_candidates(chat_jid, frag, cands)
         return cands[0] if len(cands) == 1 else None
+
+    async def adjacent_candidates(
+        self, chat_jid: str | None, frag: ParsedLeg | None, cands: list[Deal]
+    ) -> list[Deal]:
+        """يُبقي المرشّح الذي رسالته هي **السابقة مباشرةً** للرسالة الثانية في الغرفة (§7.3). إن كانت
+        الرسالة السابقة من صفقة أخرى (أو ليست من أيّ مرشّح) → [] (لا ربط). بلا رسالة سابقة/تتبّع → بلا قيد."""
+        key = frag.source_message_key if frag is not None else None
+        if not key or not chat_jid:
+            return cands
+        cur = await self.db.raw.get(key)
+        if cur is None:
+            return cands
+        prev = await self.db.raw.last_processed_before(chat_jid, cur.received_at)
+        if prev is None:
+            return cands
+        owner = next((c for c in cands if prev.message_key in c.source_message_keys), None)
+        return [owner] if owner is not None else []
 
     async def _pull_pending_reply(self, deal: Deal, chat_jid: str | None, now: datetime) -> bool:
         """رد معلّق سابق في نفس الغرفة يُكمِّل هذه الصفقة الجديدة (Fix 2). يُرجع True إن اكتملت."""

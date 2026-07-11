@@ -88,6 +88,17 @@ class RawMessageRepo(_Repo):
     async def mark_processed(self, message_key: str) -> None:
         await self.col.update_one({"message_key": message_key}, {"$set": {"processed": True}})
 
+    async def last_processed_before(
+        self, chat_jid: str, before: datetime
+    ) -> Optional[RawMessage]:
+        """آخر رسالة **معالَجة** في الغرفة وصلت قبل `before` — لقاعدة تجاور الرسالة الثانية (§7.3):
+        الثانية تُربَط فقط إن كانت السابقة مباشرةً من نفس الصفقة."""
+        doc = await self.col.find_one(
+            {"chat_jid": chat_jid, "processed": True, "received_at": {"$lt": before}},
+            sort=[("received_at", -1), ("_id", -1)],
+        )
+        return RawMessage(**doc) if doc else None
+
     async def unprocessed(self, limit: int = 200) -> list[RawMessage]:
         """الطابور: غير المعالَجة مرتّبة بختم الوصول (§7.1 بند 3). مفتاح ثانويّ `_id` يكسر التعادل
         عند تساوي `received_at` (دقّة الثانية) → ترتيب **حتميّ** فلا تُسجَّل رسالة قبل أختها عشوائيًّا."""

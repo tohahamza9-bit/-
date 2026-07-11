@@ -280,6 +280,7 @@ class Pipeline:
                 #    للصيغ المتنوّعة (الكود آخر السطر، السعر بسطر مستقلّ…) — تلتقط كود/اسم/سعر/خزينة.
                 frag = parse_completion_fragment(raw.text, treasuries, suppliers)
                 frag.sender_jid = raw.sender_jid          # مُرسِل الرد (يُفضَّل ربطه بصفقة نفس المُرسِل §7.3)
+                frag.source_message_key = raw.message_key  # لقاعدة التجاور (آخر رسالة معالَجة قبلها)
                 # 🔴 تعدّد الصفقات المعلّقة المطابقة (بعد ref/مُرسِل/عملة) = التباس → تصعيد بلا تخمين
                 #    (§0). كان «الأحدث يفوز» يُدخِل حوالة خاطئة عند الدفعات المتزامنة (حادثة A8667).
                 cands = await self.queue.fragment_link_candidates(raw.chat_jid, now, frag)
@@ -291,6 +292,25 @@ class Pipeline:
                     )
                     log.warning("رسالة ثانية (fragment) + تعدّد معلّقات (%d) — تصعيد بلا تخمين (§0).",
                                 len(cands))
+                    return None
+                # 🔴 قاعدة التجاور (§7.3): المرشّح الوحيد المطابق عملةً/مُرسِلًا لكن **ليس جار** الرسالة
+                #    الثانية (تخلّلتهما رسالة أخرى) → الأولى فقدت حقّ الربط → 🔴 **فورًا** + تصعيد (لا
+                #    انتظار 15د)، فلا تُدخَل الثانية في صفقة ليست جارتها.
+                if len(cands) == 1 and not await self.queue.adjacent_candidates(
+                    raw.chat_jid, frag, cands
+                ):
+                    blocked = cands[0]
+                    blocked.status = Status.ESCALATED
+                    blocked.mark = Mark.FAILED
+                    blocked.hold_reason = "رسالة متداخلة بين الأولى والثانية — تعذّر الربط (§7.3)"
+                    await self.db.deals.upsert(blocked)
+                    await self.matcher.apply_mark(blocked, Mark.FAILED)   # 🔴 على المركزية (§8.3)
+                    await self.bus.notify_admin(
+                        f"🔴 {self._ref(blocked)} — رسالة متداخلة بين الأولى والثانية، تعذّر الربط؛ مراجعة.",
+                        self._deal_key(blocked), forward_key=self._deal_key(blocked),
+                    )
+                    log.warning("قاعدة التجاور: صفقة %s فقدت حقّ الربط (رسالة متداخلة) → 🔴 فوريّ (§7.3)",
+                                blocked.deal_id)
                     return None
                 return await self.queue.absorb_fragment(
                     frag, raw.chat_jid, raw.message_key, now

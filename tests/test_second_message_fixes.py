@@ -542,3 +542,74 @@ async def test_pending_reply_not_pulled_into_mismatched_currency(db):
     assert deal.status == Status.WAITING_SECOND_LEG    # ما زالت تنتظر (لم يُسحَب الرد)
     assert deal.sell_leg.treasury is None              # لا خزينة فتحي التونسية
     assert deal.sell_leg.customer_code is None         # ولا كود 55 التونسي
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# قاعدة التجاور (§7.3): الثانية تُربَط فقط إن كانت السابقة مباشرةً من نفس الصفقة
+# ═════════════════════════════════════════════════════════════════════════════
+async def _seed_adjacency(db, mid_text=None):
+    """صفقة A (EGP) رسالتها m1، ثم رسالة خام m1 (معالَجة) + (اختياري) رسالة متخلّلة mid، ثم m2."""
+    from core.constants import Currency
+    from core.models import Deal
+    a = ParsedLeg(operation=OperationType.SELL, reference_number="A1", amount=1000.0,
+                  currency=Currency.EGP, source_message_key="m1")
+    await db.deals.upsert(Deal(deal_id="dA", status=Status.WAITING_SECOND_LEG,
+        created_at=NOW - timedelta(seconds=40), updated_at=NOW, chat_jid=CENTRAL,
+        sell_leg=a, source_message_keys=["m1"]))
+    await db.raw.insert(RawMessage(message_key="m1", chat_jid=CENTRAL, sender_jid="e",
+        text="A1", received_at=NOW - timedelta(seconds=40)))
+    await db.raw.mark_processed("m1")
+    if mid_text is not None:
+        await db.raw.insert(RawMessage(message_key="mid", chat_jid=CENTRAL, sender_jid="e",
+            text=mid_text, received_at=NOW - timedelta(seconds=10)))
+        await db.raw.mark_processed("mid")
+    await db.raw.insert(RawMessage(message_key="m2", chat_jid=CENTRAL, sender_jid="e",
+        text="بلاس فون", received_at=NOW))   # الثانية (لم تُعالَج بعد)
+
+
+async def test_adjacency_links_when_second_directly_follows_first(db):
+    """الثانية «بلاس فون» تلي أولاها m1 مباشرةً → تُربَط بالصفقة A."""
+    from core.parsing.parser import parse_completion_fragment
+    svc = QueueService(db)
+    await _seed_adjacency(db)                                   # بلا رسالة متخلّلة
+    frag = parse_completion_fragment("بلاس فون", await _treas(db), [])
+    frag.source_message_key = "m2"
+    picked = await svc._find_recent_waiting(CENTRAL, NOW, frag)
+    assert picked is not None and picked.deal_id == "dA"        # السابقة m1 من نفس الصفقة → ربط
+
+
+async def test_adjacency_blocks_link_across_intervening_message(db):
+    """رسالة أخرى «A2» بين الأولى والثانية → الثانية لا تُربَط بالصفقة A (السابقة ليست منها §7.3)."""
+    from core.parsing.parser import parse_completion_fragment
+    svc = QueueService(db)
+    await _seed_adjacency(db, mid_text="A2\nمصر\n5000 ج م")     # حوالة مختلفة متخلّلة
+    frag = parse_completion_fragment("بلاس فون", await _treas(db), [])
+    frag.source_message_key = "m2"
+    assert await svc._find_recent_waiting(CENTRAL, NOW, frag) is None   # السابقة «mid» ليست من dA
+
+
+async def test_adjacency_block_escalates_first_immediately(db):
+    """رسالة متداخلة بين الأولى والثانية → الصفقة الأولى تأخذ 🔴 فورًا وتُصعَّد (لا انتظار 15د §7.3)."""
+    from core.constants import Mark
+    pipe = _pipeline(db)
+    await _seed_adjacency(db, mid_text="A2\nمصر\n5000 ج م")          # حوالة متخلّلة
+    raw2 = RawMessage(message_key="m2", chat_jid=CENTRAL, sender_jid="e",
+                      text="بلاس فون", received_at=NOW)
+    await pipe._ingest(raw2, NOW)
+    dA = await db.deals.get("dA")
+    assert dA.status == Status.ESCALATED and dA.mark == Mark.FAILED  # 🔴 فوريّ
+    # تفاعل 🔴 على رسالة المركزية «m1»
+    outs = await db.outgoing.next_unsent(50)
+    assert any(o.get("reaction") == Mark.FAILED.value and o["reply_to_key"] == "m1" for o in outs)
+
+
+async def test_adjacency_no_intervening_absorbs_not_escalates(db):
+    """بلا رسالة متخلّلة → الثانية تُربَط عاديًّا (لا 🔴)."""
+    pipe = _pipeline(db)
+    await _seed_adjacency(db)                                         # بلا متخلّلة
+    raw2 = RawMessage(message_key="m2", chat_jid=CENTRAL, sender_jid="e",
+                      text="بلاس فون", received_at=NOW)
+    await pipe._ingest(raw2, NOW)
+    dA = await db.deals.get("dA")
+    assert dA.status == Status.PARSED                               # رُبطت الثانية (لا تصعيد)
+    assert dA.sell_leg.treasury is not None and dA.sell_leg.treasury.code == "74"
