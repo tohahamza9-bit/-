@@ -284,7 +284,17 @@ class QueueService:
             if not frag.customer_code and frag.supplier is None:
                 return None
         elif frag.supplier is None:
-            return None
+            # صفقة الوجهة **بلا كود زبون** + مورد غير مُدرَج: اقبله طرفَ مورد **فقط** بإشارة خصم
+            #   قويّة — رسالة نفس الرقم بمبلغ **أقصر** + «اسم سعر» في آخر سطر (§6) — فيُلتقَط المورد
+            #   بالاسم (كودُه قد يكون None → معلّق للإسناد اليدويّ من اللوحة §4.5) بدل صفقة مكرّرة.
+            #   بلا هذه الإشارة → مسار عادي (لا تخمين، فلا يُخلَط كودُ إكمالِ زبونٍ بمورد §0).
+            is_discount_supplier = bool(
+                frag.customer_name and frag.price_raw
+                and frag.amount is not None and target.sell_leg.amount is not None
+                and frag.amount < target.sell_leg.amount
+            )
+            if not is_discount_supplier:
+                return None
         return await self._absorb_supplier_leg(target, frag, raw.message_key, treasuries, now)
 
     async def _absorb_supplier_leg(

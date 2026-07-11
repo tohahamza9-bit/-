@@ -510,7 +510,7 @@ async def test_supplier_second_completes_deal_without_customer_code(db):
 
 
 async def test_supplier_second_no_code_deal_ignored_without_registered_supplier(db):
-    """صفقة بلا كود زبون + رسالة ثانية بكود غير مُدرَج مورّدًا (تسوية/خزينة) → لا تُمتَص كمورد."""
+    """صفقة بلا كود زبون + رسالة ثانية بخزينة بلا «اسم+سعر» مورّد (تسوية/خزينة) → لا تُمتَص كمورد."""
     from core.parsing import parse_message
     from core.queue.service import QueueService
     treas = await db.treasuries.all_active()
@@ -520,11 +520,41 @@ async def test_supplier_second_no_code_deal_ignored_without_registered_supplier(
     assert leg1.customer_code is None
     leg1.source_message_key = "m1"
     await svc.try_group(leg1, now, chat_jid=CENTRAL)
-    # ثانية بخزينة (بلاس فون) بلا مورد مُدرَج → لا تُمتَص كطرف مورد (المسار العادي)
+    # ثانية بخزينة (بلاس فون) بلا «اسم+سعر» مورّد ولا إشارة خصم مورّد → لا تُمتَص كطرف مورد
     msg2 = "A8760\n2900 مصري\nبلاس فون"
     leg2 = parse_message(msg2, treas, []).leg
     leg2.source_message_key = "m2"
     assert await svc.try_absorb_supplier_second(leg2, _raw("m2", msg2), now, treas, []) is None
+
+
+async def test_supplier_second_unregistered_absorbed_by_discount_signal(db):
+    """صفقة بلا كود + رسالة نفس الرقم بمبلغ **أقصر** + مورد **غير مُدرَج** بالاسم آخر السطر →
+    تُمتَص (مورد بالاسم، كود None معلّق للإسناد) بدل صفقة مكرّرة (§6 §4.5)."""
+    from core.parsing import parse_message
+    from core.queue.service import QueueService
+    treas = await db.treasuries.all_active()
+    sup = await db.suppliers.all_active()                 # بلا «طه» (غير مُدرَج)
+    svc = QueueService(db)
+    now = PAST + timedelta(seconds=1000)
+    leg1 = parse_message("A8752\n+20 122 1225261\nنجوى\n3000 مصري\nفودافون", treas, sup).leg
+    assert leg1.customer_code is None
+    leg1.source_message_key = "m1"
+    deal1 = await svc.try_group(leg1, now, chat_jid=CENTRAL)
+    assert deal1.status == Status.WAITING_SECOND_LEG
+
+    msg2 = "A8752 / 2.970 مصري / طه 5.93"
+    leg2 = parse_message(msg2, treas, sup).leg
+    leg2.source_message_key = "m2"
+    merged = await svc.try_absorb_supplier_second(leg2, _raw("m2", msg2), now, treas, sup)
+    assert merged is not None and merged.deal_id == deal1.deal_id      # نفس الصفقة — لا تكرار
+    sell = merged.sell_leg
+    assert sell.amount_after_discount == 2970                          # الأقصر = بعد الخصم
+    assert sell.supplier is not None and sell.supplier.name == "طه" and sell.supplier.code is None
+    assert sell.supplier_price_raw == "5.93"
+    assert sell.treasury is not None and sell.treasury.code == "85"    # فودافون بالخصم
+    a8752 = [d for d in await db.deals.by_status(Status.WAITING_SECOND_LEG, Status.PARSED)
+             if d.sell_leg and d.sell_leg.reference_number == "A8752"]
+    assert len(a8752) == 1                                             # لا صفقة مكرّرة
 
 
 async def test_reference_less_second_links_customer_and_supplier(db):
