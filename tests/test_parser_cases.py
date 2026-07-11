@@ -95,6 +95,42 @@ async def test_standalone_currency_and_amount_lines(db, text, amount):
     assert res.leg.currency == Currency.EGP
 
 
+# ── عملة مستقلّة + سطرٌ يخلط الهاتف بالمبلغ متجاورين → يُعزَل الهاتف بنمطه فيُؤخَذ المبلغ الصحيح ──
+# قبل التحسين: «01029051735 50000» يُدمَج في _bare_amount رقمًا عملاقًا؛ بعده: الهاتف (11/01) يُعزَل.
+async def test_phone_and_amount_on_same_line_takes_amount(db):
+    res = parse_message("A310\nمصر\n01029051735 50000\n562 بوجناح 5.96", await _treas(db), [])
+    assert res.kind == "transfer"
+    assert res.leg.phone == "01029051735"        # الهاتف كامل (لم يبتلع خانات المبلغ)
+    assert res.leg.amount == 50000               # المبلغ نظيف (لم يُدمَج برقم الهاتف)
+    assert res.leg.currency == Currency.EGP
+
+
+# ── تحسينات VodafoneBot: bidi + عزل الهاتف عن المبلغ + مرشّحو المبلغ (§3.5) ──────
+async def test_bidi_markers_stripped(db):
+    from core.parsing.normalize import parse_amount, repair_bidi_digits
+    assert repair_bidi_digits("‏01012‎") == "01012"       # RLM/LRM يُزالان
+    assert parse_amount("‏5000‎ مصري") == 5000
+    leg = parse_message("A300\n‏01011112222‎\n3000 مصري", await _treas(db), []).leg
+    assert leg.phone == "01011112222" and leg.amount == 3000        # لا انعكاس/تشويه
+
+
+@pytest.mark.parametrize("text, phone, amount", [
+    ("A301\n01012345678 5000 مصري", "01012345678", 5000),          # هاتف + مبلغ نفس السطر
+    ("A302\nالقيمة: 01098765432 15150 جنيه مصري", "01098765432", 15150),
+])
+async def test_strip_phones_for_amount(db, text, phone, amount):
+    leg = parse_message(text, await _treas(db), []).leg
+    assert leg.phone == phone                                       # الهاتف كامل (لم يُدمَج بالمبلغ)
+    assert leg.amount == amount                                     # المبلغ نظيف (بلا خانات الهاتف)
+
+
+def test_parse_amount_candidates_takes_largest():
+    from core.parsing.normalize import parse_amount
+    assert parse_amount("5000 مصري") == 5000                       # مرشّح واحد → مباشرة
+    assert parse_amount("5 000") == 5000                            # فاصل آلاف بمسافة = مرشّح واحد
+    assert parse_amount("5000 مصري 603") == 5000                   # مرشّحان → الأكبر (+تحذير ملتبس)
+
+
 # ── الهاتف: رفض الليبي، قبول التونسي 8-خانات والمصري 11، وعزله عن المبلغ (§3.4) ──
 @pytest.mark.parametrize("text, expected_phone", [
     ("A200\n+218 91-2192050\n3000 دت", None),          # ليبي (+218) → يُرفَض
@@ -171,6 +207,23 @@ async def test_second_message_glued_code_and_trailing_dot(db, text, code, name, 
     from core.parsing.parser import parse_completion_fragment
     f = parse_completion_fragment(text, await _treas(db), [])
     assert (f.customer_code, f.customer_name, f.price_raw) == (code, name, price)
+
+
+# ── الرسالة الثانية التونسية: كود رقميّ أولًا + سعر صحيح <100 لاحقًا → السعر لا كودٌ ثانٍ (§3.6) ──
+# قبل الإصلاح: «35» يُصنَّف كودًا ثانيًا (CODE_RE) فيُسقَط والسعر=None؛ بعده: يُلتقط سعرًا فيُطبَّع 0.35.
+# «فتحي» خزينة تونسية (كود 80، alias) → تضبط العملة TND وتُحذَف من الاسم.
+@pytest.mark.parametrize("text, code, name", [
+    ("986 سند التركي 35\nفتحي", "986", "سند التركي"),
+    ("1054 الحارف مستقبل 35\nفتحي", "1054", "الحارف مستقبل"),
+])
+async def test_second_message_tnd_integer_price_after_code(db, text, code, name):
+    from core.parsing.parser import parse_completion_fragment
+    f = parse_completion_fragment(text, await _treas(db), [])
+    assert f.customer_code == code
+    assert f.customer_name == name
+    assert f.currency == Currency.TND
+    assert f.price_raw == "35"
+    assert f.price_normalized == "0.35"       # سعر تونسي صحيح 35 → 0.35 (§3.6)
 
 
 async def test_two_leg_glued_code_pairs(db):

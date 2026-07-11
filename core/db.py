@@ -89,8 +89,9 @@ class RawMessageRepo(_Repo):
         await self.col.update_one({"message_key": message_key}, {"$set": {"processed": True}})
 
     async def unprocessed(self, limit: int = 200) -> list[RawMessage]:
-        """الطابور: غير المعالَجة مرتّبة بختم الوصول (§7.1 بند 3)."""
-        cur = self.col.find({"processed": False}).sort("received_at", 1).limit(limit)
+        """الطابور: غير المعالَجة مرتّبة بختم الوصول (§7.1 بند 3). مفتاح ثانويّ `_id` يكسر التعادل
+        عند تساوي `received_at` (دقّة الثانية) → ترتيب **حتميّ** فلا تُسجَّل رسالة قبل أختها عشوائيًّا."""
+        cur = self.col.find({"processed": False}).sort([("received_at", 1), ("_id", 1)]).limit(limit)
         return [RawMessage(**d) async for d in cur]
 
 

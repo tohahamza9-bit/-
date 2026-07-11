@@ -61,6 +61,38 @@ _STANDALONE_CURRENCY = {
 # سطر رقميّ مجرّد (بلا حرف عربيّ): مبلغ محتمل — «50000»/«49.500». الفواصل «.،,» فواصل آلاف (§3.5).
 _BARE_NUMBER_RE = re.compile(r"^\d[\d.,،'\s]*$")
 
+# مجرى هاتف (8-13 خانة متّصلة) — يُجرَّد قبل استخراج المبلغ (#2) فلا يُخلَط بالمبلغ (§3.4 §3.5).
+# المبالغ ≤7 خانات فلا تتأثّر؛ «49.500» أرقامها مفصولة بنقطة (<8 لكل مجموعة) فتبقى.
+_PHONE_RUN_RE = re.compile(r"\d{8,13}")
+
+
+def _strip_phones_for_amount(text: str) -> str:
+    """يزيل مجاري الأرقام 8-13 خانة (هواتف) قبل استخراج المبلغ من نصّ طويل (§3.4 §3.5)."""
+    return _PHONE_RUN_RE.sub(" ", text or "")
+
+
+def _is_phone_shaped(d: str) -> bool:
+    """مجرى أرقام **كامل** يطابق شكل هاتف بالطول+البادئة (§3.4) — أدقّ من «8-13 خانة» العريض:
+    يميّز الهاتف عن مبلغٍ ملاصق له كي لا يُبتلع رقمُ الهاتف في المبلغ («92512345 60000»→60000)."""
+    n = len(d)
+    if n == 11:
+        return d.startswith("01")                      # مصري محلّي
+    if n == 10:
+        return d.startswith("09")                      # ليبي محلّي
+    if n == 8:
+        return d[0] in "259"                           # تونسي محلّي (2/5/9)
+    if n == 12:
+        return d[:3] in ("218", "216", "201")          # تونسي/ليبي/مصري دوليّ
+    if n == 14:
+        return d[:5] in ("00218", "00216") or d.startswith("0020")   # دوليّ ببادئة 00
+    return False
+
+
+def _strip_phone_shaped(text: str) -> str:
+    """يعزل مجاري الأرقام ذات **شكل الهاتف** (طول+بادئة، §3.4) عن المبلغ الملاصق، بلا مساس بمبلغٍ
+    طويلٍ ليس هاتفًا («60000000»→يبقى). يُطبَّق على كل مجرى أرقام كامل فلا يقصّ جزءًا من رقم."""
+    return re.sub(r"\d+", lambda m: " " if _is_phone_shaped(m.group()) else m.group(), text or "")
+
 # سطر تعليمات بشري (طلب لا بيانات): «ارجو تحويل…» / «برجاء…» → يُتجاهَل (§7.2).
 # مطابقة بالكلمة الكاملة المطبَّعة (لا بادئة) كي لا تُطابَق أسماء مثل «رجائي/مرجان».
 _REQUEST_NOISE_WORDS = {
@@ -280,14 +312,16 @@ def _parse_a_fields(text: str, treasuries: list[TreasuryRecord]) -> dict:
 
 
 def _bare_amount(line: str) -> Optional[float]:
-    """سطر رقميّ مجرّد (بلا حرف عربيّ) = مبلغ محتمل («50000»/«49.500»→49500 §3.5). يُستثنى مجرى
-    الهاتف (10-13 خانة) فلا يُقرأ رقم الهاتف مبلغًا. يُرجع القيمة أو None."""
+    """سطر رقميّ مجرّد (بلا حرف عربيّ) = مبلغ محتمل («50000»/«49.500»→49500 §3.5). يُعزَل الهاتف
+    الملاصق أولًا بأنماطه (§3.4) فلا يُدمَج رقمه بالمبلغ («01029051735 50000»→50000)، ثم يُستثنى
+    أيّ مجرى هاتفٍ باقٍ (10-13 خانة لم يطابق نمطًا). يُرجع القيمة أو None."""
     if not _BARE_NUMBER_RE.match(line):
         return None
-    digits = re.sub(r"\D", "", line)
-    if not digits or 10 <= len(digits) <= 13:   # مجرى هاتف — ليس مبلغًا
+    cleaned = _strip_phone_shaped(line)          # يعزل الهاتف الملاصق عن المبلغ (أنماط §3.4)
+    digits = re.sub(r"\D", "", cleaned)
+    if not digits or 10 <= len(digits) <= 13:   # مجرى هاتف باقٍ — ليس مبلغًا
         return None
-    return parse_amount(line)
+    return parse_amount(cleaned)
 
 
 def _fish_standalone_currency_amount(text: str, f: dict) -> None:
@@ -342,7 +376,7 @@ def _fish_a_anchors(text: str, f: dict) -> None:
             continue
         head = normalize_ar(label[0])
         if any(head.startswith(lb) for lb in _AMOUNT_LABELS):
-            amt = parse_amount(label[1])
+            amt = parse_amount(_strip_phones_for_amount(label[1]))   # الهاتف يُجرَّد قبل المبلغ (#2)
             if amt is not None:
                 cur = detect_currency(label[1])
                 if cur is not None:
@@ -439,12 +473,13 @@ def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_he
         _add_note(f, seg)
         return
 
-    # 3) المبلغ + العملة (§3.5) — يُفحص قبل الهاتف/الزبون لتجنّب الالتباس
+    # 3) المبلغ + العملة (§3.5) — يُفحص قبل الهاتف/الزبون لتجنّب الالتباس. الهاتف يُجرَّد قبل
+    #    استخراج المبلغ (#2) فلا يُخلَط رقمُه بالمبلغ في مقطع طويل («01... 5000 مصري» → 5000).
     if detect_currency(seg) or n.startswith("القيمه") or n.startswith("المبلغ"):
         cur = detect_currency(seg)
         if cur:
             f.setdefault("currency", cur)
-        amt = parse_amount(seg)
+        amt = parse_amount(_strip_phones_for_amount(seg))
         if amt is not None:
             f.setdefault("amount", amt)
         return
@@ -706,6 +741,8 @@ def parse_completion_fragment(
         elif _CODE_RE.match(tok):                # 2-4 خانات = كود الزبون (قد يُعاد تفسيره سعرًا أدناه)
             if code is None:
                 code, code_idx = tok, i
+            elif int(tok) < 100:                 # كودٌ مضبوط سلفًا + عدد صحيح <100 = سعر تونسي صحيح لا
+                prices.append(tok)               # كودٌ ثانٍ («986 سند التركي 35»→سعر 35، يُطبَّع 0.35 §3.6)
         elif _NUMERIC_TOKEN_RE.match(tok):       # عدد آخر (مبلغ/رقم طويل) → يُتجاهَل
             continue
         else:

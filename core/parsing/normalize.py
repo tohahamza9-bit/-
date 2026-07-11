@@ -20,11 +20,22 @@ _DIACRITICS = re.compile("[ؐ-ًؚ-ٰٟۖ-ۭـ]")
 # الأرقام العربية-الهندية (٠-٩) والفارسية (۰-۹) → لاتينية 0-9 (§3.5) — قبل أي مطابقة/استخراج
 _ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
+# علامات bidi البصرية (RLM/LRM/التضمين) — واتساب RTL يحقنها حول الأرقام فتقلب ترتيبها البصريّ.
+_BIDI_MARKS = re.compile("[‎‏‪-‮]")
+
+
+def repair_bidi_digits(s: Optional[str]) -> str:
+    """يزيل علامات bidi (RLM ‏ / LRM ‎ / \\u202a-\\u202e) قبل أي معالجة — تمنع انعكاس/تشويه الأرقام
+    في رسائل واتساب RTL (§3.5). يُطبَّق ضمن normalize_digits فيغطّي كل مسارات الاستخراج."""
+    return _BIDI_MARKS.sub("", s) if s else (s or "")
+
 
 def normalize_digits(s: Optional[str]) -> str:
-    """يحوّل الأرقام العربية-الهندية/الفارسية إلى لاتينية (٠١٠→010) — يُطبَّق قبل استخراج
-    الهاتف/المبلغ/الكود إذ الأنماط الرقمية تطابق `\\d` اللاتينية فقط (§3.5)."""
-    return s.translate(_ARABIC_INDIC_DIGITS) if s else (s or "")
+    """ينظّف علامات bidi ثم يحوّل الأرقام العربية-الهندية/الفارسية إلى لاتينية (٠١٠→010) — يُطبَّق
+    قبل استخراج الهاتف/المبلغ/الكود إذ الأنماط الرقمية تطابق `\\d` اللاتينية فقط (§3.5)."""
+    if not s:
+        return s or ""
+    return repair_bidi_digits(s).translate(_ARABIC_INDIC_DIGITS)
 
 
 def normalize_ar(s: Optional[str]) -> str:
@@ -111,13 +122,22 @@ def classify_phone(raw: Optional[str]) -> Optional[str]:
 
 
 def extract_phone(s: Optional[str]) -> Optional[str]:
-    """يستخرج هاتف المستلم من نص قد يكون ملصوقًا (`0916174679واتس`→`0916174679`)؛ يرفض الليبي
-    ويقبل التونسي 8-خانات عبر classify_phone (§3.4)."""
+    """يستخرج هاتف المستلم (`0916174679واتس`→`0916174679`)؛ يرفض الليبي ويقبل التونسي 8-خانات.
+
+    مرحلتان لعزل الهاتف عن مبلغ ملاصق (#2): (أ) بلا دمج المسافات — «01… 5000» يأخذ الهاتف وحده
+    (المسافة تكسر المجرى)؛ (ب) إن فشل، بدمج المسافات — للهاتف الدوليّ المكتوب مجموعات «+20 100 745 3278»."""
     if not s:
         return None
-    cleaned = s.replace(" ", "").replace("-", "")
-    m = re.search(r"\d{8,}", cleaned)        # 8 خانات فأكثر (يشمل التونسي)
-    return classify_phone(m.group()) if m else None
+    text = normalize_digits(s)                       # bidi + أرقام عربية-هندية (§3.5)
+    m = re.search(r"\d{8,13}", text.replace("-", ""))    # (أ) المسافات حدود → تعزل الهاتف عن المبلغ
+    if m:
+        ph = classify_phone(m.group())
+        # نقبل هنا الهاتف **النظيف** فقط (تونسي 8 / مصري 11) كي لا يُلتقط جزءُ رقمٍ مفصولٍ بمسافة
+        # (ليبي «+218 91-…» جزؤه 9 خانات) — الغامض يُترَك للمرحلة (ب) بالدمج فتظهر بادئته.
+        if ph and len(ph) in (8, 11):
+            return ph
+    m2 = re.search(r"\d{8,13}", re.sub(r"[\s-]", "", text))   # (ب) دمج المسافات (دوليّ/بمجموعات)
+    return classify_phone(m2.group()) if m2 else None
 
 
 def is_phone_like(s: str) -> bool:
@@ -133,23 +153,14 @@ _AMOUNT_TOKEN_RE = re.compile(r"-?\d[\d.،,'‏‎\s]*")   # المقطع الر
 _AMOUNT_SPLIT_RE = re.compile(r"[.،,'‏‎\s]+")          # فواصل الآلاف
 
 
-def parse_amount(raw: Optional[str]) -> Optional[float]:
-    """المبلغ: الفواصل فواصل آلاف تُشال دائمًا (§3.5). يُرجع None إن تعذّر.
-
-    كل مجموعة بعد الأولى = 3 أرقام (فاصل آلاف). مجموعة ≠ 3 = صيغة غير معتادة →
-    تُصحّح (>3: تُقصّ لأول 3؛ <3: تبقى) مع log.warning، بلا تصعيد.
-    """
-    if raw is None:
-        return None
-    m = _AMOUNT_TOKEN_RE.search(normalize_digits(str(raw)))   # أرقام عربية-هندية → لاتينية (§3.5)
-    if not m:
-        return None
-    token = m.group().strip()
+def _parse_one_amount(token: str, raw: object) -> Optional[float]:
+    """يحوّل مقطعًا رقميًّا واحدًا إلى قيمة بقاعدة فاصل الآلاف (§3.5): كل مجموعة بعد الأولى = 3 أرقام؛
+    غيرها تُصحّح (>3→أول 3؛ <3→كما هي) مع log.warning، بلا تصعيد."""
+    token = token.strip()
     neg = token.startswith("-")
     groups = [g for g in _AMOUNT_SPLIT_RE.split(token.lstrip("-")) if g]
     if not groups:
         return None
-
     if len(groups) == 1:
         digits = groups[0]
     else:
@@ -163,13 +174,30 @@ def parse_amount(raw: Optional[str]) -> Optional[float]:
                 g = g[:3] if len(g) > 3 else g  # >3 → أول 3 (60.0000→60000)؛ <3 → كما هي
             norm.append(g)
         digits = "".join(norm)
-
     try:
         val = float(digits)
         return -val if neg else val
     except (ValueError, TypeError) as exc:  # T5: لا silent catch
         log.error("تعذّر تحويل المبلغ %r: %s", raw, exc)
         return None
+
+
+def parse_amount(raw: Optional[str]) -> Optional[float]:
+    """المبلغ: الفواصل فواصل آلاف تُشال دائمًا (§3.5). يُرجع None إن تعذّر.
+
+    🔴 مرشّحون (§3.5 §0): تُجمَع كل المقاطع الرقمية المحتملة. مرشّح واحد → يُؤخَذ مباشرة؛ أكثر من
+    مرشّح → **مبلغ ملتبس** فيُسجَّل تحذير ويُؤخَذ **الأكبر** (الأرجح أنّه المبلغ لا كود/سعر)."""
+    if raw is None:
+        return None
+    text = normalize_digits(str(raw))                        # bidi + أرقام عربية-هندية (§3.5)
+    values = [v for tok in _AMOUNT_TOKEN_RE.findall(text)
+              if (v := _parse_one_amount(tok, raw)) is not None]
+    if not values:
+        return None
+    if len(values) > 1:
+        log.warning("مبلغ ملتبس %r: مرشّحون %s — يُؤخَذ الأكبر (§3.5 §0).", raw, values)
+        return max(values, key=abs)
+    return values[0]
 
 
 # ── قواعد الأرقام: السعر حسب العملة (§3.6) 🔴 ────────────────────────────────

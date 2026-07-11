@@ -241,6 +241,37 @@ async def test_pipeline_no_warn_when_completed_in_time(db):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# الحجب الترتيبيّ لكل غرفة (§7.2): رأس غير مستقرّ يحجب ما بعده في نفس الغرفة فقط
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_room_ordering_blocks_when_head_unstable(db):
+    """رسالة «حرف» غير مستقرّة في رأس الغرفة تحجب الحوالة الكاملة التالية في **نفس الغرفة** فلا
+    تُسجَّل قبل سابقتها؛ وغرفة أخرى تُكمَّل بلا تأثّر؛ وبعد استقرار الرأس تُصرَّف بالترتيب."""
+    pipe = _pipeline(db, rooms=False)
+    OTHER = "other@g.us"
+    # نفس الغرفة (CENTRAL): «حرف» غير مستقرّة (رأس، تنتظر حتى 90s) ثم حوالة كاملة بعدها بثانية
+    await pipe.capture(_raw("harf", "حرف", NOW))
+    await pipe.capture(_raw("full", HEADER_ONLY, NOW + timedelta(seconds=1)))
+    # غرفة أخرى: رسالة مستقرّة — يجب أن تُعالَج (تُعلَّم) رغم حجب CENTRAL (الاستثناء: غرفة مختلفة)
+    await pipe.capture(RawMessage(message_key="other", chat_jid=OTHER, sender_jid=EMP,
+                                  text=HEADER_ONLY, received_at=NOW + timedelta(seconds=1)))
+
+    await pipe.process_inbox(NOW + timedelta(seconds=30))   # «حرف» لم تستقرّ بعد (تحتاج 90s)
+
+    # الرأس غير المستقرّ يُؤجَّل، والكاملة **خلفه في نفس الغرفة** محجوبة → لم تُعلَّم ولم تُسجَّل صفقة
+    assert (await db.raw.get("harf")).processed is False
+    assert (await db.raw.get("full")).processed is False
+    assert await db.deals.find_by_source_key("full") is None
+    # غرفة أخرى: عُولجت (عُلِّمت) رغم حجب CENTRAL — الحجب لكل غرفة على حدة
+    assert (await db.raw.get("other")).processed is True
+
+    # بعد STABILIZE_MAX: «حرف» تستقرّ (هدرزة) فتُصرَّف أولًا ثم الكاملة → الترتيب محفوظ
+    await pipe.process_inbox(NOW + timedelta(seconds=95))
+    assert (await db.raw.get("harf")).processed is True
+    assert (await db.raw.get("full")).processed is True
+    assert await db.deals.find_by_source_key("full") is not None   # سُجّلت الآن بعد سابقتها
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # انحدار الإنتاج (A11–A16): خزينة محلولة في الرسالة الأولى + هوية غائبة
 # كان يذهب فورًا إلى trust_gate → «كود ناقص»؛ الإصلاح: ينتظر الرسالة الثانية.
 # ═════════════════════════════════════════════════════════════════════════════

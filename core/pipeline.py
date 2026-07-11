@@ -131,17 +131,32 @@ class Pipeline:
         """
         async with self._inbox_lock:
             ready: list[Deal] = []
+            # 🔴 حجب ترتيبيّ لكل غرفة (§7.2): إن كان **رأس** غرفةٍ رسالةً لم تستقرّ بعد، تُؤجَّل كل
+            #    رسائل **نفس الغرفة** التي تليها هذه الدورة — فلا تُسجَّل رسالة لاحقة قبل أختها السابقة
+            #    (حفظ ترتيب الغرفة). الغرف الأخرى مستقلّة فتُكمَّل بلا تأثّر (الرسائل مرتّبة حتميًّا §db).
+            #    ردود التحكّم/الإكمال (إجراءات فورية على صفقات قائمة، لا حوالات جديدة) تُستثنى من الحجب.
+            blocked_rooms: set[str] = set()
             for raw in await self.db.raw.unprocessed():
                 # رسائل التحكّم (Reply: إلغاء/تعديل/تصحيح/تم) إجراءات مكتملة متعمّدة — تُعالَج فورًا،
                 # ولا تُعامَل كـ«حرف» placeholder ينتظر تعديلًا (§7.2 يخصّ حوالات جديدة قصيرة).
                 is_control_reply = bool(raw.reply_to_key) and detect_control(raw.text) is not None
-                if not is_control_reply and not is_stable(raw, now):
-                    # لم تستقرّ بعد — «الحرف» قد يُعدَّل (§7.2). لا تخطٍّ صامت (T5): نسجّل السبب.
-                    # استثناء (§7.3): رد خزينة/مورد مكمّل («بلس»/«صافي» وحدها) ليس حرفًا ينتظر
-                    # تعديلًا — يحلّ خزينة/موردًا صراحةً ويجب ربطه بحوالته المعلّقة فورًا (لا انتظار).
-                    if not await self._is_completion_reply(raw):
-                        log.debug("تخطٍّ مؤقّت (لم تستقرّ بعد): %s", raw.message_key)
-                        continue
+                stable = is_control_reply or is_stable(raw, now)
+                # رد خزينة/مورد مكمّل («بلس»/«صافي» §7.3): ليس «حرفًا» ينتظر تعديلًا — يُربَط بحوالته
+                # المعلّقة فورًا. يُحسَب (بوصول DB) مرّة فقط حين تكون غير مستقرّة وليست تحكّمًا.
+                completion = (not stable) and await self._is_completion_reply(raw)
+                immediate = is_control_reply or completion   # إجراء فوريّ لا يخضع لترتيب الحوالات الجديدة
+
+                # غرفة محجوبة (سبقتها رسالة لم تستقرّ) → أجّل ما بعدها فيها، إلا الإجراءات الفورية.
+                if raw.chat_jid in blocked_rooms and not immediate:
+                    log.debug("حجب ترتيبيّ (رأس الغرفة لم يستقرّ): %s", raw.message_key)
+                    continue
+
+                # لم تستقرّ بعد وليست ردّ إكمال → تأجيل + حجب بقية الغرفة حتى يستقرّ رأسها أو تنتهي
+                # مهلته (§7.2). لا تخطٍّ صامت (T5): نسجّل السبب.
+                if not stable and not completion:
+                    log.debug("تخطٍّ مؤقّت (لم تستقرّ بعد): %s", raw.message_key)
+                    blocked_rooms.add(raw.chat_jid)
+                    continue
                 try:
                     deal = await self._ingest(raw, now)
                     if deal is not None and deal.status == Status.PARSED:
