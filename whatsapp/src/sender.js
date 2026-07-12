@@ -164,10 +164,12 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
         throw e;
       }
 
-      // warm-up — احترام سقف الساعة
-      if (!warmup.canSend()) {
-        logger.warn('⏳ بلغ سقف warm-up لهذه الساعة (%d) — تأجيل', warmup.cap());
-        return;
+      // 🔴 تنبيه حرج (is_alert): ⚠️/🔴/🚨 من sweep/تصعيد/ردّ مباشر — يُعفى من سقف warm-up فيصل
+      //    فورًا (وإلا يعلق فيظنّ البوت أنه نبّه دون تسليم). النصّ العاديّ المحجوب بالسقف يُتخطّى
+      //    (continue) لا return — كي لا يتجوّع التنبيه خلفه. breaker والتأخير يبقيان للجميع.
+      if (!d.is_alert && !warmup.canSend()) {
+        logger.warn('⏳ بلغ سقف warm-up لهذه الساعة (%d) — تأجيل نصّ عاديّ', warmup.cap());
+        continue;
       }
 
       // W1-B — فاصل بين الغرف المختلفة
@@ -177,7 +179,7 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
 
       const ok = await sendWithRetry(d);
       if (ok) {
-        warmup.record();
+        if (!d.is_alert) warmup.record();   // التنبيهات لا تستهلك سقف warm-up (لا تُحسب spam)
         lastJid = d.chat_jid;
         await outgoing.updateOne({ _id: d._id }, { $set: { sent: true, sent_at: new Date() } });
       } else {

@@ -63,6 +63,7 @@ from .queue.service import (
     is_incomplete_first_message,
     is_treasury_only_reply,
     is_treasury_second_reply,
+    missing_mandatory_fields,
 )
 from .queue.stabilization import is_stable
 from .verification.sql_verifier import SqlVerifier
@@ -550,12 +551,14 @@ class Pipeline:
         #   90s → تنبيه خفيف في المركزية (تبقى منتظِرة)؛ 15 دقيقة → تصعيد لغرفة المسؤول.
         to_warn, to_escalate = await self.queue.sweep_incomplete_a(now)
         for deal in to_warn:
+            # رسالة ديناميكية: تذكر **الحقول الناقصة فعلًا** فقط (لا نصّ ثابت). تنبيه حرج → is_alert.
+            missing = missing_mandatory_fields(deal.sell_leg or deal.buy_leg)
+            detail = "، ".join(missing) if missing else "كود الزبون، الاسم، السعر، الخزينة"
             await self.bus.reply_central(
-                f"⚠️ {self._ref(deal)} — يُرجى إكمال البيانات "
-                f"(كود الزبون + الاسم + السعر + الخزينة).",
-                self._deal_key(deal),
+                f"⚠️ {self._ref(deal)} — ناقص: {detail}.",
+                self._deal_key(deal), is_alert=True,
             )
-            log.info("تنبيه خفيف: حوالة A ناقصة %s تجاوزت 90s بلا رسالة ثانية", self._ref(deal))
+            log.info("تنبيه خفيف: حوالة A ناقصة %s تجاوزت 90s (ناقص: %s)", self._ref(deal), detail)
         for deal in to_escalate:
             # حوالة A ناقصة 15د بلا رسالة ثانية (قرار المستخدم): ❌ على المركزية فقط — بلا تصعيد
             # للمسؤول. الصفقة صارت ESCALATED (نهائية) في sweep_incomplete_a فلا تُعاد معالجتها.
@@ -996,24 +999,24 @@ class Pipeline:
         # (أ) لا Reply → إرشاد صريح للموظف (لا هدرزة صامتة)
         if not raw.reply_to_key:
             await self.bus.reply_central(
-                "🔴 يجب الإلغاء عبر Reply على رسالة الحوالة الأصلية.", raw.message_key)
+                "🔴 يجب الإلغاء عبر Reply على رسالة الحوالة الأصلية.", raw.message_key, is_alert=True)
             return
         # (ب) ابحث عن الصفقة بمفتاح الرسالة المُردود عليها ضمن source_message_keys
         deal = await self.db.deals.find_by_source_key(raw.reply_to_key)
         if deal is None:
             await self.bus.reply_central(
-                "🔴 لم يُعثر على الحوالة المطلوب إلغاؤها.", raw.message_key)
+                "🔴 لم يُعثر على الحوالة المطلوب إلغاؤها.", raw.message_key, is_alert=True)
             return
         ref = self._ref(deal)
         # (ج) ملغاة مسبقًا (يشمل إلغاء إلغاء) → حالة نهائية، لا استرجاع
         if deal.status in (Status.CANCELLED, Status.CANCELLING):
-            await self.bus.reply_central(f"🔴 الحوالة {ref} مُلغاة مسبقًا.", raw.message_key)
+            await self.bus.reply_central(f"🔴 الحوالة {ref} مُلغاة مسبقًا.", raw.message_key, is_alert=True)
             return
         # (د) نافذة الإلغاء: عمر الصفقة من created_at بتوقيت ليبيا (UTC+2) ≤ 96 ساعة
         if not within_cancellation_window(deal.created_at, now):
             await self.bus.reply_central(
                 f"🔴 الحوالة {ref} تجاوزت مدة الإلغاء المسموح بها "
-                f"({CANCELLATION_WINDOW_HOURS // 24} أيام).", raw.message_key)
+                f"({CANCELLATION_WINDOW_HOURS // 24} أيام).", raw.message_key, is_alert=True)
             return
         # (هـ) لم تُكتب في MONEYADO بعد (WAITING/PARSED) → إلغاء بلا قيد عكسي
         if deal.status in (Status.WAITING_SECOND_LEG, Status.PARSED):
@@ -1024,7 +1027,7 @@ class Pipeline:
         # (و) COMPLETED → انتقال ذرّي ثم قيد عكسي في MONEYADO
         if deal.status == Status.COMPLETED:
             if not await self.db.deals.begin_cancelling(deal.deal_id):
-                await self.bus.reply_central(f"🔴 الحوالة {ref} مُلغاة مسبقًا.", raw.message_key)
+                await self.bus.reply_central(f"🔴 الحوالة {ref} مُلغاة مسبقًا.", raw.message_key, is_alert=True)
                 return
             # ملاحظة الإلغاء: تذكر التعديل السابق إن وُجد (§6) — «إلغاء {ref} — شامل تعديل سابق: …».
             note = self._cancellation_note(deal, ref)
@@ -1120,35 +1123,36 @@ class Pipeline:
           طرفين (بيع+شراء) → 🔴. WAITING/PARSED → تعديل مباشر بالـ DB. COMPLETED → قيد الفرق في MONEYADO."""
         if not raw.reply_to_key:
             await self.bus.reply_central(
-                "🔴 يجب التعديل عبر Reply على رسالة الحوالة الأصلية.", raw.message_key)
+                "🔴 يجب التعديل عبر Reply على رسالة الحوالة الأصلية.", raw.message_key, is_alert=True)
             return
         if amount is None:
             await self.bus.reply_central(
-                "🔴 التعديل يحتاج مبلغ، مثال: تعديل 9000", raw.message_key)
+                "🔴 التعديل يحتاج مبلغ، مثال: تعديل 9000", raw.message_key, is_alert=True)
             return
         deal = await self.db.deals.find_by_source_key(raw.reply_to_key)   # §3 قراءة عند التنفيذ
         if deal is None:
             await self.bus.reply_central(
-                "🔴 لم يُعثر على الحوالة المطلوب تعديلها.", raw.message_key)
+                "🔴 لم يُعثر على الحوالة المطلوب تعديلها.", raw.message_key, is_alert=True)
             return
         ref = self._ref(deal)
         if deal.status in (Status.CANCELLED, Status.CANCELLING):
             await self.bus.reply_central(
-                f"🔴 الحوالة {ref} مُلغاة، لا يمكن تعديلها.", raw.message_key)
+                f"🔴 الحوالة {ref} مُلغاة، لا يمكن تعديلها.", raw.message_key, is_alert=True)
             return
         if not within_cancellation_window(deal.created_at, now):
             await self.bus.reply_central(
                 f"🔴 الحوالة {ref} تجاوزت مدة التعديل المسموح بها "
-                f"({CANCELLATION_WINDOW_HOURS // 24} أيام).", raw.message_key)
+                f"({CANCELLATION_WINDOW_HOURS // 24} أيام).", raw.message_key, is_alert=True)
             return
         if deal.is_two_legged and deal.sell_leg is not None and deal.buy_leg is not None:
             await self.bus.reply_central(
                 "🔴 التعديل غير مدعوم لحوالات بيع+شراء — الرجاء الإلغاء ثم إرسال حوالة جديدة.",
-                raw.message_key)
+                raw.message_key, is_alert=True)
             return
         leg = deal.sell_leg or deal.buy_leg
         if leg is None or leg.amount is None:
-            await self.bus.reply_central(f"🔴 تعذّر تعديل {ref} (بلا مبلغ أصلي).", raw.message_key)
+            await self.bus.reply_central(f"🔴 تعذّر تعديل {ref} (بلا مبلغ أصلي).", raw.message_key,
+                                         is_alert=True)
             return
 
         current_net = leg.amount
@@ -1176,7 +1180,7 @@ class Pipeline:
             if not jobs:
                 await self.bus.reply_central(
                     f"🔴 لا فرق للتعديل — الحوالة {ref} مبلغها {self._amt(amount)} أصلًا.",
-                    raw.message_key)
+                    raw.message_key, is_alert=True)
                 return
             if not await self._execute_reversal_jobs(deal, jobs, now, "التعديل"):
                 return  # فشل الكتابة — صُعّد داخليًا

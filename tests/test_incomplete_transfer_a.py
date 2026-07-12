@@ -202,8 +202,11 @@ async def test_pipeline_warns_central_at_ninety_seconds(db):
 
     outs = await db.outgoing.next_unsent(100)
     central_warns = [o for o in outs
-                     if o["chat_jid"] == CENTRAL and "إكمال البيانات" in (o.get("text") or "")]
+                     if o["chat_jid"] == CENTRAL and "ناقص:" in (o.get("text") or "")]
     assert central_warns, "لم يصل التنبيه الخفيف للمركزية"
+    assert central_warns[0].get("is_alert") is True        # تنبيه حرج → يُعفى من warm-up
+    # HEADER_ONLY بلا كود/اسم/سعر/خزينة → كل الحقول ناقصة
+    assert "كود الزبون" in central_warns[0]["text"] and "الخزينة" in central_warns[0]["text"]
     assert not [o for o in outs if o["chat_jid"] == ADMIN]  # لا تصعيد بعد
     assert all(o["chat_jid"] in {CENTRAL, ADMIN} for o in outs)
 
@@ -240,7 +243,7 @@ async def test_pipeline_no_warn_when_completed_in_time(db):
 
     await pipe.tick(NOW + timedelta(seconds=95))
     outs = await db.outgoing.next_unsent(100)
-    assert not [o for o in outs if "إكمال البيانات" in (o.get("text") or "")]
+    assert not [o for o in outs if "ناقص:" in (o.get("text") or "")]
 
 
 # ═════════════════════════════════════════════════════════════════════════════

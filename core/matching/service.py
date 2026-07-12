@@ -409,7 +409,7 @@ class MatchingService:
 
         # التذكير الأول: «غير موجودة» في المركزية (§8.1 بند 5)
         if deal.reminders_sent == 0:
-            await self._bus.reply_central(self._not_found_text(deal), key)
+            await self._bus.reply_central(self._not_found_text(deal), key, is_alert=True)
             deal.reminders_sent = 1
             deal.last_reminder_at = now
             deal.status = Status.HELD
@@ -425,7 +425,7 @@ class MatchingService:
         # التذكير الثاني بعد 15 دقيقة (§8.1 بند 7)
         if deal.reminders_sent == 1:
             if since_last >= REMINDER_INTERVAL_SECONDS:
-                await self._bus.reply_central(self._not_found_text(deal, second=True), key)
+                await self._bus.reply_central(self._not_found_text(deal, second=True), key, is_alert=True)
                 deal.reminders_sent = 2
                 deal.last_reminder_at = now
                 log.info("الصفقة %s: تذكير «غير موجودة» ثانٍ", deal.deal_id)
@@ -449,7 +449,7 @@ class MatchingService:
         """
         # التنبيه لمرة واحدة (reminders_sent يميّز: 0 = لم يُنبَّه بعد)
         if deal.reminders_sent == 0:
-            await self._bus.reply_central(self._treasury_no_room_text(deal), key)
+            await self._bus.reply_central(self._treasury_no_room_text(deal), key, is_alert=True)
             deal.reminders_sent = 1
             deal.last_reminder_at = now
             deal.status = Status.HELD
@@ -478,7 +478,7 @@ class MatchingService:
         «تم» → تصعيد لغرفة المسؤول (ESCALATED). «تم» يُعالَج في Pipeline._handle_control.
         """
         if deal.reminders_sent == 0:
-            await self._bus.reply_central(self._supplier_no_room_text(deal), key)
+            await self._bus.reply_central(self._supplier_no_room_text(deal), key, is_alert=True)
             deal.reminders_sent = 1
             deal.last_reminder_at = now
             deal.status = Status.HELD
@@ -514,7 +514,7 @@ class MatchingService:
                 log.error("🔴 لا مفتاح رسالة للصفقة %s — تعذّر ⚠️", deal.deal_id)
                 return
             reason = deal.hold_reason or "شك — تحتاج مراجعة"
-            await self._bus.reply_central(f"⚠️ {reason}", key)
+            await self._bus.reply_central(f"⚠️ {reason}", key, is_alert=True)
             return
 
         # 🟡 على الأولى فقط؛ ✅/🔴 على كل الرسائل (§8.3)

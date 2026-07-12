@@ -106,6 +106,26 @@ def is_incomplete_first_message(leg: ParsedLeg | None) -> bool:
             and not normalize_ar(leg.recipient_name or ""))
 
 
+def missing_mandatory_fields(leg: ParsedLeg | None) -> list[str]:
+    """الحقول الإلزامية الغائبة عن الصفقة (لرسالة «ناقص: …» الديناميكية §تنبيهات). يفحص كل حقل
+    على حدة بنفس ما يعتبره الفهم/الحارس إلزاميًّا لإكمال الصفقة (كود+اسم+سعر+خزينة). لا يمسّ منطق
+    الـsweep — دالة عرض فقط. الاسم يُعدّ حاضرًا بـ customer_name أو recipient_name (§الصيغة التونسية)."""
+    labels = ["كود الزبون", "الاسم", "السعر", "الخزينة"]
+    if leg is None:
+        return labels
+    from ..matching.fuzzy import normalize_ar  # استيراد محليّ: تفادي دورة استيراد الحزمة
+    missing: list[str] = []
+    if not leg.customer_code:
+        missing.append("كود الزبون")
+    if not normalize_ar(leg.customer_name or "") and not normalize_ar(leg.recipient_name or ""):
+        missing.append("الاسم")
+    if not (leg.price_normalized or leg.price_raw):
+        missing.append("السعر")
+    if leg.treasury is None:
+        missing.append("الخزينة")
+    return missing
+
+
 class QueueService:
     """خدمة الطابور — تنسّق الالتقاط والتجميع والتصعيد وبناء أوامر الكتابة."""
 

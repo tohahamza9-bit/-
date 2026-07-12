@@ -118,14 +118,17 @@ class Bus:
             )
             raise OutputBlocked(f"وجهة ممنوعة: {chat_jid}")
 
-    async def reply(self, chat_jid: str, text: str, reply_to_key: Optional[str]) -> None:
-        """Reply على رسالة معيّنة بمفتاحها (§8.3) — لا رسائل «طايرة»، لا منشن @ (LID)."""
+    async def reply(self, chat_jid: str, text: str, reply_to_key: Optional[str],
+                    *, is_alert: bool = False) -> None:
+        """Reply على رسالة معيّنة بمفتاحها (§8.3) — لا رسائل «طايرة»، لا منشن @ (LID).
+        is_alert=True: تنبيه حرج يُعفى من سقف warm-up في الجسر (يصل فورًا)."""
         self._guard(chat_jid)
         await self._db.outgoing.enqueue(
-            OutgoingMessage(chat_jid=chat_jid, text=text, reply_to_key=reply_to_key)
+            OutgoingMessage(chat_jid=chat_jid, text=text, reply_to_key=reply_to_key, is_alert=is_alert)
         )
         self._poke_bridge()  # إشعار فوري (§8.3)
-        log.info("Reply → %s (ردًّا على %s): %s", chat_jid, reply_to_key, text[:80])
+        log.info("Reply → %s (ردًّا على %s)%s: %s", chat_jid, reply_to_key,
+                 " [تنبيه]" if is_alert else "", text[:80])
 
     async def react(self, chat_jid: str, message_key: str, emoji: str) -> None:
         """تفاعل صامت (🟡/✅/🔴) — مرآة للحالة فقط (§8.3). يُسمح فقط في المركزية.
@@ -147,18 +150,21 @@ class Bus:
         log.info("Reaction %s → %s على %s", emoji, chat_jid, message_key)
 
     # ── مساعدات وجهة صريحة (تمنع الأخطاء) ──
-    async def reply_central(self, text: str, reply_to_key: Optional[str]) -> None:
-        """تنبيه/تذكير في المركزية (Reply)."""
-        await self.reply(self.central_jid, text, reply_to_key)
+    async def reply_central(self, text: str, reply_to_key: Optional[str],
+                            *, is_alert: bool = False) -> None:
+        """تنبيه/تذكير في المركزية (Reply). is_alert=True للتنبيهات الحرجة (⚠️/🔴) — تُعفى من warm-up."""
+        await self.reply(self.central_jid, text, reply_to_key, is_alert=is_alert)
 
     async def notify_admin(
         self, text: str, reply_to_key: Optional[str] = None, forward_key: Optional[str] = None,
     ) -> None:
         """تصعيد لغرفة المسؤول (§8.1 §7.3 §10). forward_key: مفتاح الرسالة الأصلية لإعادة توجيهها
-        (forward) مع التنبيه — يُستعمَل عند فشل الصفقة كي يرى المسؤول الحوالة نفسها (§8.3)."""
+        (forward) مع التنبيه — يُستعمَل عند فشل الصفقة كي يرى المسؤول الحوالة نفسها (§8.3).
+        🔴 كل تصعيدات المسؤول تنبيهات حرجة (is_alert=True) — تُعفى من warm-up فتصل فورًا."""
         self._guard(self.admin_jid)
         await self._db.outgoing.enqueue(OutgoingMessage(
-            chat_jid=self.admin_jid, text=text, reply_to_key=reply_to_key, forward_key=forward_key,
+            chat_jid=self.admin_jid, text=text, reply_to_key=reply_to_key,
+            forward_key=forward_key, is_alert=True,
         ))
         self._poke_bridge()  # إشعار فوري (§8.3)
         log.info("تصعيد للمسؤول%s: %s", " (+forward)" if forward_key else "", text[:80])
