@@ -328,26 +328,27 @@ class Pipeline:
         suppliers = await self.db.suppliers.all_active()
         result = parse_message(raw.text, treasuries, suppliers)
 
-        # ═══ خانة المُرسِل (Sender Slot §7.3) — المسار الأساسيّ لربط الرسالة الثانية ═══
-        # جزء ثانٍ من نفس المُرسِل خلال SENDER_SLOT_WINDOW ثوانٍ → يُربَط بخانته حتمًا، بلا تخمين
-        # ref/عملة/تجاور. SI لا تدخل هنا إطلاقًا (لا تفتح خانة ولا تملؤها §4.5). لا خانة أو تعذّر
-        # الدمج → يسقط للمسار القديم (try_absorb_*/الردود المعلّقة) كـ fallback (قرار المستخدم).
+        # ═══ ربط الرسالة الثانية — حتميّ بطبقتين (§7.3، بلا قرب/تجاور/تصعيد) ═══
+        # الطبقة ١ (مرجع صريح): الرسالة تحمل ref يطابق صفقة منتظِرة → تُربَط به مباشرة (الشكل الجديد،
+        #   المرجع مكرّر في الرسالتين). الطبقة ٢ (FIFO): بلا ref → أقدم صفقة منتظِرة لنفس المُرسِل (أول
+        #   فتح أول قفل). SI لا تدخل هنا (§4.5). الهدف يُشتقّ من الصفقات (مصدر الحقيقة)، لا من خانة مفردة.
+        #   absorb_second_into يُرجِع None لو لم تكن الرسالة جزءًا مكمّلاً (حوالة أولى جديدة) → يسقط للتالي.
         if raw.sender_jid and not (result.leg is not None and result.leg.is_si_format):
-            slot = await self.db.sender_slots.find_open(raw.chat_jid, raw.sender_jid, now)
-            if slot is not None:
-                target = await self.db.deals.get(slot["deal_id"])
-                if target is not None and target.status == Status.WAITING_SECOND_LEG:
-                    absorbed = await self.queue.absorb_second_into(
-                        target, raw, now, treasuries, suppliers)
-                    if absorbed is not None:
-                        merged, _immediate = absorbed   # المعالجة مؤجَّلة للفرز — لا حاجة للعلَم هنا
-                        await self.db.sender_slots.fill(raw.chat_jid, raw.sender_jid)
-                        log.info("خانة المُرسِل: رُبطت الرسالة الثانية %s بالصفقة %s (نفس المُرسِل)",
-                                 raw.message_key, merged.deal_id)
-                        # المعالجة الفعلية تؤجَّل لفرز الدفعة بـ first_received_at (§7.3): الاكتمال
-                        # الكامل يصير جاهزًا (_ready_to_write_now) فيُكتب مرتّبًا بوصول أولاه؛ الجزء
-                        # المكمّل الناقص يبقى لنبضة tick — مطابقةً للسلوك القديم، بلا كتابة مبكرة.
-                        return merged
+            inc_ref = result.leg.reference_number if result.leg is not None else None
+            if inc_ref:                                    # الطبقة ١ — بالمرجع حصرًا
+                target = await self.queue.waiting_by_reference(raw.chat_jid, inc_ref, now)
+            else:                                          # الطبقة ٢ — FIFO لنفس المُرسِل (حسب نوع الرسالة)
+                frag2 = parse_completion_fragment(raw.text, treasuries, suppliers)
+                target = await self.queue.oldest_waiting_for_sender(
+                    raw.chat_jid, raw.sender_jid, now, frag2)
+            if target is not None and target.status == Status.WAITING_SECOND_LEG:
+                absorbed = await self.queue.absorb_second_into(
+                    target, raw, now, treasuries, suppliers)
+                if absorbed is not None:
+                    merged, _immediate = absorbed   # المعالجة مؤجَّلة للفرز — لا حاجة للعلَم هنا
+                    log.info("ربط الرسالة الثانية %s بالصفقة %s (%s)", raw.message_key,
+                             merged.deal_id, "مرجع" if inc_ref else "FIFO مُرسِل")
+                    return merged
 
         # 🔴 ربط الرسالة الثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون ثم مورد §7.3) بصفقة معلّقة
         #    في نفس الغرفة خلال النافذة — **قبل التصنيف** كي لا تُسقَط noise/خارج-النطاق. لو نجح الربط
@@ -402,39 +403,11 @@ class Pipeline:
                 # 🔴 الرسالة الثانية تُعاد قراءتها بـ pattern-fishing (لا سطرًا-بسطر) — أمتن
                 #    للصيغ المتنوّعة (الكود آخر السطر، السعر بسطر مستقلّ…) — تلتقط كود/اسم/سعر/خزينة.
                 frag = parse_completion_fragment(raw.text, treasuries, suppliers)
-                frag.sender_jid = raw.sender_jid          # مُرسِل الرد (يُفضَّل ربطه بصفقة نفس المُرسِل §7.3)
-                frag.source_message_key = raw.message_key  # لقاعدة التجاور (آخر رسالة معالَجة قبلها)
-                # 🔴 تعدّد الصفقات المعلّقة المطابقة (بعد ref/مُرسِل/عملة) = التباس → تصعيد بلا تخمين
-                #    (§0). كان «الأحدث يفوز» يُدخِل حوالة خاطئة عند الدفعات المتزامنة (حادثة A8667).
-                cands = await self.queue.fragment_link_candidates(raw.chat_jid, now, frag)
-                if len(cands) > 1:
-                    await self.bus.notify_admin(
-                        f"⚠️ رسالة ثانية بلا رقم إشاري + تعدّد صفقات معلّقة ({len(cands)}) في الغرفة "
-                        f"— تعذّر الربط الآمن؛ مراجعة يدوية: {(raw.text or '').strip()[:60]}",
-                        raw.message_key,
-                    )
-                    log.warning("رسالة ثانية (fragment) + تعدّد معلّقات (%d) — تصعيد بلا تخمين (§0).",
-                                len(cands))
-                    return None
-                # 🔴 قاعدة التجاور (§7.3): المرشّح الوحيد المطابق عملةً/مُرسِلًا لكن **ليس جار** الرسالة
-                #    الثانية (تخلّلتهما رسالة أخرى) → الأولى فقدت حقّ الربط → 🔴 **فورًا** + تصعيد (لا
-                #    انتظار 15د)، فلا تُدخَل الثانية في صفقة ليست جارتها.
-                if len(cands) == 1 and not await self.queue.adjacent_candidates(
-                    raw.chat_jid, frag, cands
-                ):
-                    blocked = cands[0]
-                    blocked.status = Status.ESCALATED
-                    blocked.mark = Mark.FAILED
-                    blocked.hold_reason = "رسالة متداخلة بين الأولى والثانية — تعذّر الربط (§7.3)"
-                    await self.db.deals.upsert(blocked)
-                    await self.matcher.apply_mark(blocked, Mark.FAILED)   # 🔴 على المركزية (§8.3)
-                    await self.bus.notify_admin(
-                        f"🔴 {self._ref(blocked)} — رسالة متداخلة بين الأولى والثانية، تعذّر الربط؛ مراجعة.",
-                        self._deal_key(blocked), forward_key=self._deal_key(blocked),
-                    )
-                    log.warning("قاعدة التجاور: صفقة %s فقدت حقّ الربط (رسالة متداخلة) → 🔴 فوريّ (§7.3)",
-                                blocked.deal_id)
-                    return None
+                frag.sender_jid = raw.sender_jid          # مُرسِل الرد (لربطه بصفقة نفس المُرسِل §7.3)
+                frag.source_message_key = raw.message_key
+                # ربط حتميّ (§7.3، بلا تجاور/تصعيد): مرجع صريح → بالمرجع؛ وإلا → أقدم صفقة مطابِقة FIFO
+                #    (absorb_fragment → _find_recent_waiting). fallback حين لا تلتقطه طبقتا خانة المُرسِل
+                #    (رد وصل قبل حوالته/عبر مُرسِل مختلف). تعدّد المرشّحين يُحسَم بالأقدم لا بالتصعيد.
                 return await self.queue.absorb_fragment(
                     frag, raw.chat_jid, raw.message_key, now
                 )

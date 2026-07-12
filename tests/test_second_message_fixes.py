@@ -446,21 +446,23 @@ async def test_fragment_no_link_to_escalated_deal(db):
     assert await svc._find_recent_waiting(CENTRAL, NOW, frag) is None   # لا ربط بمُصعَّدة
 
 
-async def test_fragment_ambiguous_multiple_pending_no_guess(db):
-    """تعدّد معلّقات مطابقة (نفس العملة، بلا مُرسِل مميّز، بلا ref) → التباس: لا تخمين (None)."""
+async def test_fragment_multiple_pending_links_oldest_fifo(db):
+    """تعدّد معلّقات مطابقة (نفس العملة، بلا ref) → **FIFO**: تُربَط بالأقدم (استُبدل «التباس→None»
+    بالحسم بالأقدم — أول فتح أول قفل §7.3)."""
     from core.constants import Currency
     from core.models import Deal
     svc = QueueService(db)
     a = ParsedLeg(operation=OperationType.SELL, reference_number="A400", amount=1000.0, currency=Currency.EGP)
     b = ParsedLeg(operation=OperationType.SELL, reference_number="A401", amount=2000.0, currency=Currency.EGP)
-    await db.deals.upsert(Deal(deal_id="dA", status=Status.WAITING_SECOND_LEG,
+    await db.deals.upsert(Deal(deal_id="dA", status=Status.WAITING_SECOND_LEG,       # الأقدم (40s)
         created_at=NOW - timedelta(seconds=40), updated_at=NOW, chat_jid=CENTRAL, sell_leg=a))
-    await db.deals.upsert(Deal(deal_id="dB", status=Status.WAITING_SECOND_LEG,
+    await db.deals.upsert(Deal(deal_id="dB", status=Status.WAITING_SECOND_LEG,       # الأحدث (10s)
         created_at=NOW - timedelta(seconds=10), updated_at=NOW, chat_jid=CENTRAL, sell_leg=b))
     frag = ParsedLeg(operation=OperationType.SELL, currency=Currency.EGP)   # بلا ref، بلا مُرسِل
     cands = await svc.fragment_link_candidates(CENTRAL, NOW, frag)
-    assert len(cands) == 2                                  # التباس: مرشّحان
-    assert await svc._find_recent_waiting(CENTRAL, NOW, frag) is None   # لا تخمين
+    assert len(cands) == 2                                  # مرشّحان
+    picked = await svc._find_recent_waiting(CENTRAL, NOW, frag)
+    assert picked is not None and picked.deal_id == "dA"   # FIFO → الأقدم dA (لا تصعيد)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -545,7 +547,7 @@ async def test_pending_reply_not_pulled_into_mismatched_currency(db):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# قاعدة التجاور (§7.3): الثانية تُربَط فقط إن كانت السابقة مباشرةً من نفس الصفقة
+# FIFO (§7.3، استبدل التجاور): الرسالة المتخلّلة لا تمنع الربط — يُحسَم بالأقدم لا بالتجاور
 # ═════════════════════════════════════════════════════════════════════════════
 async def _seed_adjacency(db, mid_text=None):
     """صفقة A (EGP) رسالتها m1، ثم رسالة خام m1 (معالَجة) + (اختياري) رسالة متخلّلة mid، ثم m2."""
@@ -578,29 +580,31 @@ async def test_adjacency_links_when_second_directly_follows_first(db):
     assert picked is not None and picked.deal_id == "dA"        # السابقة m1 من نفس الصفقة → ربط
 
 
-async def test_adjacency_blocks_link_across_intervening_message(db):
-    """رسالة أخرى «A2» بين الأولى والثانية → الثانية لا تُربَط بالصفقة A (السابقة ليست منها §7.3)."""
+async def test_fifo_links_despite_intervening_message(db):
+    """رسالة أخرى «A2» متخلّلة **لا تمنع** الربط (استُبدل التجاور بـFIFO §7.3): الثانية تُربَط بأقدم
+    صفقة منتظِرة مطابِقة (dA) بصرف النظر عن الرسالة المتخلّلة."""
     from core.parsing.parser import parse_completion_fragment
     svc = QueueService(db)
     await _seed_adjacency(db, mid_text="A2\nمصر\n5000 ج م")     # حوالة مختلفة متخلّلة
     frag = parse_completion_fragment("بلاس فون", await _treas(db), [])
     frag.source_message_key = "m2"
-    assert await svc._find_recent_waiting(CENTRAL, NOW, frag) is None   # السابقة «mid» ليست من dA
+    picked = await svc._find_recent_waiting(CENTRAL, NOW, frag)
+    assert picked is not None and picked.deal_id == "dA"       # FIFO يربط رغم المتخلّلة (لا حجب)
 
 
-async def test_adjacency_block_escalates_first_immediately(db):
-    """رسالة متداخلة بين الأولى والثانية → الصفقة الأولى تأخذ 🔴 فورًا وتُصعَّد (لا انتظار 15د §7.3)."""
-    from core.constants import Mark
+async def test_fifo_intervening_links_not_escalate(db):
+    """رسالة متخلّلة → الثانية تُربَط عبر FIFO (PARSED)، **لا تصعيد 🔴** (استُبدل التجاور §7.3)."""
     pipe = _pipeline(db)
     await _seed_adjacency(db, mid_text="A2\nمصر\n5000 ج م")          # حوالة متخلّلة
     raw2 = RawMessage(message_key="m2", chat_jid=CENTRAL, sender_jid="e",
                       text="بلاس فون", received_at=NOW)
     await pipe._ingest(raw2, NOW)
     dA = await db.deals.get("dA")
-    assert dA.status == Status.ESCALATED and dA.mark == Mark.FAILED  # 🔴 فوريّ
-    # تفاعل 🔴 على رسالة المركزية «m1»
+    assert dA.status == Status.PARSED                               # رُبطت عبر FIFO (لا تصعيد)
+    assert dA.sell_leg.treasury is not None                        # أُكملت الخزينة
+    # لا تفاعل 🔴 على m1
     outs = await db.outgoing.next_unsent(50)
-    assert any(o.get("reaction") == Mark.FAILED.value and o["reply_to_key"] == "m1" for o in outs)
+    assert not any(o.get("reaction") == "🔴" for o in outs)
 
 
 async def test_adjacency_no_intervening_absorbs_not_escalates(db):

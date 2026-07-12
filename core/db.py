@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -494,6 +495,43 @@ class PendingReplyRepo(_Repo):
             if _naive_utc(d["received_at"]) >= horizon:
                 d.pop("_id", None)
                 return d
+        return None
+
+    async def find_by_reference(self, chat_jid: str, ref: str, now: datetime,
+                                within_seconds: int) -> Optional[dict]:
+        """الطبقة ١ (§7.3): **أقدم** ردّ معلّق غير مُستهلَك يحمل نفس الرقم الإشاريّ (حسم بالمرجع، بلا
+        قرب). يمنع سحب ردّ لمرجع مختلف."""
+        if not ref:
+            return None
+        nref = re.sub(r"\s+", "", ref).upper()
+        horizon = _naive_utc(now) - timedelta(seconds=within_seconds)
+        cur = self.col.find({"chat_jid": chat_jid, "consumed": False}).sort("received_at", 1)
+        async for d in cur:
+            if _naive_utc(d["received_at"]) < horizon:
+                continue
+            pref = re.sub(r"\s+", "", (d.get("leg") or {}).get("reference_number") or "").upper()
+            if pref and pref == nref:
+                d.pop("_id", None)
+                return d
+        return None
+
+    async def find_fifo_for_sender(self, chat_jid: str, sender_jid: Optional[str], now: datetime,
+                                   within_seconds: int) -> Optional[dict]:
+        """الطبقة ٢ (FIFO §7.3): **أقدم** ردّ معلّق **عديم المرجع** لنفس المُرسِل (received_at تصاعديًّا)
+        — أول فتح أول قفل. الردّ ذو المرجع يُسحَب بالطبقة ١ حصرًا فلا يُلتقط هنا."""
+        horizon = _naive_utc(now) - timedelta(seconds=within_seconds)
+        cur = self.col.find({"chat_jid": chat_jid, "consumed": False}).sort("received_at", 1)
+        async for d in cur:
+            if _naive_utc(d["received_at"]) < horizon:
+                continue
+            leg = d.get("leg") or {}
+            if (leg.get("reference_number") or "").strip():
+                continue                                   # ذو مرجع → للطبقة ١ لا FIFO
+            psender = leg.get("sender_jid")
+            if sender_jid and psender and psender != sender_jid:
+                continue                                   # مُرسِل مختلف → تخطَّ
+            d.pop("_id", None)
+            return d
         return None
 
     async def consume(self, message_key: str) -> None:

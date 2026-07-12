@@ -29,7 +29,7 @@ from ..parsing import extract_code_name_price_lines, parse_completion_fragment, 
 from ..parsing.normalize import normalize_price
 from ..parsing.resolve import resolve_treasury
 from .commission import compute_commission
-from .grouping import _norm_ref, compute_grouping_key, discount_pair
+from .grouping import _is_discount_identity_leg, _norm_ref, compute_grouping_key, discount_pair
 
 log = get_logger(__name__)
 
@@ -625,58 +625,90 @@ class QueueService:
         ]
         if not candidates:
             return []
-        # (١) رقم إشاري صريح → طابِق بالـref حصرًا (لا تخمين زمنيّ)
+        # (الطبقة ١) رقم إشاري صريح → طابِق بالـref حصرًا (يشمل تسوية الخصم لصفقة ذات هوية بلا خزينة)
         frag_ref = _norm_ref(frag.reference_number) if frag is not None and frag.reference_number else None
         if frag_ref:
             return [
                 d for d in candidates
                 if d.sell_leg is not None and _norm_ref(d.sell_leg.reference_number) == frag_ref
             ]
-        # (٢) بلا ref: نفس المُرسِل يميّز إن وُجد مطابق (العملة مُطبَّقة أعلاه)
+        # (الطبقة ٢) بلا ref: الرسالة الثانية تحمل الهوية → تخصّ صفقةً **ناقصة الهوية** فقط (لا صفقة
+        #   ذات هوية تنتظر تسوية مرجعها). ثم نفس المُرسِل يميّز إن وُجد، والترتيب تصاعديّ (FIFO الأقدم).
+        awaiting = [d for d in candidates if self._fragment_targets(d, frag)]
         sender = frag.sender_jid if frag is not None else None
         if sender:
-            same_sender = [d for d in candidates if self._leg_sender(d) == sender]
+            same_sender = [d for d in awaiting if self._leg_sender(d) == sender]
             if same_sender:
                 return same_sender
-        return candidates
+        return awaiting
 
     async def _find_recent_waiting(
         self, chat_jid: str | None, now: datetime, frag: ParsedLeg | None = None,
     ) -> Deal | None:
-        """الصفقة المعلّقة **الوحيدة** المطابِقة للرسالة الثانية (§7.3). لا شيء أو التباس (>1) → None
-        (لا تخمين §0 — الأنبوب يُصعّد التعدّد عبر fragment_link_candidates قبل الوصول هنا).
+        """الصفقة المطابِقة للرسالة الثانية (§7.3 — تصميم حتميّ بطبقتين، بلا تجاور ولا تصعيد):
 
-        🔴 قاعدة التجاور (§7.3): تُربَط الثانية فقط بالصفقة التي رسالتها هي **السابقة مباشرةً** في
-        الغرفة. لو تخلّلت رسالةٌ أخرى (حوالة مختلفة/SI) بين الأولى والثانية → لا ربط (تبقى الأولى
-        معلّقة لتُصعَّد). يمنع التصاق الثانية بصفقة ليست جارتها عند تداخل الدفعات."""
+        • **الطبقة ١ (مرجع صريح):** الرسالة الثانية فيها ref → الصفقة ذات المرجع نفسه (fragment_link_candidates
+          يُصفّي بالـref حصرًا)، بلا اعتبار للقرب/المُرسِل.
+        • **الطبقة ٢ (FIFO):** بلا ref → **أقدم** صفقة مطابِقة (عملة + مُرسِل) لنفس المُرسِل — أول فتح أول
+          قفل، يعكس عمل الموظف (رسالتان متتاليتان ثم ينتقل). لا التباس→None: التعدّد يُحسَم بالأقدم.
+
+        fragment_link_candidates تُرجِع المرشّحين مرتّبين بـcreated_at تصاعديًّا (waiting_in_room)،
+        فأوّلهم = الأقدم = هدف FIFO الصحيح. (استُبدلت آلية التجاور بالكامل بـFIFO — أحسم لنفس الهدف §0.)"""
         cands = await self.fragment_link_candidates(chat_jid, now, frag)
-        if not cands:
-            return None
-        cands = await self.adjacent_candidates(chat_jid, frag, cands)
-        return cands[0] if len(cands) == 1 else None
+        return cands[0] if cands else None
 
-    async def adjacent_candidates(
-        self, chat_jid: str | None, frag: ParsedLeg | None, cands: list[Deal]
-    ) -> list[Deal]:
-        """يُبقي المرشّح الذي رسالته هي **السابقة مباشرةً** للرسالة الثانية في الغرفة (§7.3). إن كانت
-        الرسالة السابقة من صفقة أخرى (أو ليست من أيّ مرشّح) → [] (لا ربط). بلا رسالة سابقة/تتبّع → بلا قيد."""
-        key = frag.source_message_key if frag is not None else None
-        if not key or not chat_jid:
-            return cands
-        cur = await self.db.raw.get(key)
-        if cur is None:
-            return cands
-        prev = await self.db.raw.last_processed_before(chat_jid, cur.received_at)
-        if prev is None:
-            return cands
-        owner = next((c for c in cands if prev.message_key in c.source_message_keys), None)
-        return [owner] if owner is not None else []
+    async def waiting_by_reference(self, chat_jid: str | None, ref: str | None,
+                                   now: datetime) -> Deal | None:
+        """الطبقة ١ (مرجع صريح §7.3): أقدم صفقة منتظِرة تحتاج إكمالاً بنفس الرقم الإشاري — بلا أي
+        اعتبار للقرب/المُرسِل/الزمن. حسم فوريّ للشكل الجديد (المرجع مكرّر في الرسالتين)."""
+        nref = _norm_ref(ref)
+        if not chat_jid or not nref:
+            return None
+        max_age = _as_naive_utc(now) - timedelta(seconds=INCOMPLETE_DATA_ESCALATE_SECONDS)
+        for d in await self.db.deals.waiting_in_room(chat_jid):   # مرتّبة created_at تصاعديًّا
+            if not self._needs_completion(d) or _as_naive_utc(d.created_at) < max_age:
+                continue
+            leg = d.sell_leg or d.buy_leg
+            if leg is not None and _norm_ref(leg.reference_number) == nref:
+                return d
+        return None
+
+    async def oldest_waiting_for_sender(self, chat_jid: str | None, sender_jid: str | None,
+                                        now: datetime, frag: ParsedLeg | None = None) -> Deal | None:
+        """الطبقة ٢ (FIFO §7.3): **أقدم** صفقة منتظِرة لنفس المُرسِل هي هدف صالح للرسالة الثانية `frag`
+        (حسب _fragment_targets) ضمن نافذة الربط — أول فتح أول قفل. حتميّ بلا قرب/تجاور/تصعيد
+        (يعكس عمل الموظف: رسالتان متتاليتان ثم التالية)."""
+        if not chat_jid or not sender_jid:
+            return None
+        horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        for d in await self.db.deals.waiting_in_room(chat_jid):   # ASC = FIFO (الأقدم أولًا)
+            if _as_naive_utc(d.created_at) < horizon:
+                continue
+            if self._fragment_targets(d, frag) and self._leg_sender(d) == sender_jid:
+                return d
+        return None
 
     async def _pull_pending_reply(self, deal: Deal, chat_jid: str | None, now: datetime) -> bool:
-        """رد معلّق سابق في نفس الغرفة يُكمِّل هذه الصفقة الجديدة (Fix 2). يُرجع True إن اكتملت."""
+        """رد معلّق سابق (الرسالة الثانية وصلت قبل الأولى) يُكمِّل هذه الصفقة الجديدة (Fix 2 + تصميم FIFO).
+        يُرجع True إن اكتملت. القواعد الحتمية:
+          • **الطبقة ١:** صفقة ذات مرجع → تسحب فقط ردًّا معلّقًا **مطابقًا لمرجعها** (لا رد لمرجع مختلف).
+          • **الطبقة ٢:** صفقة ناقصة الهوية (is_incomplete) بلا مرجع مطابق → تسحب **أقدم** ردّ عديم‑مرجع
+            لنفس المُرسِل (FIFO). صفقة **ذات هوية** (كود) بلا خزينة لا تسحب عديم‑المرجع إطلاقًا —
+            تنتظر تسوية مرجعها (يُصلح A9015: تنتظر msg2 فيُحتَسَب الخصم عبر discount_pair)."""
         if not chat_jid:
             return False
-        doc = await self.db.pending_replies.find_recent(chat_jid, now, PENDING_REPLY_MAX_SECONDS)
+        leg0 = deal.sell_leg or deal.buy_leg
+        ref = _norm_ref(leg0.reference_number) if leg0 is not None else ""
+        sender = self._leg_sender(deal)
+        # الطبقة ١: ردّ معلّق بمرجع الصفقة نفسه (أولوية قصوى، بلا قرب)
+        doc = await self.db.pending_replies.find_by_reference(chat_jid, ref, now, PENDING_REPLY_MAX_SECONDS) if ref else None
+        # الطبقة ٢: ردّ معلّق عديم‑مرجع لنفس المُرسِل (FIFO) — يُقبَل فقط إن كان هدفًا صالحًا للصفقة
+        #   (frag يحمل هوية → لصفقة بلا كود؛ frag خزينة فقط → لصفقة تنتظر خزينة). يمنع سحب هوية خاطئة.
+        if doc is None:
+            cand = await self.db.pending_replies.find_fifo_for_sender(
+                chat_jid, sender, now, PENDING_REPLY_MAX_SECONDS)
+            if cand is not None and self._fragment_targets(deal, ParsedLeg(**cand["leg"])):
+                doc = cand
         if doc is None:
             return False
         frag = ParsedLeg(**doc["leg"])
@@ -695,6 +727,24 @@ class QueueService:
         await self.db.pending_replies.consume(mk)
         log.info("رُبط الرد المعلّق %s بالصفقة الجديدة %s", mk, deal.deal_id)
         return True
+
+    @classmethod
+    def _fragment_targets(cls, deal: Deal, frag: ParsedLeg | None) -> bool:
+        """هل الصفقة هدف صالح لرسالة ثانية **عديمة‑المرجع** `frag` (§7.3، الطبقة ٢)؟ القرار حسب نوع
+        الرسالة الثانية (يمنع تلوّث A9015):
+          • frag **يحمل كودًا** (هوية: «كود اسم سعر / خزينة») → يخصّ صفقةً **بلا كود** (يجلب الهوية)؛
+            صفقة ذات كود لا تبتلعه أبدًا (كودها 1284 لا يُستبدَل بكود fragment آخر).
+          • frag **بلا كود** (خزينة فقط «بلس»/«صافي») → يخصّ أي صفقة تنتظر **خزينة** (بلا خزينة)."""
+        if not cls._needs_completion(deal):
+            return False
+        leg = deal.sell_leg or deal.buy_leg
+        if leg is None:
+            return False
+        # «يحمل هوية» = كود أو اسم زبون (بعض الأكواد أحاديّة الرقم تُفوَّت لكن الاسم يُلتقَط).
+        frag_has_identity = frag is not None and bool(frag.customer_code or (frag.customer_name or "").strip())
+        if frag_has_identity:
+            return not leg.customer_code          # هوية → لصفقة بلا كود حصرًا (يمنع تلوّث A9015)
+        return leg.treasury is None               # خزينة فقط («بلس») → لصفقة تنتظر خزينة
 
     @staticmethod
     def _needs_completion(deal: Deal) -> bool:
