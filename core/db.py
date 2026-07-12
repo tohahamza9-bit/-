@@ -226,6 +226,15 @@ class DealRepo(_Repo):
         payload = {"status": status.value, "updated_at": utcnow(), **fields}
         await self.col.update_one({"deal_id": deal_id}, {"$set": payload})
 
+    async def begin_cancelling(self, deal_id: str) -> bool:
+        """انتقال ذرّي COMPLETED → CANCELLING (ميزة الإلغاء): يمنع الإلغاء المزدوج المتزامن —
+        الفلتر يشترط الحالة الحالية completed، فينجح واحد فقط. يُرجع True إن نجح الانتقال."""
+        res = await self.col.update_one(
+            {"deal_id": deal_id, "status": Status.COMPLETED.value},
+            {"$set": {"status": Status.CANCELLING.value, "updated_at": utcnow()}},
+        )
+        return res.modified_count == 1
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3) الدفتر — منع التكرار (§9) — Append-only (§10)

@@ -146,6 +146,10 @@ class Deal(BaseModel):
     last_reminder_at: Optional[datetime] = None
     # حوالة A ناقصة (§7.3): أُرسِل تنبيه «أكمل البيانات» الخفيف في المركزية؟ (منع تكراره كل نبضة)
     incomplete_warned: bool = False
+    # الإلغاء عبر Reply (ميزة الإلغاء): متى/بأي رسالة أُلغيت + السبب الإضافيّ إن وُجد
+    cancelled_at: Optional[datetime] = None
+    cancelled_by_key: Optional[str] = None     # مفتاح رسالة الإلغاء (من عمل Reply)
+    cancellation_reason: Optional[str] = None  # النص الإضافيّ بعد كلمة الإلغاء إن وُجد
     # التتبّع
     source_message_keys: list[str] = Field(default_factory=list)
 

@@ -19,8 +19,14 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .bus import Bus
+from .cancellation import (
+    build_cancellation_jobs,
+    detect_cancellation,
+    within_cancellation_window,
+)
 from .constants import (
     BATCH_PAIR_SECONDS,
+    CANCELLATION_WINDOW_HOURS,
     INCOMPLETE_DATA_ESCALATE_SECONDS,
     SENDER_SLOT_WINDOW_SECONDS,
     Currency,
@@ -148,6 +154,9 @@ class Pipeline:
             #    يُستثنى من الحجب: ردود التحكّم/الإكمال (إجراءات فورية على صفقات قائمة)، وحوالة SI
             #    المكتملة (مستقلّة برسالة واحدة §4.5 — لا تفتح خانة مُرسِل ولا تملؤها) → تنزل فور استقرارها.
             blocked_senders: set[str] = set()
+            # ميزة الإلغاء (§10 نسخة نهائية): تُجمَع رسائل الإلغاء وتُنفَّذ **بعد** فرز/كتابة الدفعة —
+            # فيُسجَّل البيع أولًا ثم يُلغى (لا تتقدّم على أحد). معزولة: تتخطّى _ingest كليًّا.
+            cancellations: list[RawMessage] = []
             batch = await self.db.raw.unprocessed()
             for raw in batch:
                 # 🔴 استرجاع بعد الإطفاء (§12): رسالة عمرها > 15 دقيقة (INCOMPLETE_DATA_ESCALATE_SECONDS)
@@ -156,6 +165,14 @@ class Pipeline:
                 age = (_as_naive_utc(now) - _as_naive_utc(raw.received_at)).total_seconds()
                 if age > INCOMPLETE_DATA_ESCALATE_SECONDS:
                     log.info("تخطٍّ نهائيّ (رسالة أقدم من 15د — استرجاع §12): %s", raw.message_key)
+                    await self.db.raw.mark_processed(raw.message_key)
+                    continue
+                # ═══ ميزة الإلغاء عبر Reply — اعتراض معزول قبل _ingest ═══
+                # رسالة إلغاء في المركزية (كلمة إلغاء ككلمة كاملة) → تُجمَع للتنفيذ بعد الدفعة، ولا
+                # تدخل _ingest إطلاقًا (لا تفتح خانة مُرسِل، لا تكمل معلّقة، لا تُعامَل حوالةً). محصورة
+                # بالمركزية فلا تمسّ رسائل الغرف الأخرى (مصدر مطابقة صامت). لا يتأثّر أيّ مسار آخر.
+                if raw.chat_jid == self.bus.central_jid and detect_cancellation(raw.text) is not None:
+                    cancellations.append(raw)
                     await self.db.raw.mark_processed(raw.message_key)
                     continue
                 # رسائل التحكّم (Reply: إلغاء/تعديل/تصحيح/تم) إجراءات مكتملة متعمّدة — تُعالَج فورًا،
@@ -208,6 +225,13 @@ class Pipeline:
             processed: list[Deal] = []
             for deal in to_process:
                 processed.append(await self.process_deal(deal, now))
+
+            # ميزة الإلغاء: تُنفَّذ **بعد** كتابة كل صفقات الدفعة (فالبيع مسجَّل أولًا)، بترتيب وصولها.
+            for raw in sorted(cancellations, key=lambda r: _as_naive_utc(r.received_at)):
+                try:
+                    await self._handle_cancellation(raw, now)
+                except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل (الطابور لا يتوقّف)
+                    log.exception("فشل إلغاء الحوالة %s: %s", raw.message_key, exc)
             return processed
 
     @staticmethod
@@ -935,6 +959,119 @@ class Pipeline:
         if action == "cancel":
             await self.db.deals.set_status(original.deal_id, Status.CANCELLED)
         log.info("نُفّذ «%s» للصفقة %s بـ %d قيد عكسي", action, original.deal_id, len(jobs))
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # ميزة الإلغاء عبر Reply (§10 نسخة نهائية) — مسار معزول تمامًا عن باقي المسارات
+    # ═════════════════════════════════════════════════════════════════════════
+    async def _handle_cancellation(self, raw: RawMessage, now: datetime) -> None:
+        """يُلغي حوالة بـ Reply عليها (كلمة إلغاء). معزول: لا يمسّ _ingest ولا مسارات الربط.
+
+        - بلا Reply → 🔴 «يجب الإلغاء عبر Reply».            - لم تُوجد → 🔴.
+        - ملغاة مسبقًا → 🔴 (حالة نهائية، لا استرجاع).       - > 96س (توقيت ليبيا) → 🔴.
+        - WAITING/PARSED (لم تُكتب) → إلغاء بلا MONEYADO.    - COMPLETED → قيد عكسي في MONEYADO.
+        لا فحص للمُرسِل: أيّ شخص في المركزية يقدر يُلغي (استثناء خاص بالإلغاء فقط)."""
+        reason = detect_cancellation(raw.text) or ""
+        # (أ) لا Reply → إرشاد صريح للموظف (لا هدرزة صامتة)
+        if not raw.reply_to_key:
+            await self.bus.reply_central(
+                "🔴 يجب الإلغاء عبر Reply على رسالة الحوالة الأصلية.", raw.message_key)
+            return
+        # (ب) ابحث عن الصفقة بمفتاح الرسالة المُردود عليها ضمن source_message_keys
+        deal = await self.db.deals.find_by_source_key(raw.reply_to_key)
+        if deal is None:
+            await self.bus.reply_central(
+                "🔴 لم يُعثر على الحوالة المطلوب إلغاؤها.", raw.message_key)
+            return
+        ref = self._ref(deal)
+        # (ج) ملغاة مسبقًا (يشمل إلغاء إلغاء) → حالة نهائية، لا استرجاع
+        if deal.status in (Status.CANCELLED, Status.CANCELLING):
+            await self.bus.reply_central(f"🔴 الحوالة {ref} مُلغاة مسبقًا.", raw.message_key)
+            return
+        # (د) نافذة الإلغاء: عمر الصفقة من created_at بتوقيت ليبيا (UTC+2) ≤ 96 ساعة
+        if not within_cancellation_window(deal.created_at, now):
+            await self.bus.reply_central(
+                f"🔴 الحوالة {ref} تجاوزت مدة الإلغاء المسموح بها "
+                f"({CANCELLATION_WINDOW_HOURS // 24} أيام).", raw.message_key)
+            return
+        # (هـ) لم تُكتب في MONEYADO بعد (WAITING/PARSED) → إلغاء بلا قيد عكسي
+        if deal.status in (Status.WAITING_SECOND_LEG, Status.PARSED):
+            await self._finalize_cancellation(deal, raw, reason, now, written=False)
+            await self.bus.reply_central(
+                f"✅ أُلغيت الحوالة {ref} (لم تكن مُدخَلة في MONEYADO).", raw.message_key)
+            return
+        # (و) COMPLETED → انتقال ذرّي ثم قيد عكسي في MONEYADO
+        if deal.status == Status.COMPLETED:
+            if not await self.db.deals.begin_cancelling(deal.deal_id):
+                await self.bus.reply_central(f"🔴 الحوالة {ref} مُلغاة مسبقًا.", raw.message_key)
+                return
+            jobs = build_cancellation_jobs(deal, utcnow(), ref)
+            if not jobs:
+                await self.bus.notify_admin(
+                    f"⚠️ إلغاء {ref}: لا أطراف للعكس — مراجعة يدوية (الحالة cancelling).",
+                    raw.message_key, forward_key=self._deal_key(deal))
+                return
+            if not await self._execute_cancellation_jobs(deal, jobs, now):
+                return  # فشل الكتابة — نُبّه المسؤول داخل الدالة، تبقى cancelling للمراجعة
+            await self._finalize_cancellation(deal, raw, reason, now, written=True)
+            await self.bus.reply_central(
+                f"✅ أُلغيت الحوالة {ref} وسُجّل القيد العكسي في MONEYADO.", raw.message_key)
+            return
+        # حالات وسطى (MATCHING/HELD/READY/SELL_DONE/ESCALATED/TECH_FAILED) → مراجعة يدوية (§0)
+        await self.bus.notify_admin(
+            f"⚠️ إلغاء {ref} على صفقة بحالة «{deal.status.value}» — تحتاج مراجعة يدوية (§0).",
+            raw.message_key, forward_key=self._deal_key(deal))
+        log.warning("إلغاء على حالة وسطى %s للصفقة %s — تصعيد", deal.status, deal.deal_id)
+
+    async def _execute_cancellation_jobs(
+        self, deal: Deal, jobs: list[WriteJob], now: datetime
+    ) -> bool:
+        """يكتب القيود العكسية للإلغاء بنفس آلية الكتابة/التحقّق العادية (retry داخل الكاتب +
+        تحقّق SQL + دفتر is_reversal + dead-letter). يُرجع True عند نجاح كل الأطراف."""
+        control = await self.db.control.get()
+        commit = control.storage_enabled  # Kill Switch (§13)
+        for job in sorted(jobs, key=lambda j: j.order_index):  # بيع/شراء بالترتيب
+            res = await self.writer.write(job, commit=commit)
+            if not res.ok:
+                await self.db.dead_letter.add(
+                    deal.deal_id, res.error or "فشل كتابة إلغاء",
+                    screenshot_path=res.screenshot_path,
+                    details={"job": job.job_id, "operation": job.operation.value, "cancellation": True},
+                )
+                await self.bus.notify_admin(
+                    f"🔴 فشل إلغاء {self._ref(deal)} — فشل كتابة {job.operation.value}: {res.error}.",
+                    self._deal_key(deal), forward_key=self._deal_key(deal),
+                )
+                log.error("فشل كتابة قيد إلغاء للصفقة %s (%s)", deal.deal_id, res.error)
+                return False
+            if res.dry_run or not commit:
+                continue  # معاينة/Kill Switch — لا تحقّق/دفتر
+            verified, _mref = await self._verify_and_record(deal, job)
+            if not verified:
+                await self.bus.notify_admin(
+                    f"🔴 إلغاء {self._ref(deal)} — لم يتأكّد حفظ {job.operation.value} في SQL (§11.4).",
+                    self._deal_key(deal), forward_key=self._deal_key(deal),
+                )
+                return False
+        return True
+
+    async def _finalize_cancellation(self, deal: Deal, raw: RawMessage, reason: str,
+                                     now: datetime, *, written: bool) -> None:
+        """يثبّت حالة الإلغاء ويضع التفاعلات (§6): ✅ على رسالة الإلغاء، 🚫 على رسائل الحوالة الأصلية."""
+        deal.status = Status.CANCELLED
+        deal.cancelled_at = now
+        deal.cancelled_by_key = raw.message_key
+        deal.cancellation_reason = reason or None
+        await self.db.deals.upsert(deal)
+        # ✅ على رسالة الإلغاء
+        await self.bus.mark_central(raw.message_key, Mark.DONE.value)
+        # 🚫 على كل رسائل الحوالة الأصلية (source_message_keys)
+        for key in deal.source_message_keys:
+            await self.bus.mark_central(key, Mark.CANCELLED.value)
+        await self.bus.flush_reactions()
+        await self.bus.wait_for_reaction_sent([raw.message_key, *deal.source_message_keys])
+        log.info("أُلغيت الصفقة %s (%s) عبر %s — %s",
+                 deal.deal_id, self._ref(deal), raw.message_key,
+                 "قيد عكسي" if written else "بلا كتابة")
 
     # ═════════════════════════════════════════════════════════════════════════
     # مساعدات
