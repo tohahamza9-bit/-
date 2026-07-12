@@ -48,6 +48,7 @@ from .queue.service import (
     QueueService,
     _as_naive_utc,
     is_completion_fragment,
+    is_incomplete_first_message,
     is_treasury_only_reply,
     is_treasury_second_reply,
 )
@@ -125,14 +126,20 @@ class Pipeline:
     # ═════════════════════════════════════════════════════════════════════════
     async def process_inbox(self, now: datetime) -> list[Deal]:
         """
-        يمرّ على الرسائل الخام غير المعالَجة المستقرّة (§7.2)، يفكّكها ويجمّعها.
-        يُرجع الصفقات التي أصبحت جاهزة للمعالجة (PARSED). لا يوقفه أي تعليق فردي.
+        يمرّ على الرسائل الخام غير المعالَجة المستقرّة (§7.2)، يفكّكها ويجمّعها، ثم **يعالج
+        الصفقات الجاهزة مرتّبةً بختم وصول رسالتها الأولى** (first_received_at) لا بوقت اكتمالها.
+        يُرجع الصفقات التي عولجت هذه الدورة. لا يوقفه أي تعليق فردي.
+
+        🔴 الجدولة بترتيب الوصول (§7.3): زوجٌ (A + ثانيتها) قد يكتمل متأخّرًا في نفس الدفعة —
+        فلو عولج لحظة اكتماله لتجاوز رسالةً مستقلّة (SI) وصلت **قبل** رسالته الأولى. الحلّ: نجمع
+        الجاهز للكتابة أثناء المرور، ثم **نفرزه بـ first_received_at ونكتبه بعد فرز الدفعة كلها**.
+        الرسالة الأولى الناقصة الهوية (رد مكمّل §7.3) تبقى لنبضة tick (ليست جاهزة — _ready_to_write_now).
 
         🔴 محميّ بقفل تسلسليّ (_inbox_lock): استدعاءان متزامنان لا يتشابكان — تُعالَج كل رسالة
         وتُكتب في DB بالكامل قبل بدء التالية، فلا تقرأ الثانية (try_absorb) قبل كتابة الأولى (§7.3).
         """
         async with self._inbox_lock:
-            ready: list[Deal] = []
+            to_process: list[Deal] = []
             # 🔴 FIFO صارم بخانة المُرسِل (§7.3): كل الحوالات في غرفة المركزية، فحجب الغرفة كاملةً
             #    يوقف الطابور خلف أوّل رسالة غير مستقرّة (A8975 غير المستقرّة تحجب A8976 وSI). الحلّ:
             #    الحجب بمفتاح **المُرسِل** لا الغرفة — إن لم تستقرّ رسالةُ مُرسِلٍ تُؤجَّل رسائله **هو**
@@ -180,13 +187,42 @@ class Pipeline:
                     continue
                 try:
                     deal = await self._ingest(raw, now)
-                    if deal is not None and deal.status == Status.PARSED:
-                        ready.append(deal)
+                    if deal is not None:
+                        # ختم وصول الرسالة الأولى (§7.3): يُضبط مرّة عند أول ظهور للصفقة، ويُحفَظ
+                        # عبر دمج الطرف الثاني (الدمج يقرأ الصفقة من DB فيبقى الختم الأقدم، لا يُستبدَل
+                        # بختم الرسالة الثانية) — فيبقى معيار الجدولة = وصول الأولى.
+                        if deal.first_received_at is None:
+                            deal.first_received_at = raw.received_at
+                            await self.db.deals.upsert(deal)
+                        # جاهزة للكتابة الآن؟ اجمعها للفرز؛ وإلا (ناقصة/معلّقة) تبقى لنبضة tick.
+                        if self._ready_to_write_now(deal):
+                            to_process.append(deal)
                 except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل للتالية (الطابور لا يتوقّف)
                     log.exception("فشل معالجة الرسالة %s: %s — تجاوز للتالية", raw.message_key, exc)
                 finally:
                     await self.db.raw.mark_processed(raw.message_key)
-            return ready
+
+            # 🔴 المعالجة بترتيب وصول الرسالة الأولى (§7.3): الفرز مستقرّ (Python) والطابور مرتّب
+            #    حتميًّا فيكسر التعادل عند تساوي الختم (دقّة الثانية) — فلا تجاوز عشوائيّ.
+            to_process.sort(key=lambda d: _as_naive_utc(d.first_received_at or now))
+            processed: list[Deal] = []
+            for deal in to_process:
+                processed.append(await self.process_deal(deal, now))
+            return processed
+
+    @staticmethod
+    def _ready_to_write_now(deal: Deal) -> bool:
+        """هل الصفقة جاهزة لتُعالَج (تُكتب) في دورة process_inbox هذه، مرتّبةً بوصولها؟
+
+        الجاهزة = PARSED باكتمالٍ فعليّ: صفقة طرفين مكتملة، أو صفقة مفردة/SI تحمل مرساة هوية
+        (كود/اسم). الرسالة الأولى الناقصة الهوية (رد مكمّل بلا كود/اسم §7.3، أو ترويسة تنتظر
+        ثانيتها) ليست جاهزة — تبقى لنبضة tick التي تُعلّقها/تُصعّدها كالسابق (لا كتابة/تعليق مبكر)."""
+        if deal.status != Status.PARSED:
+            return False
+        if deal.is_two_legged and deal.sell_leg is not None and deal.buy_leg is not None:
+            return True
+        leg = deal.sell_leg or deal.buy_leg
+        return leg is not None and not is_incomplete_first_message(leg)
 
     @staticmethod
     def _has_rapid_followup(raw: RawMessage, batch: list[RawMessage]) -> bool:
@@ -257,14 +293,13 @@ class Pipeline:
                     absorbed = await self.queue.absorb_second_into(
                         target, raw, now, treasuries, suppliers)
                     if absorbed is not None:
-                        merged, immediate = absorbed
+                        merged, _immediate = absorbed   # المعالجة مؤجَّلة للفرز — لا حاجة للعلَم هنا
                         await self.db.sender_slots.fill(raw.chat_jid, raw.sender_jid)
                         log.info("خانة المُرسِل: رُبطت الرسالة الثانية %s بالصفقة %s (نفس المُرسِل)",
                                  raw.message_key, merged.deal_id)
-                        # فورًا للاكتمال الكامل (كود+اسم+سعر / خزينة بنفس الرقم)؛ الجزء المكمّل يبقى
-                        # PARSED لتُعالِجه النبضة — مطابقةً للسلوك القديم (absorb_fragment لا يُعالج فورًا).
-                        if immediate:
-                            return await self.process_deal(merged, now)
+                        # المعالجة الفعلية تؤجَّل لفرز الدفعة بـ first_received_at (§7.3): الاكتمال
+                        # الكامل يصير جاهزًا (_ready_to_write_now) فيُكتب مرتّبًا بوصول أولاه؛ الجزء
+                        # المكمّل الناقص يبقى لنبضة tick — مطابقةً للسلوك القديم، بلا كتابة مبكرة.
                         return merged
 
         # 🔴 ربط الرسالة الثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون ثم مورد §7.3) بصفقة معلّقة
@@ -276,7 +311,7 @@ class Pipeline:
             if len(cands) == 1:
                 merged = await self.queue.absorb_customer_supplier(
                     cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
-                return await self.process_deal(merged, now)   # عالج فورًا بلا انتظار نبضة/sweep
+                return merged   # المعالجة مؤجَّلة لفرز الدفعة بـ first_received_at (§7.3)
             if len(cands) > 1:
                 await self.bus.notify_admin(
                     f"⚠️ رسالة ثانية بلا رقم إشاري وتعدّد صفقات معلّقة ({len(cands)}) في الغرفة "
@@ -308,7 +343,7 @@ class Pipeline:
         if result.leg is not None:
             completed = await self.queue.try_absorb_treasury_second(result.leg, raw, now)
             if completed is not None:
-                return await self.process_deal(completed, now)
+                return completed   # المعالجة مؤجَّلة لفرز الدفعة بـ first_received_at (§7.3)
             if is_treasury_only_reply(result.leg):
                 # وصلت الخزينة قبل الأولى → حُفِظت ردًّا معلّقًا (§7.3) — لا هدرزة، ستُربَط عند وصول الأولى.
                 return None
@@ -379,7 +414,7 @@ class Pipeline:
         #    كطرف مورد لا كصفقة جديدة — قبل try_group كي لا تُنشأ صفقة منفصلة، وتُعالَج فورًا.
         second = await self.queue.try_absorb_supplier_second(leg, raw, now, treasuries, suppliers)
         if second is not None:
-            return await self.process_deal(second, now)   # عالج فورًا بلا انتظار نبضة/sweep
+            return second   # المعالجة مؤجَّلة لفرز الدفعة بـ first_received_at (§7.3)
 
         # التجميع (§7.3): صفقة جديدة أو دمج طرف ثانٍ
         deal = await self.queue.try_group(leg, now, chat_jid=raw.chat_jid)

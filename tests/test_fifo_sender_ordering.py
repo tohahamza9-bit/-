@@ -98,11 +98,12 @@ async def test_independent_si_bypasses_same_sender_block(db):
 
     await pipe.process_inbox(NOW + timedelta(seconds=5))
 
-    # SI عُولجت فورًا (مستقلّة — لا تخضع لحجب خانة المُرسِل)
+    # SI عُولجت هذه الدورة (مستقلّة — لا تخضع لحجب خانة المُرسِل): أُنشئت الصفقة وتجاوزت الحجب،
+    # ولم تبقَ منتظِرة (تُعالَج جاهزةً في فرز الدفعة — status != WAITING).
     d = await db.deals.find_by_source_key("si1")
-    assert d is not None and d.status == Status.PARSED
-    assert d.sell_leg.is_si_format is True
-    # «الحرف» بقي مؤجَّلًا
+    assert d is not None and d.sell_leg.is_si_format is True
+    assert d.status != Status.WAITING_SECOND_LEG
+    # «الحرف» بقي مؤجَّلًا (لم يُنشئ صفقة — حُجِب مُرسِله بسبب رسالته غير المستقرّة)
     assert await db.deals.find_by_source_key("p1") is None
 
 

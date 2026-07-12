@@ -122,6 +122,10 @@ class Deal(BaseModel):
     is_two_legged: bool = False
     created_at: datetime
     updated_at: datetime
+    # 🔴 ختم وصول **الرسالة الأولى** للصفقة (§7.3): معيار جدولة المعالجة — تُعالَج الصفقات
+    #    مرتّبةً بهذا الختم لا بوقت الاكتمال، فلا يتجاوز زوجٌ اكتمل متأخّرًا رسالةً مستقلّة
+    #    (SI) وصلت قبله. يُضبط مرّة عند إنشاء الصفقة ويُحفَظ عبر دمج الطرف الثاني (لا يُستبدَل).
+    first_received_at: Optional[datetime] = None
     chat_jid: Optional[str] = None             # الغرفة التي وردت منها (§7.3 ربط الرد بنفس الغرفة)
     # التجميع (§7.3)
     grouping_key: Optional[str] = None         # رقم إشاري + هاتف / أو message key
