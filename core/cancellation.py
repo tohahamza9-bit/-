@@ -59,15 +59,18 @@ def within_cancellation_window(created_at: datetime, now: datetime,
     return age <= timedelta(hours=hours)
 
 
-def build_cancellation_jobs(deal: Deal, now: datetime, ref: str) -> list[WriteJob]:
+def build_cancellation_jobs(deal: Deal, now: datetime, ref: str,
+                            note: Optional[str] = None) -> list[WriteJob]:
     """يبني القيود العكسية للإلغاء من **أطراف الصفقة** (لا من الدفتر) — معزول عن build_reversal
     (§10 القائم) الذي يبقى كما هو. القواعد (§4 من المواصفة):
 
     - بيع فقط → شراء عكسيّ: نفس الكود/المبلغ/السعر/الخزينة، ملاحظات «إلغاء {ref}».
     - بيع + خصم → شراء بالمبلغ **قبل الخصم** (leg.amount) والخصم **موجب** (abs) بلا سالب.
     - بيع + شراء → شراء (ببيانات البيع) order=0 ثم بيع (ببيانات الشراء) order=1.
+    يعكس الصافي/العمولة **الحاليّين** (المحفوظين حيّاً في أطراف الصفقة بعد أي تعديلات §3).
+    note: ملاحظة مخصّصة (تذكر التعديل السابق §6) — الافتراض «إلغاء {ref}».
     كلّها is_reversal=True (لا تُحسب «نُزّلت» في الحارس §9) بمحاولة واحدة (كالقيود العكسية)."""
-    note = f"إلغاء {ref}"
+    note = note or f"إلغاء {ref}"
     jobs: list[WriteJob] = []
     order = 0
     if deal.sell_leg is not None:

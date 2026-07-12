@@ -150,6 +150,9 @@ class Deal(BaseModel):
     cancelled_at: Optional[datetime] = None
     cancelled_by_key: Optional[str] = None     # مفتاح رسالة الإلغاء (من عمل Reply)
     cancellation_reason: Optional[str] = None  # النص الإضافيّ بعد كلمة الإلغاء إن وُجد
+    # سجلّ التعديلات (ميزة التعديل عبر Reply): [{amended_at, amended_by_key, old_net, new_net,
+    # old_commission, new_commission, reason}]. الصافي/العمولة الحاليّان محفوظان حيّاً في sell_leg.
+    amendments: list[dict] = Field(default_factory=list)
     # التتبّع
     source_message_keys: list[str] = Field(default_factory=list)
 

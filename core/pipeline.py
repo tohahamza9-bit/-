@@ -18,6 +18,12 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
+from .amendment import (
+    amendment_ratio,
+    build_amendment_jobs,
+    detect_amendment,
+    floor_commission,
+)
 from .bus import Bus
 from .cancellation import (
     build_cancellation_jobs,
@@ -154,9 +160,10 @@ class Pipeline:
             #    يُستثنى من الحجب: ردود التحكّم/الإكمال (إجراءات فورية على صفقات قائمة)، وحوالة SI
             #    المكتملة (مستقلّة برسالة واحدة §4.5 — لا تفتح خانة مُرسِل ولا تملؤها) → تنزل فور استقرارها.
             blocked_senders: set[str] = set()
-            # ميزة الإلغاء (§10 نسخة نهائية): تُجمَع رسائل الإلغاء وتُنفَّذ **بعد** فرز/كتابة الدفعة —
-            # فيُسجَّل البيع أولًا ثم يُلغى (لا تتقدّم على أحد). معزولة: تتخطّى _ingest كليًّا.
-            cancellations: list[RawMessage] = []
+            # ميزة الإلغاء/التعديل (§10 نسخة نهائية): تُجمَع رسائل التحكّم (إلغاء/تعديل) وتُنفَّذ **بعد**
+            # فرز/كتابة الدفعة — فيُسجَّل البيع أولًا (لا تتقدّم على أحد)، وتُنفَّذ بترتيب received_at وكلٌّ
+            # يقرأ الصفقة من DB لحظة تنفيذه (§3). معزولة: تتخطّى _ingest كليًّا.
+            control_ops: list[RawMessage] = []
             batch = await self.db.raw.unprocessed()
             for raw in batch:
                 # 🔴 رسائل البوت نفسه (is_from_me): Reply/تفاعل/تأكيد كتبها البوت — ليست مدخلات
@@ -174,12 +181,15 @@ class Pipeline:
                     log.info("تخطٍّ نهائيّ (رسالة أقدم من 15د — استرجاع §12): %s", raw.message_key)
                     await self.db.raw.mark_processed(raw.message_key)
                     continue
-                # ═══ ميزة الإلغاء عبر Reply — اعتراض معزول قبل _ingest ═══
-                # رسالة إلغاء في المركزية (كلمة إلغاء ككلمة كاملة) → تُجمَع للتنفيذ بعد الدفعة، ولا
+                # ═══ ميزة الإلغاء/التعديل عبر Reply — اعتراض معزول قبل _ingest ═══
+                # رسالة تحكّم في المركزية (إلغاء/تعديل ككلمة كاملة) → تُجمَع للتنفيذ بعد الدفعة، ولا
                 # تدخل _ingest إطلاقًا (لا تفتح خانة مُرسِل، لا تكمل معلّقة، لا تُعامَل حوالةً). محصورة
                 # بالمركزية فلا تمسّ رسائل الغرف الأخرى (مصدر مطابقة صامت). لا يتأثّر أيّ مسار آخر.
-                if raw.chat_jid == self.bus.central_jid and detect_cancellation(raw.text) is not None:
-                    cancellations.append(raw)
+                if raw.chat_jid == self.bus.central_jid and (
+                    detect_cancellation(raw.text) is not None
+                    or detect_amendment(raw.text) is not None
+                ):
+                    control_ops.append(raw)
                     await self.db.raw.mark_processed(raw.message_key)
                     continue
                 # رسائل التحكّم (Reply: إلغاء/تعديل/تصحيح/تم) إجراءات مكتملة متعمّدة — تُعالَج فورًا،
@@ -233,12 +243,17 @@ class Pipeline:
             for deal in to_process:
                 processed.append(await self.process_deal(deal, now))
 
-            # ميزة الإلغاء: تُنفَّذ **بعد** كتابة كل صفقات الدفعة (فالبيع مسجَّل أولًا)، بترتيب وصولها.
-            for raw in sorted(cancellations, key=lambda r: _as_naive_utc(r.received_at)):
+            # ميزة الإلغاء/التعديل: تُنفَّذ **بعد** كتابة كل صفقات الدفعة (فالبيع مسجَّل أولًا)، بترتيب
+            # received_at (فتنفَّذ «تعديل ثم إلغاء» بالترتيب)، وكلٌّ يقرأ الصفقة من DB لحظة تنفيذه (§3).
+            for raw in sorted(control_ops, key=lambda r: _as_naive_utc(r.received_at)):
                 try:
-                    await self._handle_cancellation(raw, now)
+                    amend = detect_amendment(raw.text)
+                    if amend is not None:
+                        await self._handle_amendment(raw, amend["amount"], amend["reason"], now)
+                    else:
+                        await self._handle_cancellation(raw, now)
                 except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل (الطابور لا يتوقّف)
-                    log.exception("فشل إلغاء الحوالة %s: %s", raw.message_key, exc)
+                    log.exception("فشل تنفيذ تحكّم (إلغاء/تعديل) %s: %s", raw.message_key, exc)
             return processed
 
     @staticmethod
@@ -1011,13 +1026,15 @@ class Pipeline:
             if not await self.db.deals.begin_cancelling(deal.deal_id):
                 await self.bus.reply_central(f"🔴 الحوالة {ref} مُلغاة مسبقًا.", raw.message_key)
                 return
-            jobs = build_cancellation_jobs(deal, utcnow(), ref)
+            # ملاحظة الإلغاء: تذكر التعديل السابق إن وُجد (§6) — «إلغاء {ref} — شامل تعديل سابق: …».
+            note = self._cancellation_note(deal, ref)
+            jobs = build_cancellation_jobs(deal, utcnow(), ref, note=note)
             if not jobs:
                 await self.bus.notify_admin(
                     f"⚠️ إلغاء {ref}: لا أطراف للعكس — مراجعة يدوية (الحالة cancelling).",
                     raw.message_key, forward_key=self._deal_key(deal))
                 return
-            if not await self._execute_cancellation_jobs(deal, jobs, now):
+            if not await self._execute_reversal_jobs(deal, jobs, now, "الإلغاء"):
                 return  # فشل الكتابة — نُبّه المسؤول داخل الدالة، تبقى cancelling للمراجعة
             await self._finalize_cancellation(deal, raw, reason, now, written=True)
             await self.bus.reply_central(
@@ -1029,33 +1046,34 @@ class Pipeline:
             raw.message_key, forward_key=self._deal_key(deal))
         log.warning("إلغاء على حالة وسطى %s للصفقة %s — تصعيد", deal.status, deal.deal_id)
 
-    async def _execute_cancellation_jobs(
-        self, deal: Deal, jobs: list[WriteJob], now: datetime
+    async def _execute_reversal_jobs(
+        self, deal: Deal, jobs: list[WriteJob], now: datetime, label: str = "الإلغاء"
     ) -> bool:
-        """يكتب القيود العكسية للإلغاء بنفس آلية الكتابة/التحقّق العادية (retry داخل الكاتب +
-        تحقّق SQL + دفتر is_reversal + dead-letter). يُرجع True عند نجاح كل الأطراف."""
+        """يكتب قيود الإلغاء/التعديل بنفس آلية الكتابة/التحقّق العادية (retry داخل الكاتب +
+        تحقّق SQL + دفتر is_reversal + dead-letter). يُرجع True عند نجاح كل الأطراف.
+        label = «الإلغاء» أو «التعديل» لرسائل المسؤول."""
         control = await self.db.control.get()
         commit = control.storage_enabled  # Kill Switch (§13)
         for job in sorted(jobs, key=lambda j: j.order_index):  # بيع/شراء بالترتيب
             res = await self.writer.write(job, commit=commit)
             if not res.ok:
                 await self.db.dead_letter.add(
-                    deal.deal_id, res.error or "فشل كتابة إلغاء",
+                    deal.deal_id, res.error or f"فشل كتابة {label}",
                     screenshot_path=res.screenshot_path,
-                    details={"job": job.job_id, "operation": job.operation.value, "cancellation": True},
+                    details={"job": job.job_id, "operation": job.operation.value, "reversal": label},
                 )
                 await self.bus.notify_admin(
-                    f"🔴 فشل إلغاء {self._ref(deal)} — فشل كتابة {job.operation.value}: {res.error}.",
+                    f"🔴 فشل {label} {self._ref(deal)} — فشل كتابة {job.operation.value}: {res.error}.",
                     self._deal_key(deal), forward_key=self._deal_key(deal),
                 )
-                log.error("فشل كتابة قيد إلغاء للصفقة %s (%s)", deal.deal_id, res.error)
+                log.error("فشل كتابة قيد %s للصفقة %s (%s)", label, deal.deal_id, res.error)
                 return False
             if res.dry_run or not commit:
                 continue  # معاينة/Kill Switch — لا تحقّق/دفتر
             verified, _mref = await self._verify_and_record(deal, job)
             if not verified:
                 await self.bus.notify_admin(
-                    f"🔴 إلغاء {self._ref(deal)} — لم يتأكّد حفظ {job.operation.value} في SQL (§11.4).",
+                    f"🔴 {label} {self._ref(deal)} — لم يتأكّد حفظ {job.operation.value} في SQL (§11.4).",
                     self._deal_key(deal), forward_key=self._deal_key(deal),
                 )
                 return False
@@ -1080,9 +1098,152 @@ class Pipeline:
                  deal.deal_id, self._ref(deal), raw.message_key,
                  "قيد عكسي" if written else "بلا كتابة")
 
+    def _cancellation_note(self, deal: Deal, ref: str) -> str:
+        """ملاحظة الإلغاء (§6): تذكر التعديل السابق إن وُجد — «إلغاء {ref} — شامل تعديل سابق: …»."""
+        if not deal.amendments:
+            return f"إلغاء {ref}"
+        original = deal.amendments[0].get("old_net")
+        leg = deal.sell_leg or deal.buy_leg
+        net = leg.amount if leg else None
+        return (f"إلغاء {ref} — شامل تعديل سابق: أصلي {self._amt(original)} ← "
+                f"تعديل إلى {self._amt(net)} ← ملغاة")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # ميزة التعديل عبر Reply «تعديل X» (§10 نسخة نهائية) — مسار معزول موازٍ للإلغاء
+    # ═════════════════════════════════════════════════════════════════════════
+    async def _handle_amendment(self, raw: RawMessage, amount: Optional[float],
+                                reason: str, now: datetime) -> None:
+        """يُعدّل مبلغ حوالة بـ Reply «تعديل X» (X = المبلغ الجديد، لا الفرق). معزول، ويقرأ الصفقة
+        من DB **لحظة التنفيذ** (§3) فيرى آخر صافي بعد أي تعديل/إلغاء سابق بالطابور.
+
+        - بلا رقم → 🔴 «التعديل يحتاج مبلغ». بلا Reply → 🔴. لم تُوجد → 🔴. ملغاة → 🔴. >96س → 🔴.
+          طرفين (بيع+شراء) → 🔴. WAITING/PARSED → تعديل مباشر بالـ DB. COMPLETED → قيد الفرق في MONEYADO."""
+        if not raw.reply_to_key:
+            await self.bus.reply_central(
+                "🔴 يجب التعديل عبر Reply على رسالة الحوالة الأصلية.", raw.message_key)
+            return
+        if amount is None:
+            await self.bus.reply_central(
+                "🔴 التعديل يحتاج مبلغ، مثال: تعديل 9000", raw.message_key)
+            return
+        deal = await self.db.deals.find_by_source_key(raw.reply_to_key)   # §3 قراءة عند التنفيذ
+        if deal is None:
+            await self.bus.reply_central(
+                "🔴 لم يُعثر على الحوالة المطلوب تعديلها.", raw.message_key)
+            return
+        ref = self._ref(deal)
+        if deal.status in (Status.CANCELLED, Status.CANCELLING):
+            await self.bus.reply_central(
+                f"🔴 الحوالة {ref} مُلغاة، لا يمكن تعديلها.", raw.message_key)
+            return
+        if not within_cancellation_window(deal.created_at, now):
+            await self.bus.reply_central(
+                f"🔴 الحوالة {ref} تجاوزت مدة التعديل المسموح بها "
+                f"({CANCELLATION_WINDOW_HOURS // 24} أيام).", raw.message_key)
+            return
+        if deal.is_two_legged and deal.sell_leg is not None and deal.buy_leg is not None:
+            await self.bus.reply_central(
+                "🔴 التعديل غير مدعوم لحوالات بيع+شراء — الرجاء الإلغاء ثم إرسال حوالة جديدة.",
+                raw.message_key)
+            return
+        leg = deal.sell_leg or deal.buy_leg
+        if leg is None or leg.amount is None:
+            await self.bus.reply_central(f"🔴 تعذّر تعديل {ref} (بلا مبلغ أصلي).", raw.message_key)
+            return
+
+        current_net = leg.amount
+        ratio = amendment_ratio(deal)                       # نسبة الحوالة الأصلية (§5)
+        new_commission = floor_commission(amount, ratio) if ratio else None
+        old_commission = leg.commission
+        prior_note = " (معدّلة سابقًا)" if deal.amendments else ""   # تعديل بعد تعديل (§3)
+
+        # WAITING/PARSED (لم تُكتب) → تعديل مباشر بالـ DB بلا MONEYADO
+        if deal.status in (Status.WAITING_SECOND_LEG, Status.PARSED):
+            self._apply_amendment_to_leg(deal, amount, new_commission)
+            self._record_amendment(deal, raw, current_net, amount,
+                                   old_commission, new_commission, reason, now)
+            await self.db.deals.upsert(deal)
+            await self._react_amendment(deal, raw)
+            await self.bus.reply_central(
+                f"✅ عُدِّلت الحوالة {ref}: {self._amt(current_net)} ← {self._amt(amount)} "
+                f"(لم تُدخَل بعد){prior_note}.", raw.message_key)
+            return
+
+        # COMPLETED → قيد الفرق في MONEYADO ثم تسجيل السجلّ
+        if deal.status == Status.COMPLETED:
+            note = f"تعديل {ref}: {self._amt(current_net)} ← {self._amt(amount)}"
+            jobs = build_amendment_jobs(deal, current_net, amount, new_commission, note, utcnow())
+            if not jobs:
+                await self.bus.reply_central(
+                    f"🔴 لا فرق للتعديل — الحوالة {ref} مبلغها {self._amt(amount)} أصلًا.",
+                    raw.message_key)
+                return
+            if not await self._execute_reversal_jobs(deal, jobs, now, "التعديل"):
+                return  # فشل الكتابة — صُعّد داخليًا
+            # نزل بMONEYADO → سجّل amendments؛ فشل التسجيل بعد الكتابة = فشل نصفي (§15-2) → تصعيد فوري
+            try:
+                self._apply_amendment_to_leg(deal, amount, new_commission)
+                self._record_amendment(deal, raw, current_net, amount,
+                                       old_commission, new_commission, reason, now)
+                await self.db.deals.upsert(deal)
+            except Exception as exc:  # T5 — فشل نصفي: نزل القيد لكن لم يُسجَّل → مراجعة فورية
+                await self.bus.notify_admin(
+                    f"🔴 تعديل {ref}: نزل القيد في MONEYADO لكن فشل تسجيل السجلّ ({exc}) — "
+                    f"فشل نصفي، مراجعة فورية (§15-2).", raw.message_key,
+                    forward_key=self._deal_key(deal))
+                log.exception("فشل تسجيل amendment بعد كتابة MONEYADO للصفقة %s", deal.deal_id)
+                return
+            await self._react_amendment(deal, raw)
+            await self.bus.reply_central(
+                f"✅ عُدِّلت الحوالة {ref}: {self._amt(current_net)} ← {self._amt(amount)} "
+                f"وسُجّل الفرق في MONEYADO{prior_note}.", raw.message_key)
+            return
+
+        # حالات وسطى (MATCHING/HELD/READY/SELL_DONE/ESCALATED/TECH_FAILED) → مراجعة يدوية (§0)
+        await self.bus.notify_admin(
+            f"⚠️ تعديل {ref} على صفقة بحالة «{deal.status.value}» — تحتاج مراجعة يدوية (§0).",
+            raw.message_key, forward_key=self._deal_key(deal))
+        log.warning("تعديل على حالة وسطى %s للصفقة %s — تصعيد", deal.status, deal.deal_id)
+
+    def _apply_amendment_to_leg(self, deal: Deal, new_net: float,
+                                new_commission: Optional[float]) -> None:
+        """يحدّث الصافي/العمولة الحاليّين في طرف البيع (يبقى deal.sell_leg = القيمة الحاليّة §3)."""
+        leg = deal.sell_leg or deal.buy_leg
+        if leg is None:
+            return
+        leg.amount = new_net
+        if new_commission is not None:                       # يحفظ إشارة العمولة الأصلية
+            sign = -1.0 if (leg.commission or 0.0) < 0 else 1.0
+            leg.commission = sign * new_commission
+
+    @staticmethod
+    def _record_amendment(deal: Deal, raw: RawMessage, old_net: float, new_net: float,
+                          old_commission: Optional[float], new_commission: Optional[float],
+                          reason: str, now: datetime) -> None:
+        deal.amendments.append({
+            "amended_at": now, "amended_by_key": raw.message_key,
+            "old_net": old_net, "new_net": new_net,
+            "old_commission": old_commission, "new_commission": new_commission,
+            "reason": reason or None,
+        })
+
+    async def _react_amendment(self, deal: Deal, raw: RawMessage) -> None:
+        """تفاعلات التعديل (§7): ✅ على رسالة التعديل، ✏️ على رسائل الحوالة الأصلية."""
+        await self.bus.mark_central(raw.message_key, Mark.DONE.value)
+        for key in deal.source_message_keys:
+            await self.bus.mark_central(key, Mark.AMENDED.value)
+        await self.bus.flush_reactions()
+        await self.bus.wait_for_reaction_sent([raw.message_key, *deal.source_message_keys])
+
     # ═════════════════════════════════════════════════════════════════════════
     # مساعدات
     # ═════════════════════════════════════════════════════════════════════════
+    @staticmethod
+    def _amt(x: Optional[float]) -> str:
+        """تنسيق مبلغ للعرض: بلا كسر عشريّ زائد (10000.0 → «10000»)."""
+        if x is None:
+            return "?"
+        return str(int(x)) if float(x).is_integer() else str(x)
     @staticmethod
     def _deal_key(deal: Deal) -> Optional[str]:
         if deal.sell_leg and deal.sell_leg.source_message_key:
