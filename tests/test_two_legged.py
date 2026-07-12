@@ -94,8 +94,9 @@ MSG1_TND = ("A7804\nتونس/العاصمة\nالاسم: محمد عبدالرح
 MSG2_TND = "570 ايهاب ابو حميد 35\nوليد العاصمة"
 
 
-async def test_tnd_first_message_parsed_incomplete(db):
-    """رسالة١: تُفهَم كحوالة تُنتظر — الحقول تُلتقط، الهوية غائبة (تأتي في الثانية)."""
+async def test_tnd_first_message_recipient_not_incomplete(db):
+    """رسالة١ تونسية: اسم المستلم المنفرد (بلا كود) → recipient_name، فليست ناقصة الهوية
+    (is_incomplete=False) ولا تنبيه «أكمل البيانات» المبكر — تنتظر الرسالة الثانية طبيعيًّا."""
     from core.constants import Currency
     from core.queue.service import is_incomplete_first_message
     leg = parse_message(MSG1_TND, await _treas(db), []).leg
@@ -105,8 +106,9 @@ async def test_tnd_first_message_parsed_incomplete(db):
     assert leg.currency == Currency.TND
     assert leg.recipient_name == "محمد عبدالرحيم"   # (ج) سطر «الاسم:» يُلتقط اسمَ مستلم
     assert leg.country == "العاصمة"
-    assert leg.customer_code is None            # لا هوية زبون → تنتظر الرسالة الثانية
-    assert is_incomplete_first_message(leg) is True
+    assert leg.customer_code is None            # لا كود زبون بعد → تنتظر الرسالة الثانية
+    # 🔴 recipient_name حاضر → ليست ناقصة الهوية (تغيّر مقصود: الصيغة التونسية باسم مستلم)
+    assert is_incomplete_first_message(leg) is False
 
 
 async def test_tnd_two_messages_link_and_complete(db):
@@ -138,6 +140,61 @@ async def test_tnd_two_messages_link_and_complete(db):
     assert deal2.sell_leg.customer_name == "ايهاب ابو حميد"
     assert deal2.sell_leg.amount == 1000         # المبلغ من الرسالة الأولى
     assert deal2.sell_leg.currency == Currency.TND
+
+
+# ── الصيغة التونسية الجديدة: اسم مستلم منفرد بلا كود (A8990) ─────────────────
+# رسالة١: «A8990 / هاتف / اسم مستلم / مدينة / مبلغ د.ت» — اسم منفرد = recipient_name، بلا كود.
+# رسالة٢: «1208 فداء شاكونه 35.5 / محمود» — كود + سعر + خزينة (نفس منطق الرسالة الثانية).
+MSG1_A8990 = "A8990\n0918300701\nفايزه\nصفاقس\n351 د.ت"
+MSG1_A8990_WA = "A8990\n0918300701 واتساب\nفايزه\nصفاقس\n351 د.ت"  # «واتساب» على سطر الهاتف
+MSG2_A8990 = "1208 فداء شاكونه 35.5 / محمود"
+
+
+async def test_a8990_first_message_recipient_not_incomplete(db):
+    """A8990: المبلغ/العملة/الهاتف/اسم المستلم تُلتقط، وليست ناقصة (recipient حاضر) → لا تنبيه مبكر."""
+    from core.constants import Currency
+    from core.queue.service import is_incomplete_first_message
+    leg = parse_message(MSG1_A8990, await _treas(db), []).leg
+    assert leg.reference_number == "A8990"
+    assert leg.phone == "0918300701"
+    assert leg.amount == 351.0 and leg.currency == Currency.TND
+    assert leg.recipient_name == "فايزه"          # اسم المستلم المنفرد (بلا كود)
+    assert leg.customer_code is None              # لا كود زبون → تنتظر الثانية
+    assert is_incomplete_first_message(leg) is False
+
+
+async def test_a8990_whatsapp_on_phone_line_still_parses(db):
+    """«0918300701 واتساب»: الهاتف يُلتقط و«واتساب» تُتجاهَل بلا إرباك — وليست ناقصة."""
+    from core.constants import Currency
+    from core.queue.service import is_incomplete_first_message
+    leg = parse_message(MSG1_A8990_WA, await _treas(db), []).leg
+    assert leg.phone == "0918300701"
+    assert leg.recipient_name == "فايزه"
+    assert leg.amount == 351.0 and leg.currency == Currency.TND
+    assert is_incomplete_first_message(leg) is False
+
+
+async def test_a8990_waits_second_then_completes(db):
+    """A8990 (تنتظر) + «1208 فداء شاكونه 35.5 / محمود» → تُربطان وتكتمل (كود+خزينة من الثانية)."""
+    from core.constants import Currency
+    from core.queue.service import is_completion_fragment
+    svc = QueueService(db)
+    treas = await _treas(db)
+    JID = "tnd@g.us"
+
+    leg1 = parse_message(MSG1_A8990, treas, []).leg
+    leg1.source_message_key = "a1"
+    deal1 = await svc.try_group(leg1, NOW, chat_jid=JID)
+    assert deal1.status == Status.WAITING_SECOND_LEG          # تنتظر الرسالة الثانية طبيعيًّا
+
+    leg2 = parse_message(MSG2_A8990, treas, []).leg
+    assert is_completion_fragment(leg2) is True               # كود+سعر+خزينة بلا مبلغ → مكمّلة
+    deal2 = await svc.absorb_fragment(leg2, JID, "a2", NOW + timedelta(seconds=30))
+    assert deal2 is not None and deal2.deal_id == deal1.deal_id
+    assert deal2.status == Status.PARSED                      # اكتملت
+    assert deal2.sell_leg.customer_code == "1208"             # الكود من الثانية
+    assert deal2.sell_leg.treasury is not None and "محمود" in deal2.sell_leg.treasury.name
+    assert deal2.sell_leg.amount == 351.0 and deal2.sell_leg.currency == Currency.TND  # المبلغ من الأولى
 
 
 # ── انتهاء المهلة بلا شراء → طرف واحد (لا تصعيد) ─────────────────────────────

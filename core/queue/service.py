@@ -93,11 +93,17 @@ def is_incomplete_first_message(leg: ParsedLeg | None) -> bool:
 
     تمييزها عن بيع كامل ينتظر شراءً اختياريًا: وجود كود أو اسم مقروء يُخرجها من التصنيف
     (فتُنهى كطرف واحد عبر sweep_waiting كالسابق).
+
+    🔴 الصيغة التونسية (اسم مستلم منفرد بلا كود): وجود recipient_name = هوية مستلم مقروءة →
+    ليست ناقصة (is_incomplete=False)، فلا تنبيه «أكمل البيانات» المبكر — تنتظر الرسالة الثانية
+    (كود + سعر + خزينة) طبيعيًّا عبر انتظار الطرف الثاني (treasury=None → needs_pair).
     """
     if leg is None:
         return False
     from ..matching.fuzzy import normalize_ar  # استيراد محليّ: تفادي دورة استيراد الحزمة
-    return not leg.customer_code and not normalize_ar(leg.customer_name or "")
+    return (not leg.customer_code
+            and not normalize_ar(leg.customer_name or "")
+            and not normalize_ar(leg.recipient_name or ""))
 
 
 class QueueService:
