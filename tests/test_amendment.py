@@ -137,19 +137,20 @@ async def test_amend_discount_floor_commission(db):
     await _enable_storage(db)
     writer = _RecWriter()
     pipe = _pipeline(db, writer)
-    # مثال المستخدم: أصلي 10100، خصم 101 (نسبة 1%) → تعديل إلى 7070
-    await _seed_completed(db, sell=_sell_leg(amount=10100.0, commission=101.0))
+    # مثال المستخدم بواقع الإنتاج: أصلي 10100، خصم مُخزَّن **سالبًا** (−101، نسبة 1%) → تعديل 7070
+    await _seed_completed(db, sell=_sell_leg(amount=10100.0, commission=-101.0))
 
     await pipe._handle_amendment(_amend_raw("تعديل 7070"), 7070.0, "", NOW + timedelta(seconds=10))
 
     job = writer.jobs[0]
     assert job.operation == OperationType.BUY
     assert job.leg.amount == 3030.0                          # فرق المبلغ 10100−7070
-    assert job.leg.commission == 31.0                        # 🔴 فرق العمولة 101 − FLOOR(7070×1%)=70
+    # 🔴 خانة العمولة بشاشة الشراء = فرق العمولة **موجب دائمًا** (101 − FLOOR(7070×1%)=70) = 31
+    assert job.leg.commission == 31.0
     d = await db.deals.get("d1")
-    # الصافي/العمولة الحاليّان بعد التعديل = القيم الجديدة الكاملة (لا الفرق)
-    assert d.sell_leg.amount == 7070.0 and d.sell_leg.commission == 70.0
-    assert d.amendments[0]["old_commission"] == 101.0 and d.amendments[0]["new_commission"] == 70.0
+    # الصافي بعد التعديل = الجديد الكامل؛ العمولة تبقى بإشارة البيع السالبة (−70)
+    assert d.sell_leg.amount == 7070.0 and d.sell_leg.commission == -70.0
+    assert d.amendments[0]["old_commission"] == -101.0 and d.amendments[0]["new_commission"] == 70.0
 
 
 # ═════════════════════════════════════════════════════════════════════════════
