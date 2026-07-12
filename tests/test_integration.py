@@ -854,6 +854,22 @@ async def test_cancel_by_authorized_employee(db):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# البوت لا يقرأ رسائله الخاصة (is_from_me) — تُعلَّم معالَجة بلا معالجة (§2.2)
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_own_messages_ignored(db):
+    pipe = _make_pipeline(db, FakeWriter(), StubVerifier(), rooms=False)
+    # رسالة يبدو نصّها حوالة كاملة لكنها من البوت نفسه (is_from_me=True)
+    own = RawMessage(message_key="self1", chat_jid=CENTRAL, sender_jid=EMP, is_from_me=True,
+                     text="1208 فداء شاكونه 5.84\nبلاس\nA5169\n010954227116\n1600 ج م\nفودافون",
+                     received_at=PAST)
+    await pipe.capture(own)
+    await pipe.process_inbox(PAST + timedelta(seconds=120))
+
+    assert await db.deals.col.count_documents({}) == 0     # لم تُنشأ صفقة من رسالة البوت
+    assert (await db.raw.get("self1")).processed is True    # عُلِّمت معالَجة (بلا معالجة)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # 6) قاعدة الإخراج الصارمة (§2.2) — لا مخرجات لغرف الزبائن/الخزائن أبدًا
 # ═════════════════════════════════════════════════════════════════════════════
 async def test_output_whitelist_never_writes_rooms(db):

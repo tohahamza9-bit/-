@@ -159,6 +159,13 @@ class Pipeline:
             cancellations: list[RawMessage] = []
             batch = await self.db.raw.unprocessed()
             for raw in batch:
+                # 🔴 رسائل البوت نفسه (is_from_me): Reply/تفاعل/تأكيد كتبها البوت — ليست مدخلات
+                #    (§2.2). تُعلَّم معالَجة بلا أي معالجة **كأوّل شرط**، فلا يقرأ البوت رسائله ولا
+                #    تُفسَّر كحوالة/إلغاء (مثلاً ردّ «… مُلغاة مسبقًا» لا يُطلق كشف الإلغاء).
+                if raw.is_from_me:
+                    log.debug("تخطٍّ: رسالة من البوت نفسه (is_from_me) %s", raw.message_key)
+                    await self.db.raw.mark_processed(raw.message_key)
+                    continue
                 # 🔴 استرجاع بعد الإطفاء (§12): رسالة عمرها > 15 دقيقة (INCOMPLETE_DATA_ESCALATE_SECONDS)
                 #    — قديمة من قبل التوقّف → تُعلَّم معالَجة **بلا معالجة ولا ردود**، فلا يردّ البوت
                 #    على رسائل قديمة عند إعادة التشغيل. متماثل مع حجْر الصفقات القديمة (expire_stale).
