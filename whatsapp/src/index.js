@@ -101,6 +101,8 @@ async function main() {
   let everConnected = false;    // اتّصل ولو مرّة؟ (لا نُقحم إعادة اتصال قسريّة أثناء الربط الأوّليّ/QR)
   let lastConnectedAt = Date.now(); // آخر لحظة اتصال ناجح (لقياس مدّة الانقطاع الصامت)
   let healthTimer = null;       // مؤقّت نبضة الصحّة (يُنظَّف عند الإغلاق)
+  let loggedOut = false;        // 401 — الجلسة مسجّلة خروجًا: نبضة الصحّة **لا** تعيد الاتصال (تنبيه فقط)
+  let lastLoggedOutAlertAt = 0; // خنق تنبيه loggedOut الدوريّ (كل ~5د لا كل نبضة)
   let botJid = state.creds?.me?.id || '';
   const getBotJid = () => botJid;
 
@@ -189,6 +191,7 @@ async function main() {
         breaker.onConnectionOpen();
         connected = true;
         everConnected = true;
+        loggedOut = false;              // اتصال ناجح (إعادة ربط) → أطفئ علم الخروج
         lastConnectedAt = Date.now();   // مرجع نبضة الصحّة (آخر اتصال حيّ)
         botJid = sock.user?.id || botJid;
         logger.info('✅ اتصل واتساب — البوت: %s', botJid);
@@ -204,6 +207,8 @@ async function main() {
           breaker.onRejection(`رفض حقيقي code=${code}`);
           if (code === DisconnectReason.loggedOut) {
             // 401 — إعادة التشغيل تدخل حلقة QR بلا جدوى → يبقى موقوفًا (لا exit) + تنبيه، تدخّل يدوي.
+            // نرفع علم loggedOut كي **لا** تفرض نبضة الصحّة إعادة اتصال (القاطع لا يُفتح برفض واحد).
+            loggedOut = true;
             logger.error('🔴 تسجيل خروج (loggedOut) — احذف مجلد الجلسة وأعد الربط يدويًا. لا إعادة اتصال ولا إعادة تشغيل.');
             return;
           }
@@ -270,6 +275,7 @@ async function main() {
   //      الاتصال — هنا نفرضها. نحترم closing/القاطع/reconnectPending، ولا نُقحمها قبل أوّل اتصال (QR).
   const HEALTH_INTERVAL_MS = 30_000;
   const RECONNECT_IF_DOWN_MS = 60_000;
+  const LOGGEDOUT_ALERT_MS = 5 * 60 * 1000;   // خنق تنبيه loggedOut (كل 5د لا كل نبضة)
   const MEM_WARN_BYTES = 500 * 1024 * 1024;
   healthTimer = setInterval(() => {
     try {
@@ -279,7 +285,15 @@ async function main() {
           '⚠️ استهلاك ذاكرة مرتفع (> 500MB) — مراقبة فقط (بلا إعادة تشغيل تلقائيّة).');
       }
       if (closing || connected || !everConnected) return; // سليم/مغلق/لم يتّصل بعد → لا شيء
-      if (breaker.isOpen() || reconnectPending) return;    // لا نقاتل fatal/loggedOut ولا نكدّس
+      // loggedOut (401): **لا** إعادة اتصال أبدًا (حلقة QR بلا جدوى) — تنبيه دوريّ مخنوق فقط.
+      if (loggedOut) {
+        if (Date.now() - lastLoggedOutAlertAt >= LOGGEDOUT_ALERT_MS) {
+          lastLoggedOutAlertAt = Date.now();
+          logger.error('🔴 نبضة الصحّة: الجلسة مسجّلة خروجًا (loggedOut) — لا إعادة اتصال؛ احذف الجلسة وأعد الربط يدويًا.');
+        }
+        return;
+      }
+      if (breaker.isOpen() || reconnectPending) return;    // لا نقاتل القاطع ولا نكدّس
       const downMs = Date.now() - lastConnectedAt;
       if (downMs >= RECONNECT_IF_DOWN_MS) {
         logger.warn({ down_s: Math.round(downMs / 1000) },
