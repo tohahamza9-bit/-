@@ -133,11 +133,14 @@ class Pipeline:
         """
         async with self._inbox_lock:
             ready: list[Deal] = []
-            # 🔴 حجب ترتيبيّ لكل غرفة (§7.2): إن كان **رأس** غرفةٍ رسالةً لم تستقرّ بعد، تُؤجَّل كل
-            #    رسائل **نفس الغرفة** التي تليها هذه الدورة — فلا تُسجَّل رسالة لاحقة قبل أختها السابقة
-            #    (حفظ ترتيب الغرفة). الغرف الأخرى مستقلّة فتُكمَّل بلا تأثّر (الرسائل مرتّبة حتميًّا §db).
-            #    ردود التحكّم/الإكمال (إجراءات فورية على صفقات قائمة، لا حوالات جديدة) تُستثنى من الحجب.
-            blocked_rooms: set[str] = set()
+            # 🔴 FIFO صارم بخانة المُرسِل (§7.3): كل الحوالات في غرفة المركزية، فحجب الغرفة كاملةً
+            #    يوقف الطابور خلف أوّل رسالة غير مستقرّة (A8975 غير المستقرّة تحجب A8976 وSI). الحلّ:
+            #    الحجب بمفتاح **المُرسِل** لا الغرفة — إن لم تستقرّ رسالةُ مُرسِلٍ تُؤجَّل رسائله **هو**
+            #    التالية هذه الدورة فقط (حفظ ترتيبه التامّ)، ومُرسِلون مختلفون مستقلّون تمامًا لا ينتظرون
+            #    بعضهم. الرسائل مرتّبة حتميًّا (§db) فالترتيب داخل المُرسِل محفوظ عبر الدورات.
+            #    يُستثنى من الحجب: ردود التحكّم/الإكمال (إجراءات فورية على صفقات قائمة)، وحوالة SI
+            #    المكتملة (مستقلّة برسالة واحدة §4.5 — لا تفتح خانة مُرسِل ولا تملؤها) → تنزل فور استقرارها.
+            blocked_senders: set[str] = set()
             batch = await self.db.raw.unprocessed()
             for raw in batch:
                 # 🔴 استرجاع بعد الإطفاء (§12): رسالة عمرها > 15 دقيقة (INCOMPLETE_DATA_ESCALATE_SECONDS)
@@ -158,17 +161,22 @@ class Pipeline:
                 # المعلّقة فورًا. يُحسَب (بوصول DB) مرّة فقط حين تكون غير مستقرّة وليست تحكّمًا.
                 completion = (not stable) and await self._is_completion_reply(raw)
                 immediate = is_control_reply or completion   # إجراء فوريّ لا يخضع لترتيب الحوالات الجديدة
+                sender_key = f"{raw.chat_jid}|{raw.sender_jid or ''}"
 
-                # غرفة محجوبة (سبقتها رسالة لم تستقرّ) → أجّل ما بعدها فيها، إلا الإجراءات الفورية.
-                if raw.chat_jid in blocked_rooms and not immediate:
-                    log.debug("حجب ترتيبيّ (رأس الغرفة لم يستقرّ): %s", raw.message_key)
+                # مُرسِل محجوب (سبقته رسالةٌ **له** لم تستقرّ) → أجّل رسائله التالية، إلا الإجراءات
+                # الفورية (تحكّم/إكمال) وحوالة SI المستقلّة (لا تخضع لترتيب خانة المُرسِل §4.5).
+                if sender_key in blocked_senders and not immediate \
+                        and not await self._is_independent_si(raw):
+                    log.debug("حجب ترتيبيّ (رسالة أسبق لنفس المُرسِل لم تستقرّ): %s", raw.message_key)
                     continue
 
-                # لم تستقرّ بعد وليست ردّ إكمال → تأجيل + حجب بقية الغرفة حتى يستقرّ رأسها أو تنتهي
-                # مهلته (§7.2). لا تخطٍّ صامت (T5): نسجّل السبب.
+                # لم تستقرّ بعد وليست ردّ إكمال → تأجيل + حجب رسائل **نفس المُرسِل** التالية حتى تستقرّ
+                # أو تنتهي مهلتها (§7.2). SI المستقلّة تُؤجَّل لاستقرارها لكن **لا تحجب** المُرسِل (لا
+                # تفتح خانة/ترتيبًا §4.5). لا تخطٍّ صامت (T5): نسجّل السبب.
                 if not stable and not completion:
                     log.debug("تخطٍّ مؤقّت (لم تستقرّ بعد): %s", raw.message_key)
-                    blocked_rooms.add(raw.chat_jid)
+                    if not await self._is_independent_si(raw):
+                        blocked_senders.add(sender_key)
                     continue
                 try:
                     deal = await self._ingest(raw, now)
@@ -208,6 +216,17 @@ class Pipeline:
         # (تُربَط بالرقم فورًا في _ingest) → تُعالَج فورًا بلا انتظار استقرار «الحرف» (§7.3).
         return (res.kind == "noise" and is_completion_fragment(res.leg)) \
             or is_treasury_second_reply(res.leg)
+
+    async def _is_independent_si(self, raw: RawMessage) -> bool:
+        """هل الرسالة حوالة SI معنونة مكتملة (§3.3)؟ SI مستقلّة تمامًا: لا تفتح خانة مُرسِل ولا
+        تملؤها ولا تنتظر طرفًا ثانيًا (§4.5) — فلا تُحجَب بترتيب خانة المُرسِل ولا تحجبه (§7.3).
+        تُفحَص فقط لرسائل المركزية الحاملة نصًّا (غيرها لا يُفكَّك كحوالة أصلًا)."""
+        if raw.chat_jid != self.bus.central_jid or not (raw.text or "").strip():
+            return False
+        treasuries = await self.db.treasuries.all_active()
+        suppliers = await self.db.suppliers.all_active()
+        res = parse_message(raw.text, treasuries, suppliers)
+        return res.leg is not None and res.leg.is_si_format
 
     async def _ingest(self, raw: RawMessage, now: datetime) -> Optional[Deal]:
         # الرسائل من غير المركزية = مصدر مطابقة صامت فقط (§2.2 §8) — لا تُفكَّك كحوالة
