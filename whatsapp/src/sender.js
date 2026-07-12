@@ -10,12 +10,13 @@ import { assertAllowedDestination, OutputBlockedError } from './whitelist.js';
 import { decodeKey } from './keys.js';
 import { sendDelayMs, roomGapMs, sleep } from './antiban.js';
 
-const STALE_REACTION_MS = 300_000; // §8.3: تفاعل بائت > 5د لا يُرسَل (لا تفاعل على رسالة قديمة).
+const STALE_REACTION_MS = 30_000; // §8.3: تفاعل بائت > 30ث لا قيمة له → يُطرَح سريعًا (لا انتظار 5د).
 
 export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger }) {
   let running = false;
   let ticking = false; // حارس تزامن: يمنع تشابك tick الدوري مع tick القادم من /flush (إرسال مزدوج)
   let lastJid = null;
+  let reactionsSent = 0; // عدّاد التفاعلات المُرسَلة — منفصل عن warm-up (لا يستهلك سقف الرسائل الحقيقية §8.3)
 
   /** إرسال بند مع إعادة واحدة بعد ثانية عند الفشل (§8.3). يُرجع true عند النجاح. */
   async function sendWithRetry(d) {
@@ -86,10 +87,64 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
       .limit(20)
       .toArray();
 
+    // ══ تمريرة ١: التفاعلات (reactions) — مسار سريع مضمون (§8.3) ══
+    // 🔴 قرار: واتساب لا يحسب التفاعلات spam (ردّ فعل على رسالة قائمة)، فلا تخضع لـ warm-up ولا
+    //    لقاطع الدائرة (W0) ولا لتأخير W1/W1-B — تُرسَل فورًا كي تظهر ✅/🔴 قبل الصفقة التالية بلا
+    //    تراكم أو إسقاط بائت. يبقى فقط: whitelist (§2.2 أمن) + طرح البائت (> 30ث لا قيمة له).
     for (const d of docs) {
-      // W0 — القاطع مفتوح → لا إرسال (تدخّل يدوي مطلوب)
+      if (!d.reaction) continue;
+
+      // §2.2 دفاع عميق: وجهة ممنوعة → إسقاط (لا تُعاد للأبد) — الأمن لا يُتخطّى للتفاعلات أيضًا.
+      try {
+        assertAllowedDestination(d.chat_jid, dests, logger);
+      } catch (e) {
+        if (e instanceof OutputBlockedError) {
+          logger.error({ jid: d.chat_jid, id: String(d._id) }, '🔴 تفاعل لوجهة ممنوعة — أُسقط');
+          await outgoing.updateOne(
+            { _id: d._id },
+            { $set: { sent: true, blocked: true, sent_at: new Date() } },
+          );
+          continue;
+        }
+        throw e;
+      }
+
+      // §8.3 حماية التراكم: تفاعل بائت (> 30ث) لا قيمة له → يُطرَح سريعًا (مُرسَل+بائت، بلا إرسال).
+      if (d.created_at) {
+        const ageMs = Date.now() - new Date(d.created_at).getTime();
+        if (ageMs > STALE_REACTION_MS) {
+          logger.warn({ id: String(d._id), age_s: Math.round(ageMs / 1000) },
+            '⏭️ تفاعل بائت (> 30ث) — تخطٍّ بلا إرسال');
+          await outgoing.updateOne(
+            { _id: d._id },
+            { $set: { sent: true, stale: true, sent_at: new Date() } },
+          );
+          continue;
+        }
+      }
+
+      // إرسال فوريّ — بلا warm-up/breaker/تأخير (التفاعلات آمنة، لا تُحسب spam).
+      const ok = await sendWithRetry(d);
+      if (ok) {
+        reactionsSent += 1; // عدّاد منفصل — لا يمسّ warm-up (لا يستهلك سقف الرسائل الحقيقية §8.3)
+        await outgoing.updateOne({ _id: d._id }, { $set: { sent: true, sent_at: new Date() } });
+      } else {
+        // مرآة تجميلية فشلت مرتين → إسقاط (sent+failed) كي لا تكسر الطابور.
+        logger.error({ id: String(d._id) }, '🔴 تفاعل فشل مرتين — إسقاط (مرآة فقط)');
+        await outgoing.updateOne(
+          { _id: d._id },
+          { $set: { sent: true, failed: true, sent_at: new Date() } },
+        );
+      }
+    }
+
+    // ══ تمريرة ٢: النصوص (Reply/تصعيد) — تخضع لـ W0/warm-up/التأخير كالسابق ══
+    for (const d of docs) {
+      if (d.reaction) continue;
+
+      // W0 — القاطع مفتوح → لا إرسال نصوص (تدخّل يدوي مطلوب). التفاعلات (تمريرة ١) لا تتأثّر.
       if (breaker.isOpen()) {
-        logger.error('🔒 قاطع الدائرة مفتوح — تعليق الإرسال: %s', breaker.reason);
+        logger.error('🔒 قاطع الدائرة مفتوح — تعليق إرسال النصوص: %s', breaker.reason);
         return;
       }
 
@@ -109,22 +164,6 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
         throw e;
       }
 
-      // §8.3 حماية التراكم: تفاعل بائت (رسالة قديمة > 5د) لا يُرسَل — يُعلَّم مُرسَلًا+بائتًا كي لا
-      //   يُعاد، ولا نتفاعل على رسالة قديمة. يُفحص قبل warm-up كي يُنظَّف حتى عند بلوغ السقف.
-      //   (النصوص المهمّة — Reply/تصعيد — لا تُسقَط بالعمر هنا؛ تبقى للإعادة.)
-      if (d.reaction && d.created_at) {
-        const ageMs = Date.now() - new Date(d.created_at).getTime();
-        if (ageMs > STALE_REACTION_MS) {
-          logger.warn({ id: String(d._id), age_s: Math.round(ageMs / 1000) },
-            '⏭️ تفاعل بائت (> 5د) — تخطٍّ بلا إرسال');
-          await outgoing.updateOne(
-            { _id: d._id },
-            { $set: { sent: true, stale: true, sent_at: new Date() } },
-          );
-          continue;
-        }
-      }
-
       // warm-up — احترام سقف الساعة
       if (!warmup.canSend()) {
         logger.warn('⏳ بلغ سقف warm-up لهذه الساعة (%d) — تأجيل', warmup.cap());
@@ -141,13 +180,6 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
         warmup.record();
         lastJid = d.chat_jid;
         await outgoing.updateOne({ _id: d._id }, { $set: { sent: true, sent_at: new Date() } });
-      } else if (d.reaction) {
-        // تفاعل (مرآة تجميلية §8.3) فشل مرتين → يُسقَط (sent+failed) كي لا يكسر الطابور.
-        logger.error({ id: String(d._id) }, '🔴 تفاعل فشل مرتين — إسقاط (مرآة فقط)');
-        await outgoing.updateOne(
-          { _id: d._id },
-          { $set: { sent: true, failed: true, sent_at: new Date() } },
-        );
       } else {
         // نصّ مهم (Reply/تصعيد مسؤول) — لا يُسقَط؛ يبقى sent=false للإعادة في الجولة التالية.
         logger.error({ id: String(d._id), jid: d.chat_jid },
@@ -177,5 +209,5 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
     return running;
   }
 
-  return { tick, loop, stop, sendOne, isRunning };
+  return { tick, loop, stop, sendOne, isRunning, reactionsSent: () => reactionsSent };
 }
