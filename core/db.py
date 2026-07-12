@@ -493,6 +493,58 @@ class PendingReplyRepo(_Repo):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 10) خانات المُرسِل (§7.3) — فهرس مشتقّ (cache) لربط الرسالة الثانية بنفس المُرسِل حتمًا
+# ─────────────────────────────────────────────────────────────────────────────
+class SenderSlotRepo(_Repo):
+    """خانة = «مُرسِل فتح رسالةً أولى تنتظر ثانيتها في غرفة» (§7.3). ليست مصدر حقيقة (Deal هو)؛
+    مجرّد فهرس يُسرّع اختيار الصفقة المعلّقة بلا تخمين. تُنظَّف بـ TTL على expires_at. فريدة
+    لكل (غرفة|مُرسِل). فقدانها/انتهاؤها لا يفقد بيانات — دورة حياة الصفقة تبقى عبر sweeps."""
+
+    @staticmethod
+    def _key(chat_jid: str, sender_jid: str) -> str:
+        return f"{chat_jid}|{sender_jid}"
+
+    async def open(self, *, chat_jid: str, sender_jid: str, deal_id: str,
+                   first_message_key: Optional[str], now: datetime, window_seconds: int) -> None:
+        """يفتح/يستبدل خانة (غرفة|مُرسِل) — خانة واحدة مفتوحة لكل مُرسِل (الأحدث تفوز)."""
+        slot_key = self._key(chat_jid, sender_jid)
+        await self.col.update_one(
+            {"slot_key": slot_key},
+            {"$set": {
+                "slot_key": slot_key, "chat_jid": chat_jid, "sender_jid": sender_jid,
+                "deal_id": deal_id, "first_message_key": first_message_key,
+                "opened_at": now, "expires_at": now + timedelta(seconds=window_seconds),
+                "status": "open",
+            }},
+            upsert=True,
+        )
+
+    async def find_open(self, chat_jid: str, sender_jid: Optional[str],
+                        now: datetime) -> Optional[dict]:
+        """خانة مفتوحة غير منتهية لـ (غرفة|مُرسِل). العمر يُفحَص في الاستعلام صراحةً — لا اعتماد
+        على توقيت TTL (يمسح بتأخّر ~دقيقة). None إن لا مُرسِل/لا خانة/انتهت."""
+        if not sender_jid:
+            return None
+        doc = await self.col.find_one(
+            {"slot_key": self._key(chat_jid, sender_jid), "status": "open"}
+        )
+        if not doc:
+            return None
+        if _naive_utc(doc["expires_at"]) < _naive_utc(now):
+            return None
+        doc.pop("_id", None)
+        return doc
+
+    async def fill(self, chat_jid: str, sender_jid: str) -> None:
+        """استُهلكت الخانة (رُبطت ثانيتها) → تُحذف (مشتقّة، لا أثر محاسبي)."""
+        await self.col.delete_one({"slot_key": self._key(chat_jid, sender_jid)})
+
+    async def clear_all(self) -> None:
+        """مسح كل الخانات — تُعاد اشتقاقها عند الإقلاع (§7.3 Recovery)."""
+        await self.col.delete_many({})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # الواجهة الجامعة
 # ─────────────────────────────────────────────────────────────────────────────
 class Database:
@@ -519,6 +571,7 @@ class Database:
         self.dead_letter = DeadLetterRepo(self.mdb, "dead_letter", "_id")
         self.pending_replies = PendingReplyRepo(self.mdb, "pending_replies", "message_key")
         self.unknown_terms = UnknownTermRepo(self.mdb, "unknown_terms", "term")
+        self.sender_slots = SenderSlotRepo(self.mdb, "sender_slots", "slot_key")
         log.info("اتصال MongoDB: %s / %s", self._uri, self._db_name)
 
     async def ensure_indexes(self) -> None:
@@ -554,6 +607,11 @@ class Database:
         # فالبنود غير المُرسَلة (بلا sent_at) لا تنتهي أبدًا → لا تُحذف تنبيهات المسؤول المعلّقة.
         await self.outgoing.col.create_index("sent_at", expireAfterSeconds=300, name="ttl_sent_at")
         await self.employees.col.create_index("whatsapp_number", unique=True)
+        # خانات المُرسِل (§7.3): خانة واحدة مفتوحة لكل (غرفة|مُرسِل) + TTL على expires_at.
+        # TTL بلا partialFilter (قيد Mongo) — لكن الخانة مشتقّة فحذفها التلقائي غير ضارّ.
+        await self.sender_slots.col.create_index("slot_key", unique=True)
+        await self.sender_slots.col.create_index(
+            "expires_at", expireAfterSeconds=0, name="ttl_slot_expires")
         await self.unknown_terms.col.create_index([("term", 1), ("context", 1)], unique=True)
         await self.unknown_terms.col.create_index("last_seen")
         log.info("تمّت تهيئة الفهارس")

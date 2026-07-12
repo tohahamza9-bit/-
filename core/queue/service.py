@@ -25,7 +25,7 @@ from ..constants import (
 from ..db import Database
 from ..logging_setup import get_logger
 from ..models import Deal, ParsedLeg, RawMessage, SupplierRecord, SupplierRef, TreasuryRecord, TreasuryRef, WriteJob
-from ..parsing import parse_completion_fragment
+from ..parsing import extract_code_name_price_lines, parse_completion_fragment, parse_message
 from ..parsing.normalize import normalize_price
 from ..parsing.resolve import resolve_treasury
 from .commission import compute_commission
@@ -420,6 +420,64 @@ class QueueService:
         frag = ParsedLeg(operation=OperationType.SELL, customer_code=scode,
                          customer_name=sname, price_raw=sprice)
         return await self._absorb_supplier_leg(deal, frag, message_key, treasuries, now)
+
+    async def absorb_second_into(
+        self, deal: Deal, raw: RawMessage, now: datetime,
+        treasuries: list[TreasuryRecord], suppliers: list[SupplierRecord],
+    ) -> tuple[Deal, bool] | None:
+        """يدمج الرسالة الثانية `raw` في صفقة معلّقة **محدّدة** `deal` اختارتها خانة المُرسِل (§7.3)
+        — يعيد استخدام مكانيكا الدمج القائمة حسب شكل الجزء، بلا مطابقة ref/عملة/تجاور (الخانة
+        حسمت الاختيار حتمًا). يُرجع `(الصفقة، هل تُعالَج فورًا)` أو None إن لم يُطابِق الجزء أيّ شكل
+        إكمال (فيسقط للمسار القديم fallback: try_absorb_*/الردود المعلّقة).
+
+        🔴 قرار «فورًا» يطابق المسار القديم بدقّة: سطرَا كود+اسم+سعر والخزينة-بنفس-الرقم تُعالَج
+        فورًا (كما كان try_absorb_*)، أمّا الجزء المكمّل («بلس»/«صافي») فيُربَط ويبقى PARSED لتُعالِجه
+        النبضة (كما كان absorb_fragment لا يستدعي process_deal)."""
+        text = raw.text or ""
+        # (١) سطرَا «كود+اسم+سعر» (زبون + مورد) — يكمل الهوية ويدمج المورد (§7.3) → فورًا
+        pairs = extract_code_name_price_lines(text, suppliers)
+        if len(pairs) >= 2:
+            merged = await self.absorb_customer_supplier(
+                deal, pairs[0], pairs[1], raw.message_key, treasuries, now)
+            return merged, True
+        result = parse_message(text, treasuries, suppliers)
+        leg = result.leg
+        # (٢) «رقم إشاري + خزينة» بلا هوية — خزينة عادية أو تسوية خصم (Aخصم §6.3) → فورًا
+        if leg is not None and is_treasury_second_reply(leg):
+            sell = deal.sell_leg
+            if sell is not None:
+                pair = discount_pair(sell, leg)
+                if pair is not None:
+                    merged = await self._merge_discount(deal, pair[0], pair[1], now)
+                    return merged, True
+                if sell.treasury is None:
+                    sell.treasury = leg.treasury
+                    deal.status = Status.PARSED
+                    deal.waiting_deadline = None
+                    if raw.message_key and raw.message_key not in deal.source_message_keys:
+                        deal.source_message_keys.append(raw.message_key)
+                    deal.updated_at = now
+                    await self.db.deals.upsert(deal)
+                    log.info("خانة المُرسِل: أُكملت خزينة «%s» للصفقة %s",
+                             leg.treasury.name, deal.deal_id)
+                    return deal, True
+        # (٣) جزء مكمّل («بلس»/«صافي»/مورد بلا ref) — نفس مكانيكا absorb_fragment (_apply_fragment)،
+        #     يُربَط ويبقى PARSED (تُعالِجه النبضة، لا فورًا) → يطابق السلوك القديم تمامًا.
+        frag = parse_completion_fragment(text, treasuries, suppliers)
+        frag.sender_jid = raw.sender_jid
+        frag.source_message_key = raw.message_key
+        if is_completion_fragment(frag):
+            self._apply_fragment(deal, frag)
+            deal.status = Status.PARSED
+            deal.waiting_deadline = None
+            if raw.message_key and raw.message_key not in deal.source_message_keys:
+                deal.source_message_keys.append(raw.message_key)
+            deal.updated_at = now
+            await self.db.deals.upsert(deal)
+            log.info("خانة المُرسِل: رُبط الجزء المكمّل بالصفقة %s (PARSED — تُعالِجه النبضة)",
+                     deal.deal_id)
+            return deal, False
+        return None
 
     @staticmethod
     def _apply_leg(deal: Deal, leg: ParsedLeg) -> None:

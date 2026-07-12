@@ -142,6 +142,13 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل
             log.exception("فشل حجْر الإقلاع: %s — متابعة.", exc)
 
+        # 🔴 Recovery خانات المُرسِل (§7.3): أعِد اشتقاق الخانات (cache) من الصفقات المعلّقة الحديثة
+        #    بعد الحجْر — الخانة ليست مصدر حقيقة فتُعاد بناؤها، لا تُستعاد. غير حرج للإقلاع (T5).
+        try:
+            await pipeline.rebuild_sender_slots(utcnow())
+        except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل
+            log.exception("فشل إعادة بناء خانات المُرسِل: %s — متابعة.", exc)
+
         if run_worker_now:
             state["worker"] = asyncio.create_task(_worker_loop(pipeline, state["stop"]))
         # القيمة الحقيقية المحفوظة في DB (§13) — لا نصّ ثابت مضلِّل: التخزين يُقرأ حيًّا من bot_control،

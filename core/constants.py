@@ -144,6 +144,7 @@ STABILIZE_MIN_SECONDS = 60          # §7.2 استقرار الرسالة الق
 STABILIZE_MAX_SECONDS = 90          # §7.2 / §15
 SECOND_LEG_MAX_SECONDS = 90         # §7.3 الحد الأقصى لانتظار الطرف الثاني (دقيقة ونصف)
 BATCH_PAIR_SECONDS = 3              # §7.3-أ زوج متلاحق: رسالتان في نفس الدفعة بفرق <3ث → ربط فوريّ
+SENDER_SLOT_WINDOW_SECONDS = 5     # §7.3 خانة المُرسِل: رسالة ثانية من نفس المُرسِل خلال 5ث → ربط حتميّ
 INCOMPLETE_DATA_ESCALATE_SECONDS = 15 * 60  # §7.3 حوالة A ناقصة بلا رسالة ثانية → تصعيد للمسؤول
 SECOND_MESSAGE_LINK_SECONDS = 120   # §7.3 نافذة ربط رد الخزينة/المورد بحوالة معلّقة (دقيقتان)
 PENDING_REPLY_MAX_SECONDS = 90      # §7.3 احتفاظ برد خزينة/مورد وصل قبل حوالته (رد معلّق)

@@ -22,6 +22,7 @@ from .bus import Bus
 from .constants import (
     BATCH_PAIR_SECONDS,
     INCOMPLETE_DATA_ESCALATE_SECONDS,
+    SENDER_SLOT_WINDOW_SECONDS,
     Currency,
     Mark,
     OperationType,
@@ -223,6 +224,29 @@ class Pipeline:
         # الفهم (§3-§5)
         treasuries = await self.db.treasuries.all_active()
         suppliers = await self.db.suppliers.all_active()
+        result = parse_message(raw.text, treasuries, suppliers)
+
+        # ═══ خانة المُرسِل (Sender Slot §7.3) — المسار الأساسيّ لربط الرسالة الثانية ═══
+        # جزء ثانٍ من نفس المُرسِل خلال SENDER_SLOT_WINDOW ثوانٍ → يُربَط بخانته حتمًا، بلا تخمين
+        # ref/عملة/تجاور. SI لا تدخل هنا إطلاقًا (لا تفتح خانة ولا تملؤها §4.5). لا خانة أو تعذّر
+        # الدمج → يسقط للمسار القديم (try_absorb_*/الردود المعلّقة) كـ fallback (قرار المستخدم).
+        if raw.sender_jid and not (result.leg is not None and result.leg.is_si_format):
+            slot = await self.db.sender_slots.find_open(raw.chat_jid, raw.sender_jid, now)
+            if slot is not None:
+                target = await self.db.deals.get(slot["deal_id"])
+                if target is not None and target.status == Status.WAITING_SECOND_LEG:
+                    absorbed = await self.queue.absorb_second_into(
+                        target, raw, now, treasuries, suppliers)
+                    if absorbed is not None:
+                        merged, immediate = absorbed
+                        await self.db.sender_slots.fill(raw.chat_jid, raw.sender_jid)
+                        log.info("خانة المُرسِل: رُبطت الرسالة الثانية %s بالصفقة %s (نفس المُرسِل)",
+                                 raw.message_key, merged.deal_id)
+                        # فورًا للاكتمال الكامل (كود+اسم+سعر / خزينة بنفس الرقم)؛ الجزء المكمّل يبقى
+                        # PARSED لتُعالِجه النبضة — مطابقةً للسلوك القديم (absorb_fragment لا يُعالج فورًا).
+                        if immediate:
+                            return await self.process_deal(merged, now)
+                        return merged
 
         # 🔴 ربط الرسالة الثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون ثم مورد §7.3) بصفقة معلّقة
         #    في نفس الغرفة خلال النافذة — **قبل التصنيف** كي لا تُسقَط noise/خارج-النطاق. لو نجح الربط
@@ -242,8 +266,6 @@ class Pipeline:
                 )
                 log.warning("رسالة ثانية بلا رقم + تعدّد معلّقات (%d) — تصعيد (§0).", len(cands))
                 return None
-
-        result = parse_message(raw.text, treasuries, suppliers)
 
         # 🔴 خزينة SI معنونة لم تُحلّ (§4.5): تُلتقط مجهولةً للإسناد اليدويّ من اللوحة (بلا تخمين §0).
         if result.leg is not None and result.leg.unresolved_treasury:
@@ -342,6 +364,15 @@ class Pipeline:
 
         # التجميع (§7.3): صفقة جديدة أو دمج طرف ثانٍ
         deal = await self.queue.try_group(leg, now, chat_jid=raw.chat_jid)
+        # افتح خانة مُرسِل إن بقيت الصفقة تنتظر طرفًا ثانيًا (§7.3): الرسالة الثانية من نفس المُرسِل
+        # خلال النافذة ستملؤها حتمًا. SI لا تفتح خانة (لا تنتظر ثانيًا §4.5) — والحالة WAITING تمنعها.
+        if (deal is not None and deal.status == Status.WAITING_SECOND_LEG
+                and raw.sender_jid and not leg.is_si_format):
+            await self.db.sender_slots.open(
+                chat_jid=raw.chat_jid, sender_jid=raw.sender_jid, deal_id=deal.deal_id,
+                first_message_key=raw.message_key, now=now,
+                window_seconds=SENDER_SLOT_WINDOW_SECONDS,
+            )
         return deal
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -380,6 +411,31 @@ class Pipeline:
         if quarantined:
             log.info("حجْر الإقلاع (§7.3): %d صفقة معلّقة قديمة حُجِرت بلا كتابة", len(quarantined))
         return quarantined
+
+    async def rebuild_sender_slots(self, now: datetime) -> int:
+        """Recovery خانات المُرسِل (§7.3): الخانة مشتقّة (cache) — تُعاد اشتقاقها عند الإقلاع لا
+        تُستعاد. تُمسح كلها، ثم تُفتح خانة لكل صفقة WAITING عمرها ≤ النافذة ولها مُرسِل معروف؛
+        الأقدم يبقى للصفقة عبر expire_stale_on_startup (لا خانة له → لا ربط فوريّ خاطئ بعد الإقلاع).
+        تُستدعى **بعد** حجْر الإقلاع فلا تُعيد بناء خانة لصفقة حُجِرت. يُرجع عدد الخانات المُعاد بناؤها."""
+        await self.db.sender_slots.clear_all()
+        rebuilt = 0
+        cutoff = _as_naive_utc(now) - timedelta(seconds=SENDER_SLOT_WINDOW_SECONDS)
+        for deal in await self.db.deals.by_status(Status.WAITING_SECOND_LEG):
+            leg = deal.sell_leg or deal.buy_leg
+            sender = leg.sender_jid if leg is not None else None
+            if not sender or not deal.chat_jid:
+                continue
+            if _as_naive_utc(deal.created_at) < cutoff:
+                continue                          # أقدم من النافذة → لا خانة (المسار القديم fallback)
+            await self.db.sender_slots.open(
+                chat_jid=deal.chat_jid, sender_jid=sender, deal_id=deal.deal_id,
+                first_message_key=self._deal_key(deal), now=now,
+                window_seconds=SENDER_SLOT_WINDOW_SECONDS,
+            )
+            rebuilt += 1
+        if rebuilt:
+            log.info("Recovery خانات المُرسِل (§7.3): أُعيد بناء %d خانة من صفقات معلّقة حديثة", rebuilt)
+        return rebuilt
 
     # ═════════════════════════════════════════════════════════════════════════
     # (5) الطرف الثاني: تصعيد المتأخّر + معالجة الصفقات الجاهزة
