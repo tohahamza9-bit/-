@@ -78,8 +78,11 @@ def build_amendment_jobs(deal: Deal, current_net: float, new_net: float,
         return []                                    # لا فرق → لا قيد
     reduce = diff > 0
     comm = None
-    if new_commission:                               # خصم → العمولة الجديدة (بإشارة الأصل)
-        comm = math.copysign(new_commission, leg.commission or 1.0)
+    if new_commission is not None and leg.commission:
+        # 🔴 خانة العمولة بشاشة الشراء = **فرق** العمولة (old − new)، لا العمولة الجديدة الكاملة —
+        #    فيُعكَس جزء الخصم المقابل للفرق فقط، فيبقى الصافي = X بعمولته الجديدة.
+        #    مثال: أصلي 10100 (خصم 101) → تعديل 7070 (خصم جديد 70) → خانة العمولة = 101−70 = 31.
+        comm = math.copysign(abs(leg.commission) - new_commission, leg.commission)
     rev = leg.model_copy(update={
         "operation": OperationType.BUY if reduce else OperationType.SELL,
         "amount": abs(diff),
