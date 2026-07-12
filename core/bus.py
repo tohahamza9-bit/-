@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
+import httpx
+
 from .db import Database
 from .logging_setup import get_logger
 from .models import OutgoingMessage
@@ -28,11 +30,51 @@ class Bus:
     غرف الزبائن/الخزائن ليست هنا إطلاقًا → قراءة صامتة مطلقة (§2.2).
     """
 
-    def __init__(self, db: Database, allowed_jids: set[str], central_jid: str, admin_jid: str):
+    def __init__(
+        self,
+        db: Database,
+        allowed_jids: set[str],
+        central_jid: str,
+        admin_jid: str,
+        *,
+        bridge_url: str = "",
+        internal_token: str = "",
+    ):
         self._db = db
         self._allowed = {j for j in allowed_jids if j}
         self.central_jid = central_jid
         self.admin_jid = admin_jid
+        # جسر واتساب — إشعار فوري بالدفع (§8.3): بعد كل كتابة في outgoing نطلب POST /flush
+        #   فيُفرِغ الجسر الطابور فورًا بلا انتظار polling. الفشل يُبتلع (polling يبقى fallback).
+        self._bridge_url = (bridge_url or "").rstrip("/")
+        self._internal_token = internal_token
+        self._bg_tasks: set[asyncio.Task] = set()  # مراجع للمهام الخلفية (منع جمعها بـ GC)
+
+    # ── إشعار الجسر بالدفع الفوري (§8.3) ──
+    async def _flush_bridge(self) -> None:
+        """يطلب من الجسر إفراغ طابور outgoing فورًا. الفشل (الجسر متوقّف/بطيء) يُبتلع
+        بلا تعطيل المسار — polling الدوري في الجسر يبقى fallback (T5: يُسجَّل debug)."""
+        if not self._bridge_url:
+            return
+        try:
+            headers = {"X-Internal-Token": self._internal_token} if self._internal_token else {}
+            async with httpx.AsyncClient(timeout=1.0) as client:
+                await client.post(f"{self._bridge_url}/flush", headers=headers)
+        except Exception as exc:  # noqa: BLE001 — الجسر متوقّف/بطيء → polling fallback (لا نُعطّل)
+            log.debug("تعذّر إشعار الجسر بالدفع الفوري (%s) — polling fallback.", exc)
+
+    def _poke_bridge(self) -> None:
+        """إشعار فوري fire-and-forget بعد كل enqueue — لا ينتظر (لا يبطّئ مسار المعالجة)."""
+        if not self._bridge_url:
+            return
+        task = asyncio.create_task(self._flush_bridge())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def flush_reactions(self) -> None:
+        """انتظار دفع الطابور للجسر (best-effort) — يُستدعى بعد وضع العلامة (§8.3) لضمان ظهور
+        التفاعل قبل معالجة الحوالة التالية. فشل الجسر يُبتلع (polling fallback)."""
+        await self._flush_bridge()
 
     def _guard(self, chat_jid: str) -> None:
         if chat_jid not in self._allowed:
@@ -49,6 +91,7 @@ class Bus:
         await self._db.outgoing.enqueue(
             OutgoingMessage(chat_jid=chat_jid, text=text, reply_to_key=reply_to_key)
         )
+        self._poke_bridge()  # إشعار فوري (§8.3)
         log.info("Reply → %s (ردًّا على %s): %s", chat_jid, reply_to_key, text[:80])
 
     async def react(self, chat_jid: str, message_key: str, emoji: str) -> None:
@@ -67,6 +110,7 @@ class Bus:
             )
             await asyncio.sleep(1)
             await self._db.outgoing.enqueue(msg)
+        self._poke_bridge()  # إشعار فوري (§8.3)
         log.info("Reaction %s → %s على %s", emoji, chat_jid, message_key)
 
     # ── مساعدات وجهة صريحة (تمنع الأخطاء) ──
@@ -83,6 +127,7 @@ class Bus:
         await self._db.outgoing.enqueue(OutgoingMessage(
             chat_jid=self.admin_jid, text=text, reply_to_key=reply_to_key, forward_key=forward_key,
         ))
+        self._poke_bridge()  # إشعار فوري (§8.3)
         log.info("تصعيد للمسؤول%s: %s", " (+forward)" if forward_key else "", text[:80])
 
     async def mark_central(self, message_key: str, emoji: str) -> None:

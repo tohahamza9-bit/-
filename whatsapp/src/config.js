@@ -51,6 +51,8 @@ export function loadConfig(env = process.env) {
     sessionDir: resolveSessionDir(env.WA_SESSION_DIR),
     logLevel: env.LOG_LEVEL || 'info',
     senderIntervalMs: Number(env.WA_SENDER_INTERVAL_MS || 2000),
+    // منفذ خادم الإشعار الفوري (§8.3): النواة تطلب POST /flush ليُفرِغ الطابور بلا انتظار polling.
+    flushPort: Number(env.WA_FLUSH_PORT || 3001),
   };
 
   // الوجهات المسموحة (§2.2) — للحقن في whitelist

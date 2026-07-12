@@ -97,7 +97,10 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         await _db.suppliers.seed_if_missing(SEED_SUPPLIERS)  # موردو القائمة البيضاء الناقصون (§5.4)
         await _seed_rooms_from_env(_db, settings)  # §شرط 4 — بذر الغرف الحالية من env
 
-        bus = Bus(_db, settings.allowed_output_jids, settings.central_room_jid, settings.admin_room_jid)
+        bus = Bus(
+            _db, settings.allowed_output_jids, settings.central_room_jid, settings.admin_room_jid,
+            bridge_url=settings.whatsapp_bridge_url, internal_token=settings.internal_token,
+        )
         writer = MoneyadoWriter(settings=settings)
         verifier = _build_verifier(settings)
         pipeline = Pipeline(

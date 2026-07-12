@@ -647,6 +647,7 @@ class Pipeline:
                 deal.mark = Mark.FAILED
                 await self.db.deals.set_status(deal.deal_id, deal.status, mark=Mark.FAILED.value)
                 await self.matcher.apply_mark(deal, Mark.FAILED)   # 🔴 على الرسالتين (§8.3)
+                await self.bus.flush_reactions()                   # دفع فوري قبل الحوالة التالية (§8.3)
                 await self.bus.notify_admin(
                     f"🔴 فشل: {self._ref(deal)} — فشل {job.operation.value}: {res.error} "
                     f"{'(لقطة محفوظة)' if res.screenshot_path else ''}.",
@@ -675,6 +676,7 @@ class Pipeline:
                 deal.mark = Mark.FAILED
                 await self.db.deals.set_status(deal.deal_id, deal.status, mark=Mark.FAILED.value)
                 await self.matcher.apply_mark(deal, Mark.FAILED)   # 🔴 على الرسالتين (§8.3)
+                await self.bus.flush_reactions()                   # دفع فوري قبل الحوالة التالية (§8.3)
                 await self.bus.notify_admin(
                     f"🔴 فشل: {self._ref(deal)} — لم يتأكّد حفظ {job.operation.value} في SQL (§11.4).",
                     key, forward_key=self._deal_key(deal),
@@ -692,6 +694,7 @@ class Pipeline:
                 deal.mark = Mark.DONE
                 await self.db.deals.upsert(deal)                # نحفظ العلامة فقط، لا الحالة
                 await self.matcher.apply_mark(deal, Mark.DONE)  # ✅ صامت (§8.3)
+                await self.bus.flush_reactions()                # دفع فوري (§8.3)
                 log.info("✅ DRY_RUN — الصفقة %s عُبّئت ومُعروضة (بلا تخزين).", deal.deal_id)
             return deal
 
@@ -702,6 +705,7 @@ class Pipeline:
             await self.db.deals.set_status(deal.deal_id, Status.COMPLETED, mark=Mark.DONE.value)
             if key:
                 await self.matcher.apply_mark(deal, Mark.DONE)  # ✅ صامت (§8.3)
+                await self.bus.flush_reactions()                # دفع فوري (§8.3)
             log.info("✅ الصفقة %s تمّت وتأكّدت", deal.deal_id)
         return deal
 

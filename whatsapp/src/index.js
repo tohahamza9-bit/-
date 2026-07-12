@@ -2,6 +2,7 @@
  * التركيب — اتصال Baileys + capture + sender + antiban + إغلاق آمن (§14).
  * لا يُشغَّل ضمن الاختبارات (يستورد Baileys/Mongo). يُشغَّل: `node src/index.js`.
  */
+import http from 'node:http';
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 
@@ -102,6 +103,23 @@ async function main() {
   // بذر الغرف من env أول تشغيل (§شرط 4) — يضمن صحّة نطاق الالتقاط من الرسالة الأولى.
   // 🔴 Option A: المركزية/المسؤول تبقى حدود الكتابة من env؛ البذر للالتقاط/العرض فقط.
   await seedRoomsFromConfig(dbh.rooms, cfg, logger);
+
+  // §8.3 حماية الإقلاع (مرّة واحدة عند إقلاع العملية فقط، لا عند كل reconnect): نُسقِط التفاعلات
+  // **غير المُرسَلة** الأقدم من 5د كي لا يتفاعل البوت على رسائل قديمة بعد توقّف طويل. لا نمسّ
+  // التنبيهات النصّية (Reply/تصعيد مسؤول) ولا التفاعلات الطازجة — تلك تبقى للإرسال.
+  try {
+    const cutoff = new Date(Date.now() - 300_000);
+    const res = await dbh.outgoing.deleteMany({
+      sent: false,
+      reaction: { $exists: true, $ne: null },
+      created_at: { $lt: cutoff },
+    });
+    if (res.deletedCount) {
+      logger.info('حماية الإقلاع: حُذف %d تفاعل بائت غير مُرسَل (> 5د)', res.deletedCount);
+    }
+  } catch (e) {
+    logger.warn({ err: e }, 'تعذّر تنظيف التفاعلات البائتة عند الإقلاع'); // T5 — غير حرج للإقلاع
+  }
 
   // ذاكرة أسماء المجموعات (§شرط 2): تُملأ من أحداث groups.upsert (بلا شبكة).
   // groupMetadata() لا تُستدعى إلا لغرفة مجهولة أول مرة فقط، ونُثبّت النتيجة دائمًا.
@@ -216,6 +234,24 @@ async function main() {
   });
   sender.loop(cfg.senderIntervalMs).catch((e) => logger.error({ err: e }, 'حلقة الإرسال توقّفت'));
 
+  // §8.3 خادم الإشعار الفوري: النواة تطلب POST /flush بعد كل كتابة في outgoing → إفراغ فوري
+  // بلا انتظار polling. محصور على 127.0.0.1 (محلّي فقط)؛ فحص X-Internal-Token إن ضُبط.
+  // حارس التزامن في sender.tick يمنع تشابك هذه الجولة مع الجولة الدورية (لا إرسال مزدوج).
+  const flushServer = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/flush') {
+      if (cfg.internalToken && req.headers['x-internal-token'] !== cfg.internalToken) {
+        res.writeHead(403); res.end('forbidden'); return;
+      }
+      res.writeHead(200); res.end('ok');
+      sender.tick().catch((e) => logger.error({ err: e }, 'خطأ في tick عبر /flush')); // T5
+      return;
+    }
+    res.writeHead(404); res.end('not found');
+  });
+  flushServer.on('error', (e) => logger.error({ err: e }, '🔴 تعذّر تشغيل خادم /flush — polling fallback')); // T5
+  flushServer.listen(cfg.flushPort, '127.0.0.1', () =>
+    logger.info('خادم الإشعار الفوري يعمل على 127.0.0.1:%d (POST /flush)', cfg.flushPort));
+
   // ── T3: إغلاق آمن (SIGTERM graceful drain) ──
   async function shutdown(signal, exitCode = 0) {
     if (closing) return;
@@ -223,6 +259,7 @@ async function main() {
     logger.info('T3 — إغلاق آمن (%s)…', signal);
     try {
       sender?.stop();
+      flushServer?.close();                          // أوقف خادم /flush
       await new Promise((r) => setTimeout(r, 500)); // درين قصير للجولة الجارية
       await saveCreds();
       sock?.end?.(undefined); // يغلق المقبس دون تسجيل خروج (يحفظ الجلسة)

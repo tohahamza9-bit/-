@@ -10,9 +10,30 @@ import { assertAllowedDestination, OutputBlockedError } from './whitelist.js';
 import { decodeKey } from './keys.js';
 import { sendDelayMs, roomGapMs, sleep } from './antiban.js';
 
+const STALE_REACTION_MS = 300_000; // §8.3: تفاعل بائت > 5د لا يُرسَل (لا تفاعل على رسالة قديمة).
+
 export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger }) {
   let running = false;
+  let ticking = false; // حارس تزامن: يمنع تشابك tick الدوري مع tick القادم من /flush (إرسال مزدوج)
   let lastJid = null;
+
+  /** إرسال بند مع إعادة واحدة بعد ثانية عند الفشل (§8.3). يُرجع true عند النجاح. */
+  async function sendWithRetry(d) {
+    try {
+      await sendOne(d);
+      return true;
+    } catch (e) {
+      logger.warn({ err: e, jid: d.chat_jid }, 'فشل إرسال بند صادر — إعادة واحدة بعد ثانية'); // T5
+      await sleep(1000);
+      try {
+        await sendOne(d);
+        return true;
+      } catch (e2) {
+        logger.error({ err: e2, jid: d.chat_jid }, 'فشل الإرسال مرتين'); // T5
+        return false;
+      }
+    }
+  }
 
   /** إرسال بند واحد فعليًا عبر Baileys. */
   async function sendOne(d) {
@@ -47,8 +68,18 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
     }
   }
 
-  /** جولة واحدة على الطابور. */
+  /** جولة واحدة على الطابور. محميّة بحارس تزامن (لا تشابك loop مع /flush). */
   async function tick() {
+    if (ticking) return; // جولة جارية بالفعل → تفادي إرسال مزدوج لنفس البنود (sent=false)
+    ticking = true;
+    try {
+      await _tickInner();
+    } finally {
+      ticking = false;
+    }
+  }
+
+  async function _tickInner() {
     const docs = await outgoing
       .find({ sent: false })
       .sort({ created_at: 1 })
@@ -67,7 +98,7 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
         assertAllowedDestination(d.chat_jid, dests, logger);
       } catch (e) {
         if (e instanceof OutputBlockedError) {
-          // نعلّمها مُرسلة+محظورة كي لا تُعاد للأبد، ونسجّل (T5)
+          // نعلّمها مُرسلة+محظورة كي لا تُعاد للأبد, ونسجّل (T5)
           logger.error({ jid: d.chat_jid, id: String(d._id) }, '🔴 بند صادر لوجهة ممنوعة — أُسقط');
           await outgoing.updateOne(
             { _id: d._id },
@@ -76,6 +107,22 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
           continue;
         }
         throw e;
+      }
+
+      // §8.3 حماية التراكم: تفاعل بائت (رسالة قديمة > 5د) لا يُرسَل — يُعلَّم مُرسَلًا+بائتًا كي لا
+      //   يُعاد، ولا نتفاعل على رسالة قديمة. يُفحص قبل warm-up كي يُنظَّف حتى عند بلوغ السقف.
+      //   (النصوص المهمّة — Reply/تصعيد — لا تُسقَط بالعمر هنا؛ تبقى للإعادة.)
+      if (d.reaction && d.created_at) {
+        const ageMs = Date.now() - new Date(d.created_at).getTime();
+        if (ageMs > STALE_REACTION_MS) {
+          logger.warn({ id: String(d._id), age_s: Math.round(ageMs / 1000) },
+            '⏭️ تفاعل بائت (> 5د) — تخطٍّ بلا إرسال');
+          await outgoing.updateOne(
+            { _id: d._id },
+            { $set: { sent: true, stale: true, sent_at: new Date() } },
+          );
+          continue;
+        }
       }
 
       // warm-up — احترام سقف الساعة
@@ -89,14 +136,22 @@ export function makeSender({ sock, outgoing, raw, dests, breaker, warmup, logger
       // W1 — تأخير عشوائي gaussian قبل كل إرسال
       await sleep(sendDelayMs());
 
-      try {
-        await sendOne(d);
+      const ok = await sendWithRetry(d);
+      if (ok) {
         warmup.record();
         lastJid = d.chat_jid;
         await outgoing.updateOne({ _id: d._id }, { $set: { sent: true, sent_at: new Date() } });
-      } catch (e) {
-        // لا نعلّمها sent → تُعاد المحاولة. نسجّل (T5)
-        logger.error({ err: e, jid: d.chat_jid }, 'فشل إرسال بند صادر — ستُعاد المحاولة');
+      } else if (d.reaction) {
+        // تفاعل (مرآة تجميلية §8.3) فشل مرتين → يُسقَط (sent+failed) كي لا يكسر الطابور.
+        logger.error({ id: String(d._id) }, '🔴 تفاعل فشل مرتين — إسقاط (مرآة فقط)');
+        await outgoing.updateOne(
+          { _id: d._id },
+          { $set: { sent: true, failed: true, sent_at: new Date() } },
+        );
+      } else {
+        // نصّ مهم (Reply/تصعيد مسؤول) — لا يُسقَط؛ يبقى sent=false للإعادة في الجولة التالية.
+        logger.error({ id: String(d._id), jid: d.chat_jid },
+          '🔴 نصّ فشل مرتين — سيُعاد (لا إسقاط)'); // T5
       }
     }
   }

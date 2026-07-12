@@ -549,6 +549,10 @@ class Database:
         await self.outbox.col.create_index("job_id", unique=True)
         await self.outbox.col.create_index([("created_at", 1), ("order_index", 1)])
         await self.outgoing.col.create_index([("sent", 1), ("created_at", 1)])
+        # TTL: تنظيف البنود **المُرسَلة** بعد 300s (§8.3 حماية التراكم). الفهرس على `sent_at`
+        # لا `created_at` عمدًا — Mongo لا يُطبّق TTL على مستند بلا قيمة تاريخ في الحقل المفهرس،
+        # فالبنود غير المُرسَلة (بلا sent_at) لا تنتهي أبدًا → لا تُحذف تنبيهات المسؤول المعلّقة.
+        await self.outgoing.col.create_index("sent_at", expireAfterSeconds=300, name="ttl_sent_at")
         await self.employees.col.create_index("whatsapp_number", unique=True)
         await self.unknown_terms.col.create_index([("term", 1), ("context", 1)], unique=True)
         await self.unknown_terms.col.create_index("last_seen")
