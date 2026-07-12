@@ -97,6 +97,10 @@ async function main() {
   let sender;
   let closing = false;          // T3 — علم الإغلاق الآمن (يوقف إعادة الاتصال)
   let reconnectPending = false; // يمنع تكديس إعادة الاتصال (backoff واحد فعّال في المرّة)
+  let connected = false;        // متّصل حاليًّا؟ (تُضبط على open/close — لنبضة الصحّة)
+  let everConnected = false;    // اتّصل ولو مرّة؟ (لا نُقحم إعادة اتصال قسريّة أثناء الربط الأوّليّ/QR)
+  let lastConnectedAt = Date.now(); // آخر لحظة اتصال ناجح (لقياس مدّة الانقطاع الصامت)
+  let healthTimer = null;       // مؤقّت نبضة الصحّة (يُنظَّف عند الإغلاق)
   let botJid = state.creds?.me?.id || '';
   const getBotJid = () => botJid;
 
@@ -183,22 +187,30 @@ async function main() {
       }
       if (connection === 'open') {
         breaker.onConnectionOpen();
+        connected = true;
+        everConnected = true;
+        lastConnectedAt = Date.now();   // مرجع نبضة الصحّة (آخر اتصال حيّ)
         botJid = sock.user?.id || botJid;
         logger.info('✅ اتصل واتساب — البوت: %s', botJid);
       }
       if (connection === 'close') {
+        connected = false;
         const code = lastDisconnect?.error?.output?.statusCode;
         const category = classifyDisconnect(code); // benign | fatal | unknown (§428)
         logger.warn({ code, category }, 'انقطع الاتصال');
 
-        // رفض حقيقي (401/500/403/411/440) → إعادة الاتصال بلا جدوى/ضارّة → توقّف فوري + تدخّل يدوي.
+        // رفض حقيقي (401/500/403/411/440) → إعادة الاتصال بلا جدوى/ضارّة.
         if (category === 'fatal') {
           breaker.onRejection(`رفض حقيقي code=${code}`);
           if (code === DisconnectReason.loggedOut) {
-            logger.error('🔴 تسجيل خروج (loggedOut) — احذف مجلد الجلسة وأعد الربط يدويًا. لا إعادة اتصال.');
-          } else {
-            logger.error('🔴 رفض نهائي code=%s (%s) — توقّف بلا إعادة اتصال، يلزم تدخّل يدوي.', code, category);
+            // 401 — إعادة التشغيل تدخل حلقة QR بلا جدوى → يبقى موقوفًا (لا exit) + تنبيه، تدخّل يدوي.
+            logger.error('🔴 تسجيل خروج (loggedOut) — احذف مجلد الجلسة وأعد الربط يدويًا. لا إعادة اتصال ولا إعادة تشغيل.');
+            return;
           }
+          // 440 connectionReplaced / 500 badSession / 411 / 403 — البقاء «زومبي» (مقبس ميت بلا إعادة
+          // اتصال) لا يفيد؛ إغلاق نظيف ثم exit(1) ليعيد PM2 تشغيلًا نظيفًا يعيد محاولة الاتصال (§428).
+          logger.error('🔴 رفض نهائي code=%s (%s) — إغلاق نظيف ثم exit(1) لإعادة تشغيل PM2.', code, category);
+          shutdown(`fatal-${code}`, 1);
           return;
         }
 
@@ -252,6 +264,34 @@ async function main() {
   flushServer.listen(cfg.flushPort, '127.0.0.1', () =>
     logger.info('خادم الإشعار الفوري يعمل على 127.0.0.1:%d (POST /flush)', cfg.flushPort));
 
+  // 🩺 نبضة صحّة كل 30s (§14.1):
+  //  (أ) حارس ذاكرة — **تسجيل فقط** عند RSS>500MB، بلا إعادة تشغيل تلقائيّة (قرار المستخدم).
+  //  (ب) كشف الموت الصامت للمقبس: لو انقطع الاتصال بلا حدث 'close' (TCP half-open) فلا مُشغِّل لإعادة
+  //      الاتصال — هنا نفرضها. نحترم closing/القاطع/reconnectPending، ولا نُقحمها قبل أوّل اتصال (QR).
+  const HEALTH_INTERVAL_MS = 30_000;
+  const RECONNECT_IF_DOWN_MS = 60_000;
+  const MEM_WARN_BYTES = 500 * 1024 * 1024;
+  healthTimer = setInterval(() => {
+    try {
+      const rss = process.memoryUsage().rss;
+      if (rss > MEM_WARN_BYTES) {
+        logger.warn({ rss_mb: Math.round(rss / 1048576) },
+          '⚠️ استهلاك ذاكرة مرتفع (> 500MB) — مراقبة فقط (بلا إعادة تشغيل تلقائيّة).');
+      }
+      if (closing || connected || !everConnected) return; // سليم/مغلق/لم يتّصل بعد → لا شيء
+      if (breaker.isOpen() || reconnectPending) return;    // لا نقاتل fatal/loggedOut ولا نكدّس
+      const downMs = Date.now() - lastConnectedAt;
+      if (downMs >= RECONNECT_IF_DOWN_MS) {
+        logger.warn({ down_s: Math.round(downMs / 1000) },
+          '🩺 نبضة الصحّة: مقبس غير متّصل > 60s بلا مُشغِّل — إعادة اتصال قسريّة.');
+        scheduleReconnect();
+      }
+    } catch (e) {
+      logger.error({ err: e }, 'خطأ في نبضة الصحّة'); // T5
+    }
+  }, HEALTH_INTERVAL_MS);
+  if (healthTimer.unref) healthTimer.unref();
+
   // ── T3: إغلاق آمن (SIGTERM graceful drain) ──
   async function shutdown(signal, exitCode = 0) {
     if (closing) return;
@@ -259,6 +299,7 @@ async function main() {
     logger.info('T3 — إغلاق آمن (%s)…', signal);
     try {
       sender?.stop();
+      if (healthTimer) clearInterval(healthTimer);   // أوقف نبضة الصحّة
       flushServer?.close();                          // أوقف خادم /flush
       await new Promise((r) => setTimeout(r, 500)); // درين قصير للجولة الجارية
       await saveCreds();
@@ -274,7 +315,12 @@ async function main() {
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('uncaughtException', (e) => { logger.error({ err: e }, '🔴 uncaughtException'); });
+  // Node يوصي بالخروج بعد استثناء غير ملتقَط (الحالة قد تكون فاسدة): نسجّل ثم إغلاق نظيف ليعيد PM2
+  // تشغيلًا سليمًا (قرار المستخدم). unhandledRejection يبقى «سجّل وابقَ» (أقلّ خطرًا، لم يُطلب تغييره).
+  process.on('uncaughtException', (e) => {
+    logger.error({ err: e }, '🔴 uncaughtException — إغلاق نظيف ثم exit(1) لإعادة تشغيل PM2');
+    shutdown('uncaughtException', 1);
+  });
   process.on('unhandledRejection', (e) => { logger.error({ err: e }, '🔴 unhandledRejection'); });
 
   logger.info('جسر MONEYADO WhatsApp يعمل.');
