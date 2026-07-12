@@ -707,10 +707,19 @@ class MoneyadoScreen(ScreenController):
 
     # ── النافذة الطارئة (§11.3) ──────────────────────────────────────────────
     def check_unexpected_window(self) -> Optional[str]:
-        if not _PYWINAUTO_AVAILABLE:
+        # 🔴 محصور بعملية MONEYADO وحدها (self._pid): النوافذ الطارئة (رصيد/خطأ/تنبيه/معاينة)
+        #    أبناءُ stock.exe فتشترك PID معها. المسح على **كل** نوافذ سطح المكتب كان يلتقط نوافذ
+        #    **أجنبية** (متصفّح/محادثة/Claude) عنوانها يحوي كلمةً مطابقةً (مثل «تنبيه» داخل
+        #    «التنبيهات») → فشل زائف أثناء البيع وتصعيد خاطئ. بلا PID مثبّت لا حصر آمن → لا فحص.
+        if not _PYWINAUTO_AVAILABLE or self._pid is None:
             return None
         try:
             for win in Desktop(backend="win32").windows():
+                try:
+                    if win.process_id() != self._pid:
+                        continue          # نافذة أجنبية (ليست MONEYADO) — تُتجاهَل
+                except Exception:
+                    continue              # تعذّر قراءة PID للنافذة — تخطٍّ آمن
                 title = win.window_text() or ""
                 if not title:
                     continue
