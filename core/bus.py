@@ -19,6 +19,10 @@ from .models import OutgoingMessage
 
 log = get_logger(__name__)
 
+# §8.3 ضمان إرسال التفاعلات قبل الصفقة التالية: فاصل الاستطلاع ومهلته القصوى.
+REACTION_WAIT_INTERVAL = 0.5
+REACTION_WAIT_TIMEOUT = 5.0
+
 
 class OutputBlocked(Exception):
     """محاولة إرسال لوجهة ممنوعة — تُلتقط وتُسجَّل، لا تُنفَّذ."""
@@ -75,6 +79,35 @@ class Bus:
         """انتظار دفع الطابور للجسر (best-effort) — يُستدعى بعد وضع العلامة (§8.3) لضمان ظهور
         التفاعل قبل معالجة الحوالة التالية. فشل الجسر يُبتلع (polling fallback)."""
         await self._flush_bridge()
+
+    async def wait_for_reaction_sent(
+        self, message_keys: list[str], timeout: float = REACTION_WAIT_TIMEOUT
+    ) -> None:
+        """انتظار مضمون (best-effort) لتأكيد إرسال تفاعلات هذه المفاتيح فعليًّا (sent=True) قبل
+        متابعة الصفقة التالية (§8.3) — فلا تتراكم/تتسابق التفاعلات لو كان الجسر (Baileys) بطيئًا.
+
+        يستطلع db.outgoing كل REACTION_WAIT_INTERVAL ثانية حتى لا يبقى تفاعل غير مُرسَل لهذه
+        المفاتيح، أو حتى انقضاء المهلة (5ث افتراضيًّا) فيسجّل تحذيرًا **ويتابع** (لا يوقف البوت).
+
+        بلا جسر مُهيَّأ (اختبار/تشغيل مركزية فقط بلا Baileys) → لا انتظار: لا مُرسِل خارجيّ
+        يُعلِّم الطابور sent، فالانتظار سيبلغ المهلة دائمًا بلا فائدة."""
+        if not self._bridge_url:
+            return
+        keys = [k for k in message_keys if k]
+        if not keys:
+            return
+        waited = 0.0
+        while True:
+            if await self._db.outgoing.pending_reactions(keys) == 0:
+                return  # كل التفاعلات أُرسِلت فعلًا → آمن للمتابعة
+            if waited >= timeout:
+                log.warning(
+                    "انتهت مهلة انتظار إرسال التفاعلات (%.1fs) — مفاتيح %s ما زالت غير مُرسَلة؛ "
+                    "متابعة بلا توقّف (§8.3، الجسر بطيء/متوقّف).", timeout, keys,
+                )
+                return
+            await asyncio.sleep(REACTION_WAIT_INTERVAL)
+            waited += REACTION_WAIT_INTERVAL
 
     def _guard(self, chat_jid: str) -> None:
         if chat_jid not in self._allowed:

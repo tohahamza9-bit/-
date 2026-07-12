@@ -301,6 +301,17 @@ class OutgoingRepo(_Repo):
     async def mark_sent(self, oid: Any) -> None:
         await self.col.update_one({"_id": oid}, {"$set": {"sent": True, "sent_at": utcnow()}})
 
+    async def pending_reactions(self, message_keys: list[str]) -> int:
+        """عدد التفاعلات (reaction) على هذه المفاتيح التي لم تُرسَل بعد (sent=False) — لضمان
+        تأكيد ظهور ✅/🔴 قبل معالجة الصفقة التالية (§8.3، wait_for_reaction_sent)."""
+        if not message_keys:
+            return 0
+        return await self.col.count_documents({
+            "reply_to_key": {"$in": message_keys},
+            "reaction": {"$nin": [None, ""]},
+            "sent": False,
+        })
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6) القوائم المُدارة من Dashboard (§13)

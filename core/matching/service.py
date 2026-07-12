@@ -531,6 +531,9 @@ class MatchingService:
             return
         for key in keys:
             await self._bus.mark_central(key, mark.value)
+        # ✅ مضمونة قبل الصفقة التالية (§8.3): ننتظر تأكيد إرسال التفاعلات فعلًا (sent=True) — أو
+        # المهلة (5ث) ثم تحذير ومتابعة — فلا تتراكم/تتسابق التفاعلات لو كان الجسر بطيئًا.
+        await self._bus.wait_for_reaction_sent(keys)
 
     # ── مساعدات ─────────────────────────────────────────────────────────────
     @staticmethod
