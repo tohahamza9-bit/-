@@ -28,6 +28,7 @@ from .models import (
     AuthEventRecord,
     BotControl,
     DashboardReview,
+    DetectionConfig,
     Deal,
     EmployeeRecord,
     LedgerEntry,
@@ -864,6 +865,26 @@ class DashboardReviewRepo(_Repo):
         return out
 
 
+class DashboardConfigRepo(_Repo):
+    """إعداد كشف الاحتيال (لوحة V2 م٢) — مستند مفرد قابل للتعديل. بنمط ControlRepo.
+    غيابه ⇒ القيم الافتراضية الموثّقة (بذرة متحفّظة). سجل داشبورد-محليّ مستقلّ."""
+
+    _KEY = "detection"
+
+    async def get(self) -> DetectionConfig:
+        doc = await self.col.find_one({"_key": self._KEY})
+        if not doc:
+            return DetectionConfig()
+        doc.pop("_key", None)
+        doc.pop("_id", None)
+        return DetectionConfig(**doc)
+
+    async def set(self, cfg: DetectionConfig) -> None:
+        payload = self._dump(cfg)
+        payload["_key"] = self._KEY
+        await self.col.update_one({"_key": self._KEY}, {"$set": payload}, upsert=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # الواجهة الجامعة
 # ─────────────────────────────────────────────────────────────────────────────
@@ -899,6 +920,8 @@ class Database:
         self.auth_events = AuthEventRepo(self.mdb, "auth_events", "_id")
         # لوحة V2 (م١): تعليقات مراجعة قائمة الانتباه — سجل داشبورد-محليّ مستقلّ
         self.reviews = DashboardReviewRepo(self.mdb, "dashboard_reviews", "deal_id")
+        # لوحة V2 (م٢): إعداد كشف الاحتيال — مستند مفرد قابل للتعديل
+        self.detection = DashboardConfigRepo(self.mdb, "dashboard_config", "_key")
         log.info("اتصال MongoDB: %s / %s", self._uri, self._db_name)
 
     async def ensure_indexes(self) -> None:

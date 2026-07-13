@@ -17,6 +17,9 @@ from typing import Any, Optional
 
 from core.constants import Mark, Status
 from core.db import Database
+from core.models import DetectionConfig
+
+from . import detect
 
 # حالات «تحتاج فعلًا بشريًا» + رتبة الإلحاح (قرار المالك):
 # HELD (بانتظار قرار) → ESCALATED (صُعِّدت) → TECH_FAILED (فشل تقني) → SELL_DONE (نصف-منفّذ).
@@ -201,41 +204,62 @@ async def get_timeline(db: Database, deal_id: str) -> Optional[dict]:
     }
 
 
-async def attention_items(db: Database, now: datetime) -> list[dict]:
-    """قائمة الانتباه: الحوالات المحتاجة فعلًا بشريًا، مرتّبة بالإلحاح ثم الأقدم أولًا (FIFO).
+async def attention_items(db: Database, now: datetime,
+                          config: Optional[DetectionConfig] = None) -> list[dict]:
+    """قائمة الانتباه: الحوالات المحتاجة فعلًا بشريًا (حالة + إشارات كشف احتيال م٢).
 
-    قراءة فقط: استعلام على الحالات + إرفاق سبب التعليق/العلامة والعمر وتعليق المراجعة.
+    قراءة فقط. الترتيب (قرار المالك): **الحالة أوّلًا** (HELD→ESCALATED→TECH_FAILED→SELL_DONE،
+    ثم «خارج الحالات النشطة» للمُشار إليها احتياليًا فقط)؛ **داخل كل مستوى** ترتفع المشبوهة
+    (إشارة احتيال + غير مراجَعة)، ثم غير المراجَعة، ثم المراجَعة، وأخيرًا FIFO (الأقدم أوّلًا).
     """
-    docs: list[dict] = []
+    signals = await detect.detect_signals(db, now, config)
+    sig_by_deal: dict[str, list[dict]] = {}
+    for s in signals:
+        sig_by_deal.setdefault(s["deal_id"], []).append(s)
+
+    docs: dict[str, dict] = {}
     async for d in db.deals.col.find({"status": {"$in": ATTENTION_STATUSES}}):
         d.pop("_id", None)
-        docs.append(d)
+        docs[d["deal_id"]] = d
+    # حوالات مُشار إليها احتياليًا خارج الحالات النشطة (مثل completed) — تُضمّ لئلّا يفوت التلاعب
+    for did in sig_by_deal:
+        if did not in docs:
+            extra = await db.deals.col.find_one({"deal_id": did})
+            if extra:
+                extra.pop("_id", None)
+                docs[did] = extra
 
-    reviews = await db.reviews.map_for([d.get("deal_id") for d in docs if d.get("deal_id")])
+    reviews = await db.reviews.map_for(list(docs.keys()))
     now_n = _naive(now)
     items: list[dict] = []
-    for d in docs:
+    for did, d in docs.items():
         status = d.get("status")
+        rank = _URGENCY_RANK.get(status, 4)          # 4 = خارج الحالات النشطة (مُشار إليها فقط)
         fifo_at = d.get("first_received_at") or d.get("created_at")
         age_seconds = None
         if isinstance(fifo_at, datetime):
             age_seconds = max(0, int((now_n - _naive(fifo_at)).total_seconds()))
-        rv = reviews.get(d.get("deal_id"))
+        rv = reviews.get(did)
+        sigs = sig_by_deal.get(did, [])
+        reviewed, has_sig = rv is not None, bool(sigs)
         summary = _deal_summary(d)
         summary.update({
-            "urgency_rank": _URGENCY_RANK.get(status, 99),
-            "status_label": _STATUS_AR.get(status, status),
+            "urgency_rank": rank,
+            "status_label": _STATUS_AR.get(status, f"{status} — مُشار إليها"),
             "reason": d.get("hold_reason"),
             "age_seconds": age_seconds,
+            "signals": [{"rule": s["rule"], "severity": s["severity"], "detail": s["detail"],
+                         "related_deal_ids": s.get("related_deal_ids", [])} for s in sigs],
             "review": ({"reviewed_by": rv.get("reviewed_by"),
                         "reviewed_at": _iso(rv.get("reviewed_at")),
                         "note": rv.get("note")} if rv else None),
+            # رتبة فرعية داخل المستوى: مشبوهة+غير مراجَعة → غير مراجَعة → مراجَعة (إشارة بصرية لا تغيّر الحالة)
+            "_sub": 0 if (has_sig and not reviewed) else (1 if not reviewed else 2),
             "_fifo": _naive(fifo_at) if isinstance(fifo_at, datetime) else datetime.min,
         })
         items.append(summary)
 
-    # الإلحاح أوّلًا، ثم الأقدم أوّلًا داخل كل مستوى (FIFO — يمنع دفن القديمة)
-    items.sort(key=lambda it: (it["urgency_rank"], it.pop("_fifo")))
+    items.sort(key=lambda it: (it["urgency_rank"], it.pop("_sub"), it.pop("_fifo")))
     return items
 
 

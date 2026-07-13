@@ -41,6 +41,11 @@
   .mono { font-family:"Consolas",monospace; direction:ltr; display:inline-block; }
   .reason { margin-top:8px; font-size:13.5px; color:#fca5a5; }
   .rev { margin-top:8px; font-size:12.5px; color:var(--ok); }
+  .sigs { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; }
+  .sig { font-size:12px; font-weight:700; padding:2px 9px; border-radius:999px; cursor:help;
+         background:rgba(239,68,68,.14); color:#fca5a5; border:1px solid rgba(239,68,68,.45); }
+  .sig.med { background:rgba(234,179,8,.14); color:#facc15; border-color:rgba(234,179,8,.45); }
+  .item.susp { box-shadow:0 0 0 1px rgba(239,68,68,.35) inset; }
   .actions { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
   #empty, #noaccess { display:none; text-align:center; color:var(--muted); padding:56px 16px; }
   body.no-access .wrap { display:none; } body.no-access #noaccess { display:block; }
@@ -101,7 +106,15 @@ function fmtAge(s){ if(s==null)return"—"; if(s<3600)return"منذ "+Math.floor
   if(s<86400)return"منذ "+Math.floor(s/3600)+" س"; return"منذ "+Math.floor(s/86400)+" ي"; }
 function num(v){ return v==null?"—":v; }
 
+const SIG_AR = { structuring:"تجزئة", ref_reuse:"إعادة مرجع", discount_deviation:"انحراف خصم", new_entity:"كيان جديد" };
+function sigBadges(sigs){
+  if(!sigs || !sigs.length) return "";
+  return `<div class="sigs">`+sigs.map(s=>
+    `<span class="sig ${s.severity==="high"?"":"med"}" title="${esc(s.detail)}">⚑ ${esc(SIG_AR[s.rule]||s.rule)}</span>`
+  ).join("")+`</div>`;
+}
 function itemCard(it){
+  const susp = (it.signals && it.signals.length) ? " susp" : "";
   const rev = it.review
     ? `<div class="rev">✓ راجعها ${esc(it.review.reviewed_by)} — ${esc((it.review.reviewed_at||"").replace("T"," ").slice(0,16))}${it.review.note?" · "+esc(it.review.note):""}</div>` : "";
   const acts = canEscalate() ? `<div class="actions">
@@ -109,11 +122,12 @@ function itemCard(it){
       ${it.review?"":`<button class="ghost" onclick="doReview('${esc(it.deal_id)}')">علّم كمراجَع</button>`}
       <button class="ghost" onclick="openDetail('${esc(it.deal_id)}')">التفاصيل ↗</button>
     </div>` : `<div class="actions"><button class="ghost" onclick="openDetail('${esc(it.deal_id)}')">التفاصيل ↗</button></div>`;
-  return `<div class="item u${it.urgency_rank}${it.review?" reviewed":""}">
+  return `<div class="item u${it.urgency_rank}${it.review?" reviewed":""}${susp}">
     <div class="top">
       <span class="status">${esc(it.status_label||it.status)}</span>
       <span class="meta">${fmtAge(it.age_seconds)}${it.is_two_legged?" · طرفان":""}</span>
     </div>
+    ${sigBadges(it.signals)}
     <div class="fields">
       <span><b>المرجع:</b> <span class="mono">${esc(it.reference_number||"—")}</span></span>
       <span><b>الهاتف:</b> <span class="mono">${esc(it.phone||"—")}</span></span>

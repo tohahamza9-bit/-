@@ -140,8 +140,11 @@
 
 المنطق: أعلى قيمة وأقلّ خطر أولًا (قراءة بحتة تسدّ أكبر فجوة)، ثم ما يعتمد عليها، وأخيرًا ما يمسّ أطرافًا خارجية (Node/writer).
 
-### المرحلة ١ — أساس الحوالات (قراءة فقط) — الأولوية القصوى
+### المرحلة ١ — أساس الحوالات (قراءة فقط) — ✅ مكتملة ومدموجة
 سجل الحوالات + قائمة الانتباه (عرض) — يسدّان أكبر فجوة (لا رؤية للحوالات اليوم) بلا أي خطر تشغيلي.
+**المُنجَز:** `dashboard/transfers.py` (بحث + خط زمني كامل + قائمة انتباه)، نقاط `/transfers`,
+`/transfers/{id}`, `/attention`, `/attention/{id}/escalate|review`، `attention.html` + `transfers.html`،
+مستودع `dashboard_reviews`، «صعّد» عبر طابور `outgoing`. توجيه reviewer → `/attention` مباشرة.
 - **جديد:** `dashboard/transfers.py` (تجميع الخط الزمني + استعلامات القراءة)، `dashboard/static/transfers.html`، عرض قائمة الانتباه (في الصفحة الرئيسية حسب الدور).
 - **تعديل:** `dashboard/app.py` (نقاط `GET /transfers`, `/transfers/{id}`, `/attention` — مَحروسة بـ`reader`)، `dashboard/static/index.html` (توجيه حسب الدور: reviewer→الانتباه).
 - **جديد صغير:** مستودع تعليقات داشبورد-محليّة (`dashboard_reviews`) في `core/db.py` (إضافيّ) لـ«علّم كمراجَع»؛ و«صعّد» = **enqueue إلى `outgoing`** (`is_alert=True`، `settings.admin_room_jid`) عبر `OutgoingRepo.enqueue` القائم — بلا لمس `Bus`/الجسر.
@@ -151,8 +154,12 @@
 «وافق/صحّح مضمّن» عبر استدعاء منضبط لمداخل `amendment`/`pipeline` القائمة (بلا تغييرها). مؤجّلة حتى إثبات الأساس القرائيّ.
 - **يمسّ (بحذر):** `core/pipeline.py` (`_handle_amendment`)، `core/cancellation.py`/`amendment.py` كمداخل — **يتطلّب سيناريو تزامن آمن مع عامل المعالجة**.
 
-### المرحلة ٢ — قواعد التصعيد (كشف قراءة فقط)
+### المرحلة ٢ — قواعد التصعيد (كشف قراءة فقط) — ✅ مكتملة ومدموجة
 تغذّي قائمة الانتباه بالإشارات الأربع + حدود قابلة للتعديل + تحليل تاريخي.
+**المُنجَز:** `dashboard/detect.py` (تجزئة/إعادة-مرجع/انحراف-خصم/كيان-جديد، قراءة صرفة)، `DetectionConfig`
++ مستودع `dashboard_config`، نقاط `GET/PUT /settings/detection` (قراءة للمراجع، تعديل للمدير)، اندماج
+الإشارات في `/attention` بترتيب **الحالة أوّلًا ثم المشبوهة داخل المستوى ثم FIFO**، شارات في `attention.html`،
+محرّر حدود مصغّر في `index.html` (المدير)، و`tools/analyze_thresholds.py` لبذر الحدود من التحليل التاريخي.
 - **جديد:** `dashboard/detect.py` (القواعد الأربع)، `tools/analyze_thresholds.py` (اشتقاق الحدود، قراءة فقط)، مخزن حدود (`dashboard_config` مستودع إضافيّ في `core/db.py`).
 - **تعديل:** `dashboard/app.py` (دمج إشارات الكشف في `/attention` + نقاط الحدود)، واجهة الانتباه لعرض أنواع الإشارات.
 

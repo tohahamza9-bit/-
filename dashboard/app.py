@@ -29,6 +29,7 @@ from core.db import Database, utcnow
 from core.logging_setup import get_logger
 from core.models import (
     BotControl,
+    DetectionConfig,
     EmployeeRecord,
     OutgoingMessage,
     Room,
@@ -515,8 +516,22 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
 
     @router.get("/attention", dependencies=[reader])
     async def attention_list() -> list[dict]:
-        """قائمة الانتباه — الحوالات المحتاجة فعلًا بشريًا، مرتّبة بالإلحاح ثم الأقدم أولًا."""
-        return await transfers.attention_items(db, utcnow())
+        """قائمة الانتباه — حالات محتاجة تدخّلًا + إشارات كشف الاحتيال (م٢)، مرتّبة."""
+        cfg = await db.detection.get()
+        return await transfers.attention_items(db, utcnow(), cfg)
+
+    # ── إعداد كشف الاحتيال (م٢) — عرض للقارئ، تعديل للمدير فقط ─────────────────
+    @router.get("/settings/detection", dependencies=[reader])
+    async def get_detection() -> dict:
+        """حدود قواعد التصعيد الحالية (قابلة للتعديل من المدير)."""
+        return (await db.detection.get()).model_dump(mode="json")
+
+    @router.put("/settings/detection", dependencies=[manager])
+    async def put_detection(body: DetectionConfig) -> dict:
+        """تحديث حدود قواعد التصعيد (المدير يرسل الإعداد كاملًا). لا يمسّ منطق الكشف نفسه."""
+        await db.detection.set(body)
+        log.info("تحديث حدود كشف الاحتيال (م٢) عبر اللوحة")
+        return body.model_dump(mode="json")
 
     @router.post("/attention/{deal_id}/escalate")
     async def escalate_transfer(deal_id: str,

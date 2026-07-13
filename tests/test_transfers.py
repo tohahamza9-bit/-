@@ -135,6 +135,7 @@ async def test_timeline_missing_returns_none(db):
 # 3) ترتيب قائمة الانتباه: إلحاح ثم الأقدم أوّلًا (FIFO)
 # ─────────────────────────────────────────────────────────────────────────────
 async def test_attention_order_urgency_then_fifo(db):
+    from core.models import DetectionConfig
     from dashboard import transfers
     base = utcnow()
     # HELD أقدم وأحدث، + ESCALATED + TECH_FAILED + SELL_DONE
@@ -146,7 +147,8 @@ async def test_attention_order_urgency_then_fifo(db):
     # حوالة غير محتاجة انتباه (لا تظهر)
     await _seed_deal(db, "completed", status=Status.COMPLETED, created_at=base)
 
-    items = await transfers.attention_items(db, utcnow())
+    # نعطّل الكشف لعزل ترتيب الحالة+FIFO (الكشف يُختبَر في test_detect.py)
+    items = await transfers.attention_items(db, utcnow(), DetectionConfig(enabled=False))
     assert [it["deal_id"] for it in items] == [
         "held_old", "held_new", "esc", "tech", "sell_done"]
     assert all(it["age_seconds"] is not None for it in items)
