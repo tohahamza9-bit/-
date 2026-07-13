@@ -158,9 +158,12 @@ def parse_message(
     # لصيغ بلا كود زبون (مثل A06/صافي) — متّسق مع stabilization.looks_like_complete_transfer.
     # حماية من false positives: الرقم الإشاري يُلتقط بنمط صارم على مقطع مستقلّ (_REFERENCE_RE)،
     # والمبلغ لا يُلتقط إلا بسياق عملة (_classify_segment §3.5) — فالاجتماع إشارة معاملة قوية.
+    # 🔴 يُشترَط مبلغ **موجب** (> 0) لا مجرّد «غير None»: مبلغ صفريّ/سالب (خطأ استخراج) كان يجتاز
+    #    الفحص فتُنشأ صفقة مشوّهة تُرفَض لاحقًا («مبلغ غير صالح ≤0») وتُصعَّد «غير موجودة في الغرف».
     strong = (
         leg is not None
         and leg.amount is not None
+        and leg.amount > 0
         and (leg.customer_code is not None or leg.reference_number is not None)
     )
 
@@ -479,7 +482,10 @@ def _fish_a_anchors(text: str, f: dict) -> None:
 
     # fallback: مبلغ ملصق بالعملة بلا مسافة («50000مصر»/«مصر50000»/«50000م.ج»/«50000مج») — «مصر»
     # وحدها (لا «مصري») لا يلتقطها detect_currency. يُفحَص **بعد** النمط أعلاه فقط، ولا يغيّره (§3.5).
-    m = re.search(r"(\d[\d,]*)(?:مصري|مصر|م\.ج|مج)", text) or re.search(r"(?:مصري|مصر)([\d,]+)", text)
+    # 🔴 صنف المحارف يشمل فواصل الآلاف كلّها (نقطة «.»، فاصلة لاتينية «,»، عربية «،»، «٬») كي لا يُبتَر
+    #    الرقم عند الفاصلة العربية الملتصقة («1،000مصري» كان يلتقط «000»→0 فيُرفَض «مبلغ غير صالح»).
+    m = (re.search(r"(\d[\d.,،٬]*)(?:مصري|مصر|م\.ج|مج)", text)
+         or re.search(r"(?:مصري|مصر)([\d.,،٬]+)", text))
     if m:
         amt = parse_amount(m.group(1))
         if amt is not None:
