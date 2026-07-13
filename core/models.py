@@ -14,6 +14,7 @@ from .constants import (
     Currency,
     Mark,
     OperationType,
+    Role,
     RoomType,
     Status,
     TreasuryType,
@@ -252,6 +253,41 @@ class BotControl(BaseModel):
     state: str = "stopped"                       # running | stopped | error
     updated_at: Optional[datetime] = None
     updated_by: Optional[str] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.5) مصادقة لوحة التحكّم (§14.3 SEC-001) — مستخدمون + جلسات + تدقيق دخول.
+# طبقة اللوحة فقط، معزولة تمامًا عن منطق البوت. «تعطيل بلا حذف» كبقية القوائم (§13).
+# ─────────────────────────────────────────────────────────────────────────────
+class UserRecord(BaseModel):
+    """مستخدم لوحة تحكّم. المفتاح username. كلمة المرور تُخزَّن هاشًا (argon2id) لا نصًّا (§14.3)."""
+    username: str
+    password_hash: str                           # argon2id — لا نصّ صريح أبدًا
+    role: Role = Role.DATA_ENTRY                 # أقلّ امتياز افتراضيًا (مبدأ أمان)
+    active: bool = True                          # تعطيل بلا حذف (§13)
+    created_at: Optional[datetime] = None
+    last_login_at: Optional[datetime] = None
+    failed_attempts: int = 0                     # عدّاد الفشل المتتالي (قفل التخمين)
+    locked_until: Optional[datetime] = None      # مقفول حتى هذا الوقت (بعد تجاوز العتبة)
+
+
+class SessionRecord(BaseModel):
+    """جلسة خادم. المفتاح token_hash = SHA-256 لرمز الكوكي (تسريب DB لا يكشف جلسة حيّة)."""
+    token_hash: str                              # sha256(الرمز الخام) — الكوكي يحمل الخام
+    username: str
+    role: Role
+    created_at: datetime
+    expires_at: datetime                         # انتهاء مطلق (يُفحَص في الكود + فهرس TTL)
+    last_seen_at: Optional[datetime] = None
+    ip: Optional[str] = None
+
+
+class AuthEventRecord(BaseModel):
+    """سجل تدقيق دخول/خروج بسيط (من، متى، أي IP) — §14.3 بند ٦."""
+    username: str                                # الاسم المُدخَل (قد لا يكون مستخدمًا حقيقيًا)
+    event: str                                   # login_success | login_fail | logout | locked
+    ip: Optional[str] = None
+    at: datetime
 
 
 # ─────────────────────────────────────────────────────────────────────────────

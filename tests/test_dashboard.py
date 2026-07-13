@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 import pytest
 
 from core.constants import TreasuryType
@@ -110,73 +112,108 @@ async def test_employee_is_authorized(db):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2) اختبارات HTTP (تتطلّب fastapi — تُتخطّى بوضوح عند غيابه)
+# المصادقة الآن بجلسة خادم + كوكي (§14.3): العميل يسجّل الدخول فيحمل الكوكي تلقائيًا.
 # ─────────────────────────────────────────────────────────────────────────────
-def _settings(token: str):
+def _settings(**over):
     from core.config import Settings
-    return Settings(internal_token=token)
+    return Settings(_env_file=None, **over)   # تجاهُل .env — إعدادات حتمية للاختبار
 
 
-async def _client(db, token: str):
+async def _seed_user(db, username="admin", password="pw-123456", role=None):
+    from core.constants import Role
+    from core.db import utcnow
+    from core.models import UserRecord
+    from dashboard.auth import hash_password
+    await db.users.create(UserRecord(
+        username=username, password_hash=hash_password(password),
+        role=role or Role.MANAGER, active=True, created_at=utcnow()))
+
+
+@asynccontextmanager
+async def _anon_client(db, settings=None):
+    """عميل غير مسجّل (بلا جلسة)."""
     from httpx import ASGITransport, AsyncClient
-
     from dashboard.app import create_app
+    app = create_app(db, settings or _settings())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
 
-    app = create_app(db, _settings(token))
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+@asynccontextmanager
+async def _client(db, role=None, *, username="admin", password="pw-123456", settings=None):
+    """عميل مسجّل الدخول بدور محدّد (افتراضي: manager) — يزرع الحساب ويحمل كوكي الجلسة."""
+    from core.constants import Role
+    await _seed_user(db, username=username, password=password, role=role or Role.MANAGER)
+    async with _anon_client(db, settings) as ac:
+        r = await ac.post("/api/auth/login", json={"username": username, "password": password})
+        assert r.status_code == 200
+        yield ac
 
 
-async def test_write_requires_internal_token(db):
-    """SEC-002: نقاط الكتابة ترفض بلا X-Internal-Token (401) وتقبل مع الرمز الصحيح."""
+async def test_write_requires_login_and_manager(db):
+    """§14.3: الكتابة ترفض بلا دخول (401)، ترفض للمراجع (403)، وتقبل للمدير (201)."""
     pytest.importorskip("fastapi")
-    async with await _client(db, "s3cret") as ac:
-        # بلا رمز → 401
+    from core.constants import Role
+    # بلا دخول → 401
+    async with _anon_client(db) as ac:
         r = await ac.post("/api/treasuries", json={"name": "خ1", "code": "10"})
         assert r.status_code == 401
-        # رمز خاطئ → 401
-        r = await ac.post("/api/treasuries", json={"name": "خ1", "code": "10"},
-                          headers={"X-Internal-Token": "wrong"})
-        assert r.status_code == 401
-        # رمز صحيح → 201
-        r = await ac.post("/api/treasuries", json={"name": "خ1", "code": "10"},
-                          headers={"X-Internal-Token": "s3cret"})
+    # مراجع → 403 (قراءة فقط)
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        r = await ac.post("/api/treasuries", json={"name": "خ1", "code": "10"})
+        assert r.status_code == 403
+    # مدير → 201
+    async with _client(db) as ac:
+        r = await ac.post("/api/treasuries", json={"name": "خ1", "code": "10"})
         assert r.status_code == 201
-        # القراءة مفتوحة بلا رمز
         r = await ac.get("/api/treasuries")
         assert r.status_code == 200
         assert any(t["name"] == "خ1" for t in r.json())
 
 
+async def test_reads_require_login_and_role(db):
+    """§14.3: القراءة تتطلّب دخولًا (401 للمجهول)، متاحة للمدير/المراجع، ممنوعة على data_entry (403)."""
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    async with _anon_client(db) as ac:
+        assert (await ac.get("/api/treasuries")).status_code == 401
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        assert (await ac.get("/api/treasuries")).status_code == 200
+    async with _client(db, Role.DATA_ENTRY, username="de") as ac:
+        assert (await ac.get("/api/treasuries")).status_code == 403
+
+
 async def test_enable_treasury_reactivates(db):
     """POST /treasuries/{name}/enable يعيد التفعيل (active=true) — عكس الإيقاف (§13)."""
     pytest.importorskip("fastapi")
-    async with await _client(db, "s3cret") as ac:
-        h = {"X-Internal-Token": "s3cret"}
-        r = await ac.post("/api/treasuries/بلاس فون/disable", headers=h)
+    async with _client(db) as ac:
+        r = await ac.post("/api/treasuries/بلاس فون/disable")
         assert r.status_code == 200 and r.json()["active"] is False
         assert "بلاس فون" not in {t.name for t in await db.treasuries.all_active()}
         # التفعيل يعيدها
-        r = await ac.post("/api/treasuries/بلاس فون/enable", headers=h)
+        r = await ac.post("/api/treasuries/بلاس فون/enable")
         assert r.status_code == 200 and r.json()["active"] is True
         assert "بلاس فون" in {t.name for t in await db.treasuries.all_active()}
 
 
-async def test_enable_treasury_requires_token_and_404(db):
-    """التفعيل مَحروس (401 بلا رمز) و 404 لخزينة غير موجودة."""
+async def test_enable_treasury_requires_auth_and_404(db):
+    """التفعيل مَحروس (401 بلا دخول) و 404 لخزينة غير موجودة (للمدير)."""
     pytest.importorskip("fastapi")
-    async with await _client(db, "s3cret") as ac:
-        r = await ac.post("/api/treasuries/بلاس فون/enable")   # بلا رمز
+    async with _anon_client(db) as ac:
+        r = await ac.post("/api/treasuries/بلاس فون/enable")   # بلا دخول
         assert r.status_code == 401
-        r = await ac.post("/api/treasuries/لا-توجد/enable", headers={"X-Internal-Token": "s3cret"})
+    async with _client(db) as ac:
+        r = await ac.post("/api/treasuries/لا-توجد/enable")
         assert r.status_code == 404
 
 
 async def test_control_toggle_endpoint(db):
     """نقطة toggle تبدّل الحالة وتُرجعها (§13)."""
     pytest.importorskip("fastapi")
-    async with await _client(db, "s3cret") as ac:
+    async with _client(db) as ac:
         r = await ac.get("/api/control")
         assert r.status_code == 200 and r.json()["state"] == "stopped"
-        r = await ac.post("/api/control/toggle", headers={"X-Internal-Token": "s3cret"})
+        r = await ac.post("/api/control/toggle")
         assert r.status_code == 200
         assert r.json()["storage_enabled"] is True
         assert r.json()["state"] == "running"
@@ -185,16 +222,17 @@ async def test_control_toggle_endpoint(db):
 async def test_auto_trust_toggle_endpoint(db):
     """نقطة auto_trust تبدّل «وضع التلقائي» وتُرجعه (الافتراضي مُعطّل)."""
     pytest.importorskip("fastapi")
-    async with await _client(db, "s3cret") as ac:
+    async with _client(db) as ac:
         r = await ac.get("/api/control")
         assert r.json()["auto_trust"] is False                       # الافتراضي
-        r = await ac.post("/api/control/auto_trust", headers={"X-Internal-Token": "s3cret"})
+        r = await ac.post("/api/control/auto_trust")
         assert r.status_code == 200 and r.json()["auto_trust"] is True
         # لا يمسّ التخزين (مستقلّ عن Kill Switch)
         assert r.json()["storage_enabled"] is False
-        r = await ac.post("/api/control/auto_trust", headers={"X-Internal-Token": "s3cret"})
+        r = await ac.post("/api/control/auto_trust")
         assert r.json()["auto_trust"] is False                       # تبديل ثانٍ يعيده
-        # يتطلّب المصادقة (SEC-002): بلا رمز → 401
+    # يتطلّب المصادقة (§14.3): بلا دخول → 401
+    async with _anon_client(db) as ac:
         r = await ac.post("/api/control/auto_trust")
         assert r.status_code == 401
 
@@ -206,8 +244,8 @@ async def test_treasuries_expose_currency_for_country_column(db):
     EGP→🇪🇬 مصر، TND→🇹🇳 تونس، None→— (بلا حقل country جديد ولا PATCH).
     """
     pytest.importorskip("fastapi")
-    async with await _client(db, "s3cret") as ac:
-        r = await ac.get("/api/treasuries")           # القراءة مفتوحة بلا رمز
+    async with _client(db) as ac:
+        r = await ac.get("/api/treasuries")
         assert r.status_code == 200
         by_name = {t["name"]: t for t in r.json()}
         assert by_name["بلاس فون"]["currency"] == "EGP"            # 🇪🇬 مصر
@@ -222,9 +260,8 @@ async def test_rooms_patch_type_only_preserves_name(db):
     from core.constants import RoomType
     from core.models import Room
     await db.rooms.upsert(Room(jid="p1@g.us", type=RoomType.UNCLASSIFIED, name="غرفة أ"))
-    async with await _client(db, "s3cret") as ac:
-        r = await ac.patch("/api/rooms/p1@g.us", json={"type": "customer"},
-                           headers={"X-Internal-Token": "s3cret"})
+    async with _client(db) as ac:
+        r = await ac.patch("/api/rooms/p1@g.us", json={"type": "customer"})
         assert r.status_code == 200
         assert r.json()["type"] == "customer"
         assert r.json()["name"] == "غرفة أ"          # الاسم لم يُمسّ
@@ -239,9 +276,8 @@ async def test_rooms_patch_active_only(db):
     from core.constants import RoomType
     from core.models import Room
     await db.rooms.upsert(Room(jid="p2@g.us", type=RoomType.CUSTOMER, name="غرفة ب"))
-    async with await _client(db, "s3cret") as ac:
-        r = await ac.patch("/api/rooms/p2@g.us", json={"active": False},
-                           headers={"X-Internal-Token": "s3cret"})
+    async with _client(db) as ac:
+        r = await ac.patch("/api/rooms/p2@g.us", json={"active": False})
         assert r.status_code == 200
         assert r.json()["active"] is False
         assert r.json()["type"] == "customer"        # النوع ثابت
@@ -255,42 +291,42 @@ async def test_rooms_patch_treasury_code_then_cleared_on_type_change(db):
     from core.constants import RoomType
     from core.models import Room
     await db.rooms.upsert(Room(jid="p3@g.us", type=RoomType.UNCLASSIFIED, name="غرفة خزينة"))
-    async with await _client(db, "s3cret") as ac:
+    async with _client(db) as ac:
         # ربط بخزينة «بلاس فون» (code=74 في SEED)
         r = await ac.patch("/api/rooms/p3@g.us",
-                           json={"type": "treasury", "treasury_code": "74"},
-                           headers={"X-Internal-Token": "s3cret"})
+                           json={"type": "treasury", "treasury_code": "74"})
         assert r.status_code == 200
         assert r.json()["type"] == "treasury"
         assert r.json()["treasury_code"] == "74"
         # التبديل إلى «زبون» يُصفّر الكود اليتيم
-        r = await ac.patch("/api/rooms/p3@g.us", json={"type": "customer"},
-                           headers={"X-Internal-Token": "s3cret"})
+        r = await ac.patch("/api/rooms/p3@g.us", json={"type": "customer"})
         assert r.status_code == 200
         assert r.json()["treasury_code"] is None
     assert (await db.rooms.get("p3@g.us")).treasury_code is None
 
 
-async def test_rooms_patch_requires_token(db):
-    """SEC-002: PATCH يرفض بلا رمز (401) ويقبل مع الرمز الصحيح."""
+async def test_rooms_patch_requires_manager(db):
+    """§14.3: PATCH يرفض بلا دخول (401)، يرفض للمراجع (403)، ويقبل للمدير (200)."""
     pytest.importorskip("fastapi")
-    from core.constants import RoomType
+    from core.constants import Role, RoomType
     from core.models import Room
     await db.rooms.upsert(Room(jid="p4@g.us", type=RoomType.UNCLASSIFIED, name="غرفة"))
-    async with await _client(db, "s3cret") as ac:
+    async with _anon_client(db) as ac:
         r = await ac.patch("/api/rooms/p4@g.us", json={"type": "ignore"})
         assert r.status_code == 401
-        r = await ac.patch("/api/rooms/p4@g.us", json={"type": "ignore"},
-                           headers={"X-Internal-Token": "s3cret"})
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        r = await ac.patch("/api/rooms/p4@g.us", json={"type": "ignore"})
+        assert r.status_code == 403
+    async with _client(db) as ac:
+        r = await ac.patch("/api/rooms/p4@g.us", json={"type": "ignore"})
         assert r.status_code == 200
 
 
 async def test_rooms_patch_unknown_jid_404(db):
     """PATCH لغرفة غير مكتشَفة → 404 (لا إنشاء يدوي بلا اكتشاف)."""
     pytest.importorskip("fastapi")
-    async with await _client(db, "s3cret") as ac:
-        r = await ac.patch("/api/rooms/nope@g.us", json={"type": "customer"},
-                           headers={"X-Internal-Token": "s3cret"})
+    async with _client(db) as ac:
+        r = await ac.patch("/api/rooms/nope@g.us", json={"type": "customer"})
         assert r.status_code == 404
 
 
@@ -301,7 +337,7 @@ async def test_rooms_endpoint_exposes_treasury_code(db):
     from core.models import Room
     await db.rooms.upsert(Room(jid="p5@g.us", type=RoomType.TREASURY,
                                name="خزينة", treasury_code="74"))
-    async with await _client(db, "s3cret") as ac:
+    async with _client(db) as ac:
         r = await ac.get("/api/rooms")
         assert r.status_code == 200
         row = next(x for x in r.json() if x["jid"] == "p5@g.us")
@@ -309,12 +345,21 @@ async def test_rooms_endpoint_exposes_treasury_code(db):
 
 
 async def test_rooms_page_served(db):
-    """صفحة /rooms تُقدَّم (200) — إدارة الغرف بالأسماء بلا إدخال JID يدوي."""
+    """صفحة /rooms تُقدَّم (200) بلا مصادقة — البوّابة تتمّ في الواجهة/الـ API."""
     pytest.importorskip("fastapi")
-    async with await _client(db, "s3cret") as ac:
+    async with _anon_client(db) as ac:
         r = await ac.get("/rooms")
         assert r.status_code == 200
         assert "إدارة الغرف" in r.text
+
+
+async def test_login_page_served(db):
+    """صفحة /login تُقدَّم (200) بلا مصادقة."""
+    pytest.importorskip("fastapi")
+    async with _anon_client(db) as ac:
+        r = await ac.get("/login")
+        assert r.status_code == 200
+        assert "تسجيل الدخول" in r.text
 
 
 async def test_rooms_endpoint_sorted_by_type(db):
@@ -328,8 +373,8 @@ async def test_rooms_endpoint_sorted_by_type(db):
     await db.rooms.upsert(Room(jid="c@g.us", type=RoomType.CENTRAL, name="المركزية"))
     await db.rooms.upsert(Room(jid="cu@g.us", type=RoomType.CUSTOMER, name="زبون"))
     await db.rooms.upsert(Room(jid="a@g.us", type=RoomType.ADMIN, name="المسؤول"))
-    async with await _client(db, "s3cret") as ac:
-        r = await ac.get("/api/rooms")           # القراءة مفتوحة بلا رمز
+    async with _client(db) as ac:
+        r = await ac.get("/api/rooms")
         assert r.status_code == 200
         rows = r.json()
         assert [x["type"] for x in rows] == [
@@ -344,13 +389,12 @@ async def test_rooms_endpoint_sorted_by_type(db):
 async def test_unknown_terms_list_and_assign(db):
     pytest.importorskip("fastapi")
     await db.unknown_terms.record("فودافون تجريبي", "treasury")   # خزينة 74 (بلاس فون) مزروعة
-    async with await _client(db, "s3cret") as ac:
-        h = {"X-Internal-Token": "s3cret"}
+    async with _client(db) as ac:
         r = await ac.get("/api/unknown-terms")
         assert r.status_code == 200
         assert any(x["term"] == "فودافون تجريبي" for x in r.json())
         r = await ac.post("/api/unknown-terms/فودافون تجريبي/assign",
-                          json={"type": "treasury", "target_code": "74"}, headers=h)
+                          json={"type": "treasury", "target_code": "74"})
         assert r.status_code == 200 and "فودافون تجريبي" in r.json()["aliases"]
     doc = await db.treasuries.col.find_one({"code": "74"})
     assert "فودافون تجريبي" in doc["aliases"]                      # صار alias
@@ -358,10 +402,10 @@ async def test_unknown_terms_list_and_assign(db):
                    for x in await db.unknown_terms.list_recent(20))
 
 
-async def test_assign_unknown_term_requires_token(db):
+async def test_assign_unknown_term_requires_auth(db):
     pytest.importorskip("fastapi")
     await db.unknown_terms.record("خزينه ما", "treasury")
-    async with await _client(db, "s3cret") as ac:
+    async with _anon_client(db) as ac:
         r = await ac.post("/api/unknown-terms/خزينه ما/assign",
-                          json={"type": "treasury", "target_code": "74"})   # بلا رمز
+                          json={"type": "treasury", "target_code": "74"})   # بلا دخول
         assert r.status_code == 401

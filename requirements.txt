@@ -19,6 +19,9 @@ python-dateutil==2.9.0.post0
 httpx==0.28.1                               # الاتصال بجسر WhatsApp
 rapidfuzz==3.14.5                           # مطابقة تقريبية (fuzzy) للموردين (§5.4)
 
+# ── مصادقة لوحة التحكّم (§14.3 SEC-001) — تجزئة كلمة المرور فقط؛ الجلسات خادمية في Mongo ──
+argon2-cffi==23.1.0                         # argon2id لتجزئة كلمات المرور (لا JWT/passlib)
+
 # ── الاختبارات ──
 pytest==8.3.4
 pytest-asyncio==0.25.0

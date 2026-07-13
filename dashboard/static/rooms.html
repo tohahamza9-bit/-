@@ -44,6 +44,14 @@
   #msg { position:fixed; bottom:16px; inset-inline-start:16px; background:var(--card);
          border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:9; }
   #empty { text-align:center; color:var(--muted); padding:40px 0; }
+  /* المصادقة (§14.3) */
+  .userbox { display:flex; gap:10px; align-items:center; }
+  .role-badge { font-size:12px; font-weight:700; padding:2px 10px; border-radius:999px;
+                background:rgba(59,130,246,.15); color:var(--accent); border:1px solid var(--accent); }
+  button.ghost { background:transparent; color:var(--txt); }
+  #noaccess { display:none; text-align:center; padding:64px 16px; color:var(--muted); font-size:16px; }
+  body.no-access .wrap { display:none; }
+  body.no-access #noaccess { display:block; }
 </style>
 </head>
 <body>
@@ -52,11 +60,14 @@
     <h1>إدارة الغرف</h1>
     <a class="back" href="/">→ لوحة التحكّم الكاملة</a>
   </div>
-  <div class="tok">
-    <span class="muted">رمز الأمان</span>
-    <input id="token" type="password" placeholder="X-Internal-Token" autocomplete="off">
+  <div class="userbox">
+    <span id="roleBadge" class="role-badge" style="display:none"></span>
+    <span id="whoami" class="muted">…</span>
+    <button id="logoutBtn" class="ghost" style="display:none">خروج</button>
   </div>
 </header>
+
+<div id="noaccess">لا صلاحية لعرض هذه الشاشة بحسابك الحالي.<br>تواصل مع المسؤول.</div>
 
 <div class="wrap">
   <p class="muted">البوت يكتشف الغرف تلقائيًا من واتساب. حدّد وظيفة كل غرفة — يُحفظ فورًا.</p>
@@ -67,18 +78,17 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const TOKEN_KEY = "moneyado_token";
-$("token").value = localStorage.getItem(TOKEN_KEY) || "";
-$("token").addEventListener("change", () => localStorage.setItem(TOKEN_KEY, $("token").value));
+let ROLE = null;                       // manager | reviewer | data_entry
+const canWrite = () => ROLE === "manager";
 
 function toast(t) { const m=$("msg"); m.textContent=t; m.style.display="block";
   clearTimeout(window._tt); window._tt=setTimeout(()=>m.style.display="none", 2500); }
 
 async function api(path, method="GET", body=null) {
-  const opt = { method, headers:{} };
+  const opt = { method, headers:{}, credentials:"same-origin" };
   if (body) { opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
-  if (method !== "GET") opt.headers["X-Internal-Token"] = $("token").value;
   const r = await fetch("/api"+path, opt);
+  if (r.status === 401) { location.replace("/login"); throw new Error(401); }
   if (!r.ok) {
     let d = ""; try { d = (await r.json()).detail; } catch(e) {}
     toast("خطأ "+r.status+(d?": "+d:"")); throw new Error(r.status);
@@ -133,6 +143,12 @@ function roomCard(r) {
   const treSel  = div.querySelector(".treasury");
   const tglBtn  = div.querySelector(".tgl");
 
+  if (!canWrite()) {                       // مراجع: عرض فقط — لا تعديل (الـ backend يرفض بـ403)
+    typeSel.disabled = true; treSel.disabled = true; tglBtn.disabled = true;
+    tglBtn.style.cursor = "default";
+    return div;
+  }
+
   typeSel.addEventListener("change", async () => {
     const t = typeSel.value;
     treSel.hidden = t !== "treasury";        // تظهر فقط عند اختيار «خزينة»
@@ -146,7 +162,6 @@ function roomCard(r) {
 }
 
 async function save(r, patch) {
-  if (!$("token").value) { toast("أدخل رمز الأمان أولًا"); load(); return; }
   try {
     const updated = await api(`/rooms/${encodeURIComponent(r.jid)}`, "PATCH", patch);
     toast("تم الحفظ ✓");
@@ -189,8 +204,32 @@ async function load() {
   } catch (e) { /* toast عُرض بالفعل */ }
 }
 
-load();
-setInterval(load, 30000);   // اكتشاف الغرف الجديدة دوريًا
+const ROLE_AR = { manager:"مدير", reviewer:"مراجع", data_entry:"مُدخل بيانات" };
+$("logoutBtn").onclick = async () => {
+  try { await fetch("/api/auth/logout", { method:"POST", credentials:"same-origin" }); } catch(e) {}
+  location.replace("/login");
+};
+
+// بوّابة المصادقة (§14.3): هويّة → دور → عرض حسب الصلاحية.
+async function boot() {
+  let me;
+  try {
+    const r = await fetch("/api/auth/me", { credentials:"same-origin" });
+    if (!r.ok) { location.replace("/login"); return; }
+    me = await r.json();
+  } catch (e) { location.replace("/login"); return; }
+
+  ROLE = me.role;
+  $("whoami").textContent = me.username;
+  const rb = $("roleBadge"); rb.textContent = ROLE_AR[ROLE] || ROLE; rb.style.display = "inline-block";
+  $("logoutBtn").style.display = "inline-block";
+
+  if (ROLE === "data_entry") { document.body.classList.add("no-access"); return; }
+
+  load();
+  setInterval(load, 30000);   // اكتشاف الغرف الجديدة دوريًا
+}
+boot();
 </script>
 </body>
 </html>

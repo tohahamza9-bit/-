@@ -25,6 +25,7 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from .constants import RoomType, Status
 from .logging_setup import get_logger
 from .models import (
+    AuthEventRecord,
     BotControl,
     Deal,
     EmployeeRecord,
@@ -33,8 +34,10 @@ from .models import (
     ParsedLeg,
     RawMessage,
     Room,
+    SessionRecord,
     SupplierRecord,
     TreasuryRecord,
+    UserRecord,
     WriteJob,
 )
 
@@ -699,6 +702,135 @@ class SenderSlotRepo(_Repo):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 11) مصادقة لوحة التحكّم (§14.3 SEC-001) — مستخدمون + جلسات خادم + تدقيق دخول.
+# طبقة اللوحة فقط؛ لا تلمس أي مسار تشغيلي. «تعطيل بلا حذف» كبقية القوائم (§13).
+# ─────────────────────────────────────────────────────────────────────────────
+class UserListRepo(_Repo):
+    """مستخدمو اللوحة — المفتاح username. كلمة المرور هاش argon2id (لا نصّ §14.3)."""
+
+    async def get(self, username: str) -> Optional[UserRecord]:
+        doc = await self.col.find_one({"username": username})
+        if not doc:
+            return None
+        doc.pop("_id", None)
+        return UserRecord(**doc)
+
+    async def list_all(self) -> list[UserRecord]:
+        cur = self.col.find({}).sort("username", 1)
+        out: list[UserRecord] = []
+        async for d in cur:
+            d.pop("_id", None)
+            out.append(UserRecord(**d))
+        return out
+
+    async def upsert(self, rec: UserRecord) -> None:
+        await self.col.update_one({"username": rec.username}, {"$set": self._dump(rec)}, upsert=True)
+
+    async def create(self, rec: UserRecord) -> bool:
+        """إنشاء مستخدم جديد فقط (لا يدهس موجودًا). يُرجع True إن أُنشئ، False إن كان الاسم مستخدَمًا."""
+        rec.created_at = rec.created_at or utcnow()
+        res = await self.col.update_one(
+            {"username": rec.username}, {"$setOnInsert": self._dump(rec)}, upsert=True
+        )
+        return res.upserted_id is not None
+
+    async def set_active(self, username: str, active: bool) -> int:
+        res = await self.col.update_one({"username": username}, {"$set": {"active": active}})
+        return res.matched_count
+
+    async def update_password(self, username: str, password_hash: str) -> int:
+        """تغيير الهاش + تصفير عدّاد الفشل/القفل (كلمة جديدة = بداية نظيفة)."""
+        res = await self.col.update_one(
+            {"username": username},
+            {"$set": {"password_hash": password_hash, "failed_attempts": 0, "locked_until": None}},
+        )
+        return res.matched_count
+
+    async def set_role(self, username: str, role: Role) -> int:
+        res = await self.col.update_one({"username": username}, {"$set": {"role": role.value}})
+        return res.matched_count
+
+    async def touch_login(self, username: str, now: datetime) -> None:
+        """دخول ناجح: يحدّث آخر دخول ويصفّر عدّاد الفشل/القفل."""
+        await self.col.update_one(
+            {"username": username},
+            {"$set": {"last_login_at": now, "failed_attempts": 0, "locked_until": None}},
+        )
+
+    async def bump_failed(self, username: str) -> int:
+        """يزيد عدّاد الفشل المتتالي ويُرجع القيمة الجديدة (0 إن لا مستخدم بهذا الاسم)."""
+        await self.col.update_one({"username": username}, {"$inc": {"failed_attempts": 1}})
+        doc = await self.col.find_one({"username": username})
+        return int(doc.get("failed_attempts", 0)) if doc else 0
+
+    async def set_locked_until(self, username: str, until: datetime) -> None:
+        await self.col.update_one({"username": username}, {"$set": {"locked_until": until}})
+
+    async def seed_manager_if_empty(self, username: str, password_hash: str) -> bool:
+        """يبذر مديرًا واحدًا فقط إن لم يوجد **أي** مستخدم (أول إعداد). يُرجع True إن بُذر.
+
+        لا كلمة مرور ثابتة في الكود — الهاش يُمرَّر من سكربت الإعداد/البيئة (§14.3 بند ١).
+        """
+        if await self.col.count_documents({}) > 0:
+            return False
+        rec = UserRecord(username=username, password_hash=password_hash,
+                         role=Role.MANAGER, active=True, created_at=utcnow())
+        await self.col.insert_one(self._dump(rec))
+        log.info("بذر مدير اللوحة الأوّل: %s (role=manager)", username)
+        return True
+
+
+class SessionRepo(_Repo):
+    """جلسات الخادم — المفتاح token_hash. الإبطال الفوري = حذف السجل (خروج/تعطيل/تغيير كلمة)."""
+
+    async def create(self, rec: SessionRecord) -> None:
+        await self.col.update_one(
+            {"token_hash": rec.token_hash}, {"$setOnInsert": self._dump(rec)}, upsert=True
+        )
+
+    async def get(self, token_hash: str) -> Optional[SessionRecord]:
+        doc = await self.col.find_one({"token_hash": token_hash})
+        if not doc:
+            return None
+        doc.pop("_id", None)
+        return SessionRecord(**doc)
+
+    async def touch(self, token_hash: str, now: datetime) -> None:
+        await self.col.update_one({"token_hash": token_hash}, {"$set": {"last_seen_at": now}})
+
+    async def delete(self, token_hash: str) -> int:
+        """خروج: إبطال فوري لجلسة واحدة."""
+        res = await self.col.delete_one({"token_hash": token_hash})
+        return res.deleted_count
+
+    async def delete_for_user(self, username: str) -> int:
+        """إبطال كل جلسات مستخدم (عند تعطيله/تغيير كلمته) — إبطال فوري شامل."""
+        res = await self.col.delete_many({"username": username})
+        return res.deleted_count
+
+    async def delete_expired(self, now: datetime) -> int:
+        """تنظيف الجلسات المنتهية (احتياط بجانب فهرس TTL — mongomock لا يطبّق TTL)."""
+        res = await self.col.delete_many({"expires_at": {"$lt": now}})
+        return res.deleted_count
+
+
+class AuthEventRepo(_Repo):
+    """تدقيق دخول/خروج (§14.3 بند ٦) — سجل بسيط للمراجعة الأمنية."""
+
+    async def log(self, *, username: str, event: str, ip: Optional[str], now: datetime) -> None:
+        rec = AuthEventRecord(username=username, event=event, ip=ip, at=now)
+        await self.col.insert_one(self._dump(rec))
+
+    async def list_recent(self, limit: int = 50) -> list[dict]:
+        cur = self.col.find({}).sort([("at", -1), ("_id", -1)]).limit(limit)
+        out: list[dict] = []
+        async for d in cur:
+            d.pop("_id", None)
+            out.append(d)
+        return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # الواجهة الجامعة
 # ─────────────────────────────────────────────────────────────────────────────
 class Database:
@@ -727,6 +859,10 @@ class Database:
         self.unknown_terms = UnknownTermRepo(self.mdb, "unknown_terms", "term")
         self.sender_slots = SenderSlotRepo(self.mdb, "sender_slots", "slot_key")
         self.reconciliation = ReconciliationRepo(self.mdb, "reconciliation_reports", "deal_id")
+        # مصادقة اللوحة (§14.3 SEC-001) — معزولة عن مسار البوت
+        self.users = UserListRepo(self.mdb, "users", "username")
+        self.sessions = SessionRepo(self.mdb, "sessions", "token_hash")
+        self.auth_events = AuthEventRepo(self.mdb, "auth_events", "_id")
         log.info("اتصال MongoDB: %s / %s", self._uri, self._db_name)
 
     async def ensure_indexes(self) -> None:
@@ -769,6 +905,12 @@ class Database:
             "expires_at", expireAfterSeconds=0, name="ttl_slot_expires")
         await self.unknown_terms.col.create_index([("term", 1), ("context", 1)], unique=True)
         await self.unknown_terms.col.create_index("last_seen")
+        # مصادقة اللوحة (§14.3): مستخدم فريد بالاسم، جلسة فريدة بالهاش + TTL على الانتهاء.
+        await self.users.col.create_index("username", unique=True)
+        await self.sessions.col.create_index("token_hash", unique=True)
+        await self.sessions.col.create_index("username")
+        await self.sessions.col.create_index("expires_at", expireAfterSeconds=0, name="ttl_session")
+        await self.auth_events.col.create_index("at")
         log.info("تمّت تهيئة الفهارس")
 
     async def close(self) -> None:

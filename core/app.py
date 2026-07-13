@@ -89,6 +89,30 @@ async def _seed_rooms_from_env(db, settings) -> None:
         log.warning("تعذّر بذر الغرف من env: %s", exc)
 
 
+async def _seed_manager(db, settings) -> None:
+    """بذر مدير اللوحة الأوّل (§14.3 SEC-001) — طبقة اللوحة فقط، لا تلمس البوت.
+
+    إن وُجد أي مستخدم لا يفعل شيئًا. وإلا: إن توفّرت كلمة مرور بذر في البيئة أنشأ المدير بها؛
+    وإلا سجّل تحذيرًا واضحًا (لا كلمة ثابتة في الكود §14.3 بند ١) — اللوحة تبقى غير قابلة للدخول
+    حتى إنشاء مدير عبر tools/create_admin.py (fail-closed).
+    """
+    repo = getattr(db, "users", None)
+    if repo is None:
+        return
+    try:
+        if await repo.col.count_documents({}) > 0:
+            return
+        pw = (settings.manager_bootstrap_password or "").strip()
+        if not pw:
+            log.warning("لا مستخدمين للوحة ولا كلمة مرور بذر — اللوحة مقفلة. "
+                        "أنشئ مديرًا عبر: python -m tools.create_admin (§14.3).")
+            return
+        from dashboard.auth import hash_password
+        await repo.seed_manager_if_empty(settings.manager_bootstrap_username, hash_password(pw))
+    except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل (البذر غير حرج للإقلاع)
+        log.warning("تعذّر بذر مدير اللوحة: %s", exc)
+
+
 def _build_verifier(settings) -> SqlVerifier:
     """يبني SqlVerifier من الإعداد؛ يقرأ استعلامات SQL إن توفّر ملفها (وإلا معطّل §11.4)."""
     queries: dict = {}
@@ -120,6 +144,7 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         await _db.treasuries.dedupe_by_code()  # تنظيف ذاتي: خزينة واحدة لكل كود (يزيل المكرّرات)
         await _db.suppliers.seed_if_missing(SEED_SUPPLIERS)  # موردو القائمة البيضاء الناقصون (§5.4)
         await _seed_rooms_from_env(_db, settings)  # §شرط 4 — بذر الغرف الحالية من env
+        await _seed_manager(_db, settings)  # §14.3 SEC-001 — بذر مدير اللوحة أو تحذير
 
         bus = Bus(
             _db, settings.allowed_output_jids, settings.central_room_jid, settings.admin_room_jid,
@@ -215,6 +240,12 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
     @app.get("/")
     async def index():  # noqa: ANN201
         html = ROOT / "dashboard" / "static" / "index.html"
+        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+
+    @app.get("/login")
+    async def login_page():  # noqa: ANN201
+        """صفحة تسجيل الدخول (§14.3) — تُقدَّم بلا مصادقة؛ البوّابة في الواجهة/الـ API."""
+        html = ROOT / "dashboard" / "static" / "login.html"
         return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
 
     @app.get("/rooms")

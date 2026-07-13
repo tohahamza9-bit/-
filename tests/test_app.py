@@ -37,7 +37,19 @@ async def test_health_and_dashboard_mounted(db):
         # الافتراضي: التخزين إيقاف (§13)
         assert body["storage_enabled"] is False
 
-        # اللوحة مركّبة تحت /api (§13): حالة التحكّم
+        # اللوحة مركّبة تحت /api (§13): تتطلّب الآن دخولًا (§14.3) — نزرع مديرًا ونسجّل الدخول.
+        from core.constants import Role
+        from core.db import utcnow
+        from core.models import UserRecord
+        from dashboard.auth import hash_password
+        await db.users.create(UserRecord(
+            username="admin", password_hash=hash_password("pw-123456"),
+            role=Role.MANAGER, active=True, created_at=utcnow()))
+        rl = await client.post("/api/auth/login",
+                               json={"username": "admin", "password": "pw-123456"})
+        assert rl.status_code == 200
+
+        # حالة التحكّم متاحة بعد الدخول
         r2 = await client.get("/api/control")
         assert r2.status_code == 200
 

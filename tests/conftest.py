@@ -43,6 +43,10 @@ async def db():
             self.unknown_terms = dbmod.UnknownTermRepo(self.mdb, "unknown_terms", "term")
             self.sender_slots = dbmod.SenderSlotRepo(self.mdb, "sender_slots", "slot_key")
             self.reconciliation = dbmod.ReconciliationRepo(self.mdb, "reconciliation_reports", "deal_id")
+            # مصادقة اللوحة (§14.3) — نفس الربط كما في Database.connect
+            self.users = dbmod.UserListRepo(self.mdb, "users", "username")
+            self.sessions = dbmod.SessionRepo(self.mdb, "sessions", "token_hash")
+            self.auth_events = dbmod.AuthEventRepo(self.mdb, "auth_events", "_id")
 
     d = _MockDatabase("mongodb://mock", "moneyado_test")
     await d.connect()

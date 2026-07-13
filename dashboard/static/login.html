@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>تسجيل الدخول — MONEYADO</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2233; --line:#2c3853; --txt:#e7ecf5; --muted:#8a99b5;
+          --accent:#3b82f6; --ok:#22c55e; --warn:#ef4444; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",Tahoma,system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); font-size:15px; line-height:1.6; min-height:100vh;
+         display:flex; align-items:center; justify-content:center; padding:16px; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:14px;
+         padding:28px 26px; width:100%; max-width:360px; }
+  h1 { margin:0 0 4px; font-size:22px; }
+  .sub { color:var(--muted); font-size:13px; margin:0 0 20px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:14px 0 6px; }
+  input { width:100%; font-family:inherit; font-size:15px; padding:11px 12px; border-radius:9px;
+          border:1px solid var(--line); background:var(--bg); color:var(--txt); }
+  input:focus { outline:none; border-color:var(--accent); }
+  button { width:100%; margin-top:22px; cursor:pointer; font-family:inherit; font-size:15px;
+           font-weight:600; padding:11px; border-radius:9px; border:1px solid var(--accent);
+           background:var(--accent); color:#fff; }
+  button:disabled { opacity:.6; cursor:not-allowed; }
+  .err { display:none; margin-top:16px; padding:10px 12px; border-radius:9px; font-size:13.5px;
+         background:rgba(239,68,68,.12); border:1px solid var(--warn); color:#fca5a5; }
+</style>
+</head>
+<body>
+<form class="box" id="form" autocomplete="on">
+  <h1>لوحة تحكّم MONEYADO</h1>
+  <p class="sub">تسجيل الدخول للمتابعة</p>
+
+  <label for="u">اسم المستخدم</label>
+  <input id="u" name="username" type="text" autocomplete="username" autofocus required>
+
+  <label for="p">كلمة المرور</label>
+  <input id="p" name="password" type="password" autocomplete="current-password" required>
+
+  <button id="btn" type="submit">دخول</button>
+  <div class="err" id="err"></div>
+</form>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const err = (msg) => { const e=$("err"); e.textContent=msg; e.style.display="block"; };
+
+// إن كان مسجّلًا بالفعل، انتقل للوحة مباشرة.
+fetch("/api/auth/me", { credentials: "same-origin" })
+  .then(r => { if (r.ok) location.replace("/"); })
+  .catch(() => {});
+
+$("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  $("err").style.display = "none";
+  $("btn").disabled = true;
+  try {
+    const r = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ username: $("u").value, password: $("p").value }),
+    });
+    if (r.ok) { location.replace("/"); return; }
+    if (r.status === 429) {
+      const ra = r.headers.get("Retry-After");
+      err("محاولات كثيرة — الحساب مقفول مؤقتًا" + (ra ? ` (حاول بعد ~${Math.ceil(ra/60)} دقيقة)` : "") + ".");
+    } else {
+      err("اسم المستخدم أو كلمة المرور غير صحيحة.");
+    }
+  } catch (e) {
+    err("تعذّر الاتصال بالخادم.");
+  } finally {
+    $("btn").disabled = false;
+  }
+});
+</script>
+</body>
+</html>

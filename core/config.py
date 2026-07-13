@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     moneyado_open_click_retries: int = Field(default=3)    # إعادة ضغط زر القائمة إن ابتُلع النقر (نقر VB6 مبتلَع)
     moneyado_dry_run_wait: float = Field(default=3.0)      # DRY_RUN: مهلة معاينة بصرية (الشاشة مفتوحة) قبل ✅
 
+    # ── مصادقة لوحة التحكّم (§14.3 SEC-001) — جلسات خادم + قفل تخمين ──
+    session_ttl_hours: int = Field(default=12)          # عمر الجلسة المطلق (٨–١٢ ساعة)
+    session_cookie_secure: bool = Field(default=False)  # True مع HTTPS فقط (LAN حاليًا HTTP)
+    login_max_attempts: int = Field(default=5)          # محاولات فاشلة قبل القفل
+    login_lockout_minutes: int = Field(default=5)       # مدّة القفل بعد تجاوز العتبة
+    # كلمة مرور بذر المدير الأوّل (اختياري) — إن غابت يُنشأ المدير عبر tools/create_admin.py.
+    # لا كلمة ثابتة في الكود (§14.3 بند ١) — تُقرأ من البيئة/‏.env وقت الإعداد فقط.
+    manager_bootstrap_username: str = Field(default="manager")
+    manager_bootstrap_password: str = Field(default="")
+
     # ── التشغيل ──
     dashboard_port: int = Field(default=8000)
     log_dir: str = Field(default=str(ROOT / "artifacts" / "logs"))

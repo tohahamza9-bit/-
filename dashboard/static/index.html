@@ -57,16 +57,28 @@
   #msg { position:fixed; bottom:16px; inset-inline-start:16px; background:var(--card);
          border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:9; }
   .aliases { font-size:12px; color:var(--muted); }
+  /* المصادقة (§14.3): هويّة + خروج + بوّابة حسب الدور */
+  .userbox { display:flex; gap:10px; align-items:center; }
+  .role-badge { font-size:12px; font-weight:700; padding:2px 10px; border-radius:999px;
+                background:rgba(59,130,246,.15); color:var(--accent); border:1px solid var(--accent); }
+  /* عناصر الكتابة تظهر للمدير فقط (can-write) — الرفض الفعلي في الـ backend */
+  body:not(.can-write) .write-only { display:none !important; }
+  #noaccess { display:none; text-align:center; padding:64px 16px; color:var(--muted); font-size:16px; }
+  body.no-access .wrap > .card { display:none; }
+  body.no-access #noaccess { display:block; }
 </style>
 </head>
 <body>
 <header>
   <h1>لوحة تحكّم MONEYADO</h1>
-  <div class="tok">
-    <span class="muted">رمز الأمان</span>
-    <input id="token" type="password" placeholder="X-Internal-Token" autocomplete="off">
+  <div class="userbox">
+    <span id="roleBadge" class="role-badge" style="display:none"></span>
+    <span id="whoami" class="muted">…</span>
+    <button id="logoutBtn" class="ghost" style="display:none">خروج</button>
   </div>
 </header>
+
+<div id="noaccess">لا صلاحية لعرض هذه الشاشة بحسابك الحالي.<br>تواصل مع المسؤول.</div>
 
 <div class="wrap">
 
@@ -97,7 +109,7 @@
   <!-- الخزائن §13 -->
   <div class="card">
     <h2>إدارة الخزائن</h2>
-    <div class="row">
+    <div class="row write-only">
       <input id="t_name" placeholder="الاسم">
       <input id="t_code" placeholder="الكود" style="max-width:100px">
       <select id="t_type">
@@ -119,7 +131,7 @@
   <!-- الموردون §13 -->
   <div class="card">
     <h2>إدارة الموردين</h2>
-    <div class="row">
+    <div class="row write-only">
       <input id="s_name" placeholder="الاسم">
       <input id="s_code" placeholder="كود MONEYADO" style="max-width:130px">
       <input id="s_alias" placeholder="إملاءات بديلة (فاصلة)">
@@ -132,7 +144,7 @@
   <!-- الموظفون المعتمدون §13 -->
   <div class="card">
     <h2>الموظفون المعتمدون <span class="muted">(«تم» تُقبل من هؤلاء فقط)</span></h2>
-    <div class="row">
+    <div class="row write-only">
       <input id="e_num" placeholder="رقم واتساب">
       <input id="e_name" placeholder="الاسم">
       <button onclick="addEmployee()">إضافة</button>
@@ -146,18 +158,17 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const TOKEN_KEY = "moneyado_token";
-$("token").value = localStorage.getItem(TOKEN_KEY) || "";
-$("token").addEventListener("change", () => localStorage.setItem(TOKEN_KEY, $("token").value));
+let ROLE = null;                       // manager | reviewer | data_entry
+const canWrite = () => ROLE === "manager";
 
 function toast(t) { const m=$("msg"); m.textContent=t; m.style.display="block";
   clearTimeout(window._tt); window._tt=setTimeout(()=>m.style.display="none", 3000); }
 
 async function api(path, method="GET", body=null) {
-  const opt = { method, headers:{} };
+  const opt = { method, headers:{}, credentials:"same-origin" };
   if (body) { opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
-  if (method !== "GET") opt.headers["X-Internal-Token"] = $("token").value;
   const r = await fetch("/api"+path, opt);
+  if (r.status === 401) { location.replace("/login"); throw new Error(401); }
   if (!r.ok) {
     let d = ""; try { d = (await r.json()).detail; } catch(e) {}
     toast("خطأ "+r.status+(d?": "+d:"")); throw new Error(r.status);
@@ -195,9 +206,9 @@ async function loadTreasuries() {
     <td>${countryCell(t.currency)}</td>
     <td class="aliases">${(t.aliases||[]).join('، ')}</td>
     <td>${t.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
-    <td>${t.active
+    <td>${!canWrite() ? '' : (t.active
       ? `<button class="ghost danger" onclick="disableTreasury('${encodeURIComponent(t.name)}')">إيقاف</button>`
-      : `<button class="ghost" onclick="enableTreasury('${encodeURIComponent(t.name)}')">تفعيل</button>`}</td>
+      : `<button class="ghost" onclick="enableTreasury('${encodeURIComponent(t.name)}')">تفعيل</button>`)}</td>
   </tr>`).join("");
 }
 async function addTreasury() {
@@ -216,7 +227,7 @@ async function loadSuppliers() {
     <td>${s.name}</td><td>${s.code??'—'}</td>
     <td class="aliases">${(s.aliases||[]).join('، ')}</td>
     <td>${s.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
-    <td>${s.active?`<button class="ghost danger" onclick="disableSupplier('${encodeURIComponent(s.name)}')">إيقاف</button>`:''}</td>
+    <td>${(canWrite() && s.active)?`<button class="ghost danger" onclick="disableSupplier('${encodeURIComponent(s.name)}')">إيقاف</button>`:''}</td>
   </tr>`).join("");
 }
 async function addSupplier() {
@@ -233,7 +244,7 @@ async function loadEmployees() {
   $("e_body").innerHTML = rows.map(e => `<tr class="${e.active?'':'inactive'}">
     <td>${e.name}</td><td>${e.whatsapp_number}</td>
     <td>${e.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
-    <td><button class="ghost danger" onclick="delEmployee('${encodeURIComponent(e.whatsapp_number)}')">حذف</button></td>
+    <td>${!canWrite() ? '' : `<button class="ghost danger" onclick="delEmployee('${encodeURIComponent(e.whatsapp_number)}')">حذف</button>`}</td>
   </tr>`).join("");
 }
 async function addEmployee() {
@@ -272,9 +283,36 @@ function fallbackCopy(t, done) {
 
 // تحميل أولي
 function refreshAll(){ loadControl(); loadRooms(); loadTreasuries(); loadSuppliers(); loadEmployees(); }
-refreshAll();
-setInterval(loadControl, 10000); // تحديث مؤشّر الحالة دوريًا
-setInterval(loadRooms, 30000);   // تحديث الغرف كل 30 ثانية (المطلوب)
+
+const ROLE_AR = { manager:"مدير", reviewer:"مراجع", data_entry:"مُدخل بيانات" };
+$("logoutBtn").onclick = async () => {
+  try { await fetch("/api/auth/logout", { method:"POST", credentials:"same-origin" }); } catch(e) {}
+  location.replace("/login");
+};
+
+// بوّابة المصادقة (§14.3): هويّة → دور → عرض حسب الصلاحية.
+async function boot() {
+  let me;
+  try {
+    const r = await fetch("/api/auth/me", { credentials:"same-origin" });
+    if (!r.ok) { location.replace("/login"); return; }
+    me = await r.json();
+  } catch (e) { location.replace("/login"); return; }
+
+  ROLE = me.role;
+  $("whoami").textContent = me.username;
+  const rb = $("roleBadge"); rb.textContent = ROLE_AR[ROLE] || ROLE; rb.style.display = "inline-block";
+  $("logoutBtn").style.display = "inline-block";
+  if (canWrite()) document.body.classList.add("can-write");
+
+  // data_entry: بلا وصول للإعدادات الحالية (الـ backend يرفض بـ403) → شاشة «لا صلاحية».
+  if (ROLE === "data_entry") { document.body.classList.add("no-access"); return; }
+
+  refreshAll();
+  setInterval(loadControl, 10000); // تحديث مؤشّر الحالة دوريًا
+  setInterval(loadRooms, 30000);   // تحديث الغرف كل 30 ثانية (المطلوب)
+}
+boot();
 </script>
 </body>
 </html>
