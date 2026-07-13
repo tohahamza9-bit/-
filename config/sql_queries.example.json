@@ -8,6 +8,9 @@
     "reference_number": "ReferenceNo",
     "amount": "ForeignAmount",
     "customer_code": "CustomerCode",
+    "customer_name": "CustomerName",
+    "price": "Rate",
+    "commission": "Commission",
     "treasury_code": "AccountCode",
     "operation_type": "OperationType",
     "transaction_ref": "TransactionNo",
@@ -15,6 +18,7 @@
   },
   "queries": {
     "verify_transaction": "SELECT TOP 1 {transaction_ref} AS ref FROM {transactions} WHERE {reference_number} = ? AND {amount} = ? AND {customer_code} = ? AND {operation_type} = ? ORDER BY {created_at} DESC",
-    "last_pending": "SELECT TOP 1 {transaction_ref} AS ref, {reference_number} AS refnum, {amount} AS amount FROM {transactions} WHERE {reference_number} = ? ORDER BY {created_at} DESC"
+    "last_pending": "SELECT TOP 1 {transaction_ref} AS ref, {reference_number} AS refnum, {amount} AS amount FROM {transactions} WHERE {reference_number} = ? ORDER BY {created_at} DESC",
+    "reconcile_transaction": "SELECT TOP 1 {transaction_ref} AS ref, {customer_code} AS customer_code, {customer_name} AS customer_name, {amount} AS amount, {price} AS price, {commission} AS commission FROM {transactions} WHERE {reference_number} = ? ORDER BY {created_at} DESC"
   }
 }

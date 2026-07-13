@@ -236,6 +236,18 @@ class DealRepo(_Repo):
         )
         return res.modified_count == 1
 
+    async def completed_since(self, since: datetime) -> list[Deal]:
+        """الصفقات المكتملة (COMPLETED) التي تحدّثت منذ `since` — للتدقيق الدوري (§ Reconciliation).
+        قراءة فقط، خارج المسار الحيّ. الترشيح الزمنيّ في بايثون (توحيد naive/aware كبقية المستودعات)."""
+        out: list[Deal] = []
+        lo = _naive_utc(since)
+        cur = self.col.find({"status": Status.COMPLETED.value}).sort("updated_at", 1)
+        async for d in cur:
+            ts = d.get("updated_at")
+            if ts is not None and _naive_utc(ts) >= lo:
+                out.append(Deal(**d))
+        return out
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3) الدفتر — منع التكرار (§9) — Append-only (§10)
@@ -613,6 +625,28 @@ class PendingReplyRepo(_Repo):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 9.5) تقارير التدقيق الدوري (Reconciliation) — تعارض DB ↔ MONEYADO (كشف بعد الحدث)
+# ─────────────────────────────────────────────────────────────────────────────
+class ReconciliationRepo(_Repo):
+    """تعارضات التدقيق الدوري بين ما في DB وما هو مكتوب فعليًّا في MONEYADO (قراءة SQL). سجلّ
+    منفصل تمامًا عن مسار المعالجة الحيّ — كشف انحراف الكتابة بعد وقوعه، لا منعٌ وقت الكتابة."""
+
+    async def record(self, *, deal_id: str, reference_number: Optional[str],
+                     mismatches: list, detected_at: datetime) -> bool:
+        """يسجّل تقرير تعارض لصفقة (setOnInsert بمفتاح deal_id فلا يتكرّر التنبيه كل ساعة). يُرجع
+        True إن كان **جديدًا** (أوّل اكتشاف) — عندها فقط يُرسِل الأنبوب تنبيهًا."""
+        res = await self.col.update_one(
+            {"deal_id": deal_id},
+            {"$setOnInsert": {
+                "deal_id": deal_id, "reference_number": reference_number,
+                "mismatches": mismatches, "detected_at": detected_at, "resolved": False,
+            }},
+            upsert=True,
+        )
+        return res.upserted_id is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 10) خانات المُرسِل (§7.3) — فهرس مشتقّ (cache) لربط الرسالة الثانية بنفس المُرسِل حتمًا
 # ─────────────────────────────────────────────────────────────────────────────
 class SenderSlotRepo(_Repo):
@@ -692,6 +726,7 @@ class Database:
         self.pending_replies = PendingReplyRepo(self.mdb, "pending_replies", "message_key")
         self.unknown_terms = UnknownTermRepo(self.mdb, "unknown_terms", "term")
         self.sender_slots = SenderSlotRepo(self.mdb, "sender_slots", "slot_key")
+        self.reconciliation = ReconciliationRepo(self.mdb, "reconciliation_reports", "deal_id")
         log.info("اتصال MongoDB: %s / %s", self._uri, self._db_name)
 
     async def ensure_indexes(self) -> None:

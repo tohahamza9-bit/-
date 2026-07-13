@@ -4,7 +4,8 @@
 - SqlVerifier: قراءة فقط من SQL Server (pyodbc) للتأكد أن الحوالة نزلت.
 - recover_pending: بعد الإطفاء المفاجئ، يفحص ما كان قيد الإدخال ويمنع الازدواج.
 """
+from .reconciliation import compare_leg_to_actual, reconcile_recent
 from .recovery import recover_pending
 from .sql_verifier import SqlVerifier
 
-__all__ = ["SqlVerifier", "recover_pending"]
+__all__ = ["SqlVerifier", "recover_pending", "reconcile_recent", "compare_leg_to_actual"]

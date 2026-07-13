@@ -20,7 +20,7 @@ from .constants import SEED_SUPPLIERS, SEED_TREASURIES, RoomType
 from .db import Database, utcnow
 from .logging_setup import get_logger, setup_logging
 from .pipeline import Pipeline
-from .verification import recover_pending
+from .verification import recover_pending, reconcile_recent
 from .verification.sql_verifier import SqlVerifier
 from .writers.moneyado.writer import MoneyadoWriter
 
@@ -28,6 +28,8 @@ log = get_logger(__name__)
 
 # فاصل نبضة العامل (§7.1: المعالجة تفرّغ بتأنٍّ)
 WORKER_INTERVAL_SECONDS = 2.0
+# فاصل التدقيق الدوري (§ إصلاح ٤) — مهمّة خلفية مستقلّة، بعيدًا عن المسار الحيّ
+RECONCILIATION_INTERVAL_SECONDS = 3600.0
 
 
 async def _worker_loop(pipeline: Pipeline, stop: asyncio.Event) -> None:
@@ -43,6 +45,28 @@ async def _worker_loop(pipeline: Pipeline, stop: asyncio.Event) -> None:
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=WORKER_INTERVAL_SECONDS)
     log.info("توقّف عامل المعالجة")
+
+
+async def _reconciliation_loop(db, verifier, bus, stop: asyncio.Event) -> None:
+    """التدقيق الدوري (§ إصلاح ٤): مهمّة خلفية **مستقلّة تمامًا** عن عامل المعالجة — تقارن الصفقات
+    المكتملة بما في MONEYADO (قراءة SQL فقط) كل ساعة، وتُنبّه على أي تعارض. لا تلمس المسار الحيّ.
+    معطّلة فعليًّا إن كان SQL معطّلًا (reconcile_recent يعود فارغًا)."""
+    log.info("بدء التدقيق الدوري (كل %.0fs، SQL=%s)", RECONCILIATION_INTERVAL_SECONDS,
+             getattr(verifier, "enabled", False))
+    while not stop.is_set():
+        # ننتظر أوّلًا (لا نزاحم الإقلاع)، ثم ندقّق — فاصل ساعة كامل بين الدورات.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=RECONCILIATION_INTERVAL_SECONDS)
+        if stop.is_set():
+            break
+        try:
+            reported = await reconcile_recent(db, verifier, bus, utcnow(),
+                                              window_seconds=int(RECONCILIATION_INTERVAL_SECONDS))
+            if reported:
+                log.warning("التدقيق الدوري: %d تعارض جديد بين DB وMONEYADO", len(reported))
+        except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونكمل (مهمّة خلفية غير حرجة للتنزيل)
+            log.exception("خطأ في دورة التدقيق الدوري: %s", exc)
+    log.info("توقّف التدقيق الدوري")
 
 
 async def _seed_rooms_from_env(db, settings) -> None:
@@ -151,6 +175,9 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
 
         if run_worker_now:
             state["worker"] = asyncio.create_task(_worker_loop(pipeline, state["stop"]))
+            # مهمّة التدقيق الدوري (§ إصلاح ٤) — مستقلّة عن عامل المعالجة، لا تؤثّر على سرعته.
+            state["reconciler"] = asyncio.create_task(
+                _reconciliation_loop(_db, verifier, bus, state["stop"]))
         # القيمة الحقيقية المحفوظة في DB (§13) — لا نصّ ثابت مضلِّل: التخزين يُقرأ حيًّا من bot_control،
         # فالإعداد يبقى بعد إعادة التشغيل (اللوق كان يطبع «إيقاف» دائمًا بغضّ النظر عن DB).
         ctrl = await _db.control.get()
@@ -167,6 +194,9 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         if "worker" in state:
             with contextlib.suppress(Exception):
                 await state["worker"]
+        if "reconciler" in state:
+            with contextlib.suppress(Exception):
+                await state["reconciler"]
         if db is None and "db" in state:
             await state["db"].close()
 

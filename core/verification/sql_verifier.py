@@ -177,6 +177,31 @@ class SqlVerifier:
         log.info("SQL ✅ الحوالة %s مؤكّدة — مرجع MONEYADO=%s", reference_number, moneyado_ref)
         return (True, moneyado_ref)
 
+    async def reconcile(self, reference_number: Optional[str]) -> Optional[dict]:
+        """التدقيق الدوري (§ Reconciliation): يقرأ ما هو مكتوب فعليًّا في MONEYADO لمرجعٍ ما (قراءة
+        فقط) — الكود/الاسم/المبلغ/السعر/العمولة — للمقارنة بما في DB. يُرجع dict أو None (غير موجود/
+        معطّل/تعذّر). لا يدّعي شيئًا عند التعذّر (نتيجة None آمنة) — كشفٌ بعد الحدث لا منعٌ حيّ."""
+        if not self.enabled or (self._needs_pyodbc and pyodbc is None) or not reference_number:
+            return None
+        if "reconcile_transaction" not in self._sql:
+            return None
+        try:
+            row = await asyncio.to_thread(self._run_select, "reconcile_transaction", (reference_number,))
+        except Exception:  # T5 — لا نبتلع؛ نسجّل كاملًا
+            log.exception("فشل استعلام التدقيق الدوري (reconcile) للحوالة %s", reference_number)
+            return None
+        if row is None:
+            return None
+        # ترتيب الأعمدة مطابق لـ SELECT: ref, customer_code, customer_name, amount, price, commission
+        return {
+            "moneyado_ref": _as_str(row[0]),
+            "customer_code": _as_str(row[1]),
+            "customer_name": _as_str(row[2]),
+            "amount": row[3],
+            "price": _as_str(row[4]),
+            "commission": row[5],
+        }
+
     async def find_last_pending(self, reference_number: Optional[str]) -> Optional[dict]:
         """
         فحص ما قبل إعادة المحاولة بعد التعطّل (§12 §9): هل حُفظت آخر حوالة كانت قيد الإدخال؟
