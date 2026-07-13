@@ -75,12 +75,17 @@ def build_cancellation_jobs(deal: Deal, now: datetime, ref: str,
     order = 0
     if deal.sell_leg is not None:
         disc = deal.sell_leg.commission
+        # 🔴 الشراء العكسيّ ينفَّذ فعليًّا بالمبلغ **الصافي (NET)** — لا الإجمالي (GROSS): الشراء
+        #    بـ NET يعادل تمامًا المخصوم الأصليّ من البيع (أثر صافٍ = صفر). العمولة **توثيقيّة فقط**
+        #    (موجبة، لا تغيّر المخصوم في شاشة الشراء — قرار صاحب العمل). بلا خصم: NET=GROSS فلا فرق.
+        net = deal.sell_leg.amount_after_discount
         rev = deal.sell_leg.model_copy(update={
             "operation": OperationType.BUY,
             "recipient_name": note,                       # خانة الملاحظات (§11.1-12)
-            "commission": abs(disc) if disc else deal.sell_leg.commission,  # الخصم موجب (بلا سالب)
+            "amount": net if net is not None else deal.sell_leg.amount,   # الصافي (NET)
+            "commission": abs(disc) if disc else deal.sell_leg.commission,  # موجبة (توثيقيّة)
             "commission_rate": 0.0,
-            "amount_after_discount": None,                # المبلغ قبل الخصم = leg.amount
+            "amount_after_discount": None,
         })
         jobs.append(WriteJob(
             job_id=f"{deal.deal_id}-cancel-{order}", deal_id=deal.deal_id,

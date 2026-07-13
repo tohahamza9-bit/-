@@ -178,8 +178,29 @@ async def test_cancel_discount_positive_commission(db):
 
     job = writer.jobs[0]
     assert job.operation == OperationType.BUY
-    assert job.leg.amount == 1600.0            # المبلغ قبل الخصم
-    assert job.leg.commission == 16.0          # الخصم موجب (بلا سالب)
+    assert job.leg.amount == 1584.0            # الصافي (NET) — الشراء العكسيّ ينفَّذ بالمخصوم الفعليّ
+    assert job.leg.commission == 16.0          # الخصم موجب (توثيقيّ، لا يغيّر المخصوم)
+
+
+async def test_cancel_si_discount_positive_commission(db):
+    """🔴 صيغة SI (بيع فقط بخصم): الإلغاء = شراء عكسيّ بالصافي (NET) + عمولة موجبة توثيقيّة — **مطابق
+    تمامًا لصيغة A** (مسار الكتابة/الإلغاء لا يفرّع على is_si_format). يوثّق أن قاعدة NET/GROSS
+    تنطبق على SI وليس A فقط."""
+    await _enable_storage(db)
+    writer = _RecWriter()
+    pipe = _pipeline(db, writer)
+    # SI بخصم: قبل الخصم 5060، بعد الخصم 5010، عمولة -50، is_si_format
+    sell = _sell_leg(amount=5060.0, commission=-50.0)
+    sell.amount_after_discount = 5010.0
+    sell.is_si_format = True
+    await _seed_completed(db, sell=sell)
+
+    await pipe._handle_cancellation(_cancel_raw(), NOW + timedelta(seconds=10))
+
+    job = writer.jobs[0]
+    assert job.operation == OperationType.BUY
+    assert job.leg.amount == 5010.0            # الصافي (NET) — كصيغة A بالضبط
+    assert job.leg.commission == 50.0          # موجبة توثيقيّة — كصيغة A بالضبط
 
 
 # ═════════════════════════════════════════════════════════════════════════════

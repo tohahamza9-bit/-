@@ -723,6 +723,12 @@ class Pipeline:
             "is_supplier_counterpart": True,
             "supplier_price_raw": None,          # استُهلك في بناء طرف الشراء
         })
+        # 🔴 (قاعدة الطرفين §6.1): طرف **البيع** أيضًا بالصافي (NET) بلا عمولة — كالشراء المشتقّ.
+        #    القاعدة محاسبيّة بنوع الحوالة (طرفين خصم)، بغضّ النظر عن اشتقاق الشراء (§6.2).
+        sell.amount = net
+        sell.amount_after_discount = None
+        sell.commission = None
+        sell.commission_rate = 0.0
         deal.is_two_legged = True
         log.info(
             "صفقة %s: خزينة sell_and_buy «%s» مع مورد «%s» → تخليق طرف شراء (مبلغ=%s، سعر=%s، ref=%s)",
@@ -734,8 +740,16 @@ class Pipeline:
         """يحسب العمولة ويُسند خزينة «خصم1%/صافي» لطرفَي الصفقة (§6.1 §6.2)."""
         commission = compute_commission(deal.sell_leg, deal.buy_leg)
         has_discount = bool(commission is not None and abs(commission) > 1e-9)
-        deal.sell_leg.commission = commission  # الفرق بالسالب (§6.2)
+        # 🔴 (قاعدة الطرفين §6.1، تأكيد المستخدم): خزينة خصم ثنائية → **كلا القيدين بالصافي (NET)
+        #    بلا عمولة** (قاعدة محاسبيّة بنوع الحوالة، لا بطريقة اشتقاق الشراء). البيع كان GROSS+عمولة
+        #    → يُحوَّل للصافي وتُلغى عمولته. has_discount يُحسَب **قبل** التصفير فلا يتأثّر اختيار الخزينة.
+        if has_discount and deal.sell_leg.amount_after_discount is not None:
+            deal.sell_leg.amount = deal.sell_leg.amount_after_discount
+        deal.sell_leg.amount_after_discount = None
+        deal.sell_leg.commission = None
         deal.sell_leg.commission_rate = 0.0    # 0 دائمًا (§6.2)
+        if deal.buy_leg is not None:
+            deal.buy_leg.commission = None
 
         # الخزينة إن لم تكن محسومة بعد (§5.5): خصم1% عند خصم، صافي بدونه (§6.1)
         if deal.sell_leg.treasury is None or deal.buy_leg.treasury is None:

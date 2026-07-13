@@ -153,8 +153,8 @@ async def test_synthesize_buy_leg_for_sell_and_buy_with_supplier(db):
     assert buy.treasury.code == "90"           # نفس الخزينة الخارجية
     assert buy.reference_number == "SI1417"    # نفس الرقم الإشاري
     assert buy.phone == "01037354643"          # نفس الهاتف
-    # طرف البيع لم يتغيّر (المبلغ قبل الخصم، العمولة سالبة)
-    assert deal.sell_leg.amount == 20475 and deal.sell_leg.commission == -204.0
+    # 🔴 قاعدة الطرفين: طرف البيع أيضًا بالصافي (NET) بلا عمولة (كالشراء المشتقّ)
+    assert deal.sell_leg.amount == 20271 and deal.sell_leg.commission is None
 
 
 async def test_synthesize_buy_leg_uses_supplier_code_and_rate(db):
@@ -175,10 +175,10 @@ async def test_synthesize_buy_leg_uses_supplier_code_and_rate(db):
     assert buy.is_supplier_counterpart is True
     assert buy.supplier is not None and buy.supplier.code == "760"
     assert buy.supplier_price_raw is None           # استُهلك في البناء
-    # طرف البيع لم يتغيّر (سعره وكوده وعمولته كما هي)
+    # طرف البيع: سعره وكوده كما هما؛ 🔴 عمولته أُلغيت (قاعدة الطرفين: كلاهما NET بلا عمولة)
     assert deal.sell_leg.price_normalized == "5.9"
     assert deal.sell_leg.customer_code == "570"
-    assert deal.sell_leg.commission == -204.0
+    assert deal.sell_leg.commission is None
 
 
 async def test_synthesized_supplier_buy_leg_screen_fields(db):
@@ -763,9 +763,9 @@ async def test_two_leg_grouping_and_order(db):
     assert len(completed) == 1, "الطرفان يجب أن يندمجا في صفقة واحدة (§7.3)"
     d = completed[0]
     assert d.is_two_legged and d.sell_leg is not None and d.buy_leg is not None
-    assert d.sell_leg.amount == 8475 and d.buy_leg.amount == 8391
-    # العمولة = الفرق بالسالب (§6.2): 8391 − 8475 = −84
-    assert d.sell_leg.commission == pytest.approx(-84.0)
+    # 🔴 قاعدة الطرفين: كلاهما بالصافي (NET=8391) بلا عمولة (بغضّ النظر عن اشتقاق الشراء §6.1)
+    assert d.sell_leg.amount == 8391 and d.buy_leg.amount == 8391
+    assert d.sell_leg.commission is None
     # خزينة الطرفين = «فودافون بالخصم» (85) — الافتراضية لطرف مورد حوالة A الثانية (§6.1)
     assert d.sell_leg.treasury.code == "85" and d.buy_leg.treasury.code == "85"
 
