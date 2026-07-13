@@ -469,9 +469,13 @@ def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_he
 
     # 2) مؤشّر الخصم (بدون خصم / صافي / خصم 1%) — ملاحظة لا خزينة وجهة (§3.2 §6.1) → notes.
     #    يُفحص قبل حلّ الخزينة كي لا تُلتقط «صافي» خزينةً معلّقة تحجب الخزينة الحقيقية.
+    #    🔴 (إصلاح ٣أ) لو حمل السطر **مبلغًا + عملة** مع مؤشّر الخصم على نفس السطر («حول 13100 ج م …
+    #    بدون خصم» — A9055) لا نبتلعه ونُسقِط المبلغ بصمت: نسجّل الملاحظة ونسقط لخطوة المبلغ (٣)
+    #    لالتقاطه. المؤشّر البحت (بلا مبلغ) يبقى ملاحظةً فقط (return) فلا يُلتقَط كاسم مستلم.
     if _is_discount_indicator(n):
         _add_note(f, seg)
-        return
+        if not (detect_currency(seg) and parse_amount(_strip_phones_for_amount(seg)) is not None):
+            return
 
     # 3) المبلغ + العملة (§3.5) — يُفحص قبل الهاتف/الزبون لتجنّب الالتباس. الهاتف يُجرَّد قبل
     #    استخراج المبلغ (#2) فلا يُخلَط رقمُه بالمبلغ في مقطع طويل («01... 5000 مصري» → 5000).
@@ -557,6 +561,14 @@ def _parse_customer_line(seg: str) -> Optional[tuple[str, Optional[str], Optiona
     if tokens and _NUMERIC_TOKEN_RE.match(tokens[-1]):
         price = tokens[-1].replace("،", ".")   # الفاصلة العربية → عشرية (5،82 → 5.82 §3.6)
         tokens = tokens[:-1]
+    elif tokens:
+        # 🔴 (إصلاح ٣ب) السعر ملتصق بالاسم بلا مسافة («بن ناصر5.98» → اسم «بن ناصر» + سعر «5.98»):
+        #    نفصل عشريًّا زائلًا في آخر الرمز بعد حرف عربيّ (A9063/A9035). عشريّ فقط (\d+[.,]\d+) كي
+        #    لا نفصل رقمًا هو جزء من الاسم؛ يُفحص فقط حين لم يُلتقَط سعر منفصل (elif).
+        glued = re.match(r"^(.*[ء-ي])(\d+[.,،]\d+)$", tokens[-1])
+        if glued:
+            price = glued.group(2).replace("،", ".")
+            tokens[-1] = glued.group(1)
     name = " ".join(tokens).strip()
     if not name:
         return None

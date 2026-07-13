@@ -57,6 +57,8 @@ def make_leg(**kw) -> ParsedLeg:
         phone="01115233493",
         reference_number="A6779",
         source_message_key="msg-1",
+        price_raw="5.9",
+        price_normalized="5.9",         # سعر بيع الزبون مطلوب دائمًا (§6.2) — طرف بيع كامل
         treasury=TREAS,                 # خزينة بكود → مطابقة الخزينة محصورة بغرفتها (§8.1)
     )
     base.update(kw)
@@ -161,6 +163,18 @@ def test_trust_gate_holds_explicit_conflict():
     # المبلغ بعد الخصم أكبر من قبله → تعارض صريح
     ok, reason = trust_gate(make_leg(amount=1000.0, amount_after_discount=1200.0))
     assert ok is False and reason
+
+
+def test_trust_gate_holds_missing_price_on_sell():
+    # 🔴 (إصلاح ٣ج) طرف بيع الزبون بلا سعر → رفض «سعر غير موجود» (خطر ماليّ A9063).
+    ok, reason = trust_gate(make_leg(price_raw=None, price_normalized=None))
+    assert ok is False and reason == "سعر غير موجود"
+
+
+def test_trust_gate_buy_leg_exempt_from_price_check():
+    # طرف الشراء المشتقّ (operation=BUY) يعتمد supplier_price لا price_normalized → لا يُرفَض لغيابه.
+    ok, _ = trust_gate(make_leg(operation=OperationType.BUY, price_raw=None, price_normalized=None))
+    assert ok is True
 
 
 # ═══════════════════════════════════════════════════════════════════════════

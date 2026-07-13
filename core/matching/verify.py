@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ..constants import OperationType
 from ..logging_setup import get_logger
 from ..models import ParsedLeg
 from .fuzzy import names_match, normalize_ar
@@ -43,6 +44,12 @@ def trust_gate(leg: ParsedLeg) -> tuple[bool, Optional[str]]:
         return False, "مبلغ غير مقروء"
     if leg.amount <= 0:
         return False, "مبلغ غير صالح (≤ 0)"
+
+    # 1.5) 🔴 السعر مفقود على طرف بيع الزبون → رفض (خطر ماليّ: لا تُكتب حوالة بلا سعر أبدًا §6.2).
+    #      محصور بطرف البيع (operation=SELL): طرف الشراء المشتقّ يعتمد supplier_price لا price_normalized،
+    #      فلا يُرفَض هنا. (بلاغ A9063: صفقة بسعر None كانت تمرّ وتُكتب فعليًّا في MONEYADO.)
+    if leg.operation == OperationType.SELL and leg.price_normalized is None:
+        return False, "سعر غير موجود"
 
     # 2) تعارض صريح في المبلغ: القيمة بعد الخصم أكبر من قبله
     if leg.amount_after_discount is not None and leg.amount_after_discount > leg.amount + _AMOUNT_EPSILON:
