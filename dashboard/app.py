@@ -32,6 +32,7 @@ from core.models import (
     DetectionConfig,
     EmployeeRecord,
     OutgoingMessage,
+    PaymentChannelRecord,
     Room,
     SupplierRecord,
     TreasuryRecord,
@@ -72,6 +73,14 @@ class SupplierIn(BaseModel):
     name: str = Field(..., min_length=1)
     code: Optional[str] = None                     # كود MONEYADO
     aliases: list[str] = Field(default_factory=list)  # الإملاءات البديلة
+    active: bool = True
+
+
+class ChannelIn(BaseModel):
+    """قناة دفع مُدارة (لوحة V2 م٣) — اسم + إملاءات بديلة + كود MONEYADO."""
+    name: str = Field(..., min_length=1)
+    code: Optional[str] = None
+    aliases: list[str] = Field(default_factory=list)
     active: bool = True
 
 
@@ -168,6 +177,34 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
     async def _active_managers() -> int:
         """عدد المديرين النشطين — لمنع تعطيل/تنزيل آخر مدير (تفادي القفل الكامل)."""
         return await db.users.col.count_documents({"role": Role.MANAGER.value, "active": True})
+
+    # ── أدوات م٣: حارس تكرار الكود + تنبيه المالك (best-effort عبر طابور outgoing) ──
+    async def _check_code_conflict(repo, code: Optional[str], name: str) -> None:
+        """يمنع (409) كودًا مستخدَمًا على سجلّ **مختلف الاسم** — لا يمسّ التكرار القائم."""
+        if not code:
+            return
+        other = await repo.col.find_one({"code": code, "name": {"$ne": name}})
+        if other is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail=f"الكود {code} مستخدَم مسبقًا لـ«{other.get('name')}»")
+
+    async def _notify_owner(text: str) -> None:
+        """best-effort: يُدرِج تنبيهًا في طابور outgoing (is_alert، وجهة المسؤول). لا يوقف الحفظ.
+
+        نفس مسار ⚠️/🔴 (لا HTTP مباشر لخدمة Node). يُتخطّى بلا فشل إن لم تُهيّأ غرفة المسؤول.
+        """
+        admin = (settings.admin_room_jid or "").strip()
+        if not admin:
+            log.info("تنبيه المالك متخطّى: admin_room_jid غير مُهيّأة")
+            return
+        try:
+            await db.outgoing.enqueue(OutgoingMessage(chat_jid=admin, text=text, is_alert=True))
+        except Exception as exc:  # best-effort — T5: يُسجَّل ولا يوقف حفظ التغيير
+            log.warning("تعذّر إدراج تنبيه المالك (متابعة): %s", exc)
+
+    def _owner_text(entity: str, action: str, name: str, code: Optional[str] = None) -> str:
+        c = f" (كود {code})" if code else ""
+        return f"🔧 {action} {entity}: «{name}»{c} — من لوحة التحكّم"
 
     # ── تسجيل الدخول/الخروج (§14.3) ───────────────────────────────────────────
     @router.post("/auth/login")
@@ -311,8 +348,10 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
     async def add_treasury(body: TreasuryIn) -> dict:
         """إضافة/تعديل خزينة (upsert على الاسم). تُفعَّل فورًا في MongoDB."""
         rec = TreasuryRecord(**body.model_dump())
+        await _check_code_conflict(db.treasuries, rec.code, rec.name)   # م٣: منع كود مكرّر
         await db.treasuries.upsert(rec)
         log.info("خزينة محدّثة: %s (code=%s type=%s)", rec.name, rec.code, rec.type)
+        await _notify_owner(_owner_text("خزينة", "إضافة/تعديل", rec.name, rec.code))
         return rec.model_dump(mode="json")
 
     @router.put("/treasuries/{name}", dependencies=[manager])
@@ -322,8 +361,10 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         data = body.model_dump()
         data["name"] = name  # الاسم من المسار هو المفتاح
         rec = TreasuryRecord(**data)
+        await _check_code_conflict(db.treasuries, rec.code, rec.name)   # م٣: منع كود مكرّر
         await db.treasuries.upsert(rec)
         log.info("تعديل خزينة: %s", name)
+        await _notify_owner(_owner_text("خزينة", "تعديل", rec.name, rec.code))
         return rec.model_dump(mode="json")
 
     @router.post("/treasuries/{name}/disable", dependencies=[manager])
@@ -333,6 +374,7 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         if res.matched_count == 0:
             raise HTTPException(status_code=404, detail=f"خزينة غير موجودة: {name}")
         log.info("إيقاف خزينة (بلا حذف): %s", name)
+        await _notify_owner(_owner_text("خزينة", "إيقاف", name))
         return {"name": name, "active": False}
 
     @router.post("/treasuries/{name}/enable", dependencies=[manager])
@@ -342,6 +384,7 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         if res.matched_count == 0:
             raise HTTPException(status_code=404, detail=f"خزينة غير موجودة: {name}")
         log.info("تفعيل خزينة: %s", name)
+        await _notify_owner(_owner_text("خزينة", "تفعيل", name))
         return {"name": name, "active": True}
 
     # ── إدارة الموردين (§5.4 §13) — مثل الخزائن ───────────────────────────────
@@ -353,8 +396,10 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
     async def add_supplier(body: SupplierIn) -> dict:
         """إضافة/تعديل مورد (اسم + إملاءات بديلة + كود MONEYADO)."""
         rec = SupplierRecord(**body.model_dump())
+        await _check_code_conflict(db.suppliers, rec.code, rec.name)    # م٣: منع كود مكرّر
         await db.suppliers.upsert(rec)
         log.info("مورد محدّث: %s (code=%s)", rec.name, rec.code)
+        await _notify_owner(_owner_text("مورد", "إضافة/تعديل", rec.name, rec.code))
         return rec.model_dump(mode="json")
 
     @router.put("/suppliers/{name}", dependencies=[manager])
@@ -363,8 +408,10 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         data = body.model_dump()
         data["name"] = name
         rec = SupplierRecord(**data)
+        await _check_code_conflict(db.suppliers, rec.code, rec.name)    # م٣: منع كود مكرّر
         await db.suppliers.upsert(rec)
         log.info("تعديل مورد: %s", name)
+        await _notify_owner(_owner_text("مورد", "تعديل", rec.name, rec.code))
         return rec.model_dump(mode="json")
 
     @router.post("/suppliers/{name}/disable", dependencies=[manager])
@@ -374,7 +421,51 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         if res.matched_count == 0:
             raise HTTPException(status_code=404, detail=f"مورد غير موجود: {name}")
         log.info("إيقاف مورد (بلا حذف): %s", name)
+        await _notify_owner(_owner_text("مورد", "إيقاف", name))
         return {"name": name, "active": False}
+
+    @router.post("/suppliers/{name}/enable", dependencies=[manager])
+    async def enable_supplier(name: str) -> dict:
+        """تفعيل مورد موقوف (active=true) — تناظر مع الخزائن (§13)."""
+        res = await db.suppliers.col.update_one({"name": name}, {"$set": {"active": True}})
+        if res.matched_count == 0:
+            raise HTTPException(status_code=404, detail=f"مورد غير موجود: {name}")
+        log.info("تفعيل مورد: %s", name)
+        await _notify_owner(_owner_text("مورد", "تفعيل", name))
+        return {"name": name, "active": True}
+
+    # ── إدارة قنوات الدفع (لوحة V2 م٣) — إدارة قائمة فقط؛ لا ربط بالكتابة بعد ──────
+    @router.get("/payment-channels", dependencies=[reader])
+    async def list_channels() -> list[dict]:
+        return [_clean(d) async for d in db.payment_channels.col.find({})]
+
+    @router.post("/payment-channels", dependencies=[manager], status_code=status.HTTP_201_CREATED)
+    async def add_channel(body: ChannelIn) -> dict:
+        """إضافة/تعديل قناة دفع (upsert على الاسم) + إملاءات بديلة لتصحيح الإملاء."""
+        rec = PaymentChannelRecord(**body.model_dump())
+        await _check_code_conflict(db.payment_channels, rec.code, rec.name)
+        await db.payment_channels.upsert(rec)
+        log.info("قناة دفع محدّثة: %s (code=%s)", rec.name, rec.code)
+        await _notify_owner(_owner_text("قناة دفع", "إضافة/تعديل", rec.name, rec.code))
+        return rec.model_dump(mode="json")
+
+    @router.post("/payment-channels/{name}/disable", dependencies=[manager])
+    async def disable_channel(name: str) -> dict:
+        res = await db.payment_channels.col.update_one({"name": name}, {"$set": {"active": False}})
+        if res.matched_count == 0:
+            raise HTTPException(status_code=404, detail=f"قناة غير موجودة: {name}")
+        log.info("إيقاف قناة دفع (بلا حذف): %s", name)
+        await _notify_owner(_owner_text("قناة دفع", "إيقاف", name))
+        return {"name": name, "active": False}
+
+    @router.post("/payment-channels/{name}/enable", dependencies=[manager])
+    async def enable_channel(name: str) -> dict:
+        res = await db.payment_channels.col.update_one({"name": name}, {"$set": {"active": True}})
+        if res.matched_count == 0:
+            raise HTTPException(status_code=404, detail=f"قناة غير موجودة: {name}")
+        log.info("تفعيل قناة دفع: %s", name)
+        await _notify_owner(_owner_text("قناة دفع", "تفعيل", name))
+        return {"name": name, "active": True}
 
     # ── الكلمات المجهولة (§4.5 §5.4) — خزائن/موردون تعذّر حلّهم → إسناد يدويّ كـ alias ─────
     @router.get("/unknown-terms", dependencies=[reader])

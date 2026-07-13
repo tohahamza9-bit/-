@@ -163,8 +163,12 @@
 - **جديد:** `dashboard/detect.py` (القواعد الأربع)، `tools/analyze_thresholds.py` (اشتقاق الحدود، قراءة فقط)، مخزن حدود (`dashboard_config` مستودع إضافيّ في `core/db.py`).
 - **تعديل:** `dashboard/app.py` (دمج إشارات الكشف في `/attention` + نقاط الحدود)، واجهة الانتباه لعرض أنواع الإشارات.
 
-### المرحلة ٣ — الخزائن/الموردون/قنوات الدفع (شاشة موحّدة)
+### المرحلة ٣ — الخزائن/الموردون/قنوات الدفع (شاشة موحّدة) — ✅ مكتملة ومدموجة
 بحث فوري + فحص تكرار الكود + قنوات دفع مُدارة + تنبيه المالك عند التغيير.
+**المُنجَز:** `PaymentChannelRecord` + `SEED_PAYMENT_CHANNELS` + `PaymentChannelListRepo`؛ نقاط
+`/payment-channels` (CRUD)، حارس تكرار الكود (409) على الخزائن/الموردين/القنوات، `/suppliers/{name}/enable`
+(تناظر)، تنبيه المالك best-effort عبر طابور `outgoing` عند كل تغيير، وبحث فوري + بطاقة قنوات في `index.html`.
+**مؤجّل مسيَّج:** ربط إملاءات القنوات بشاشة الشراء (`fields.py`) — لم يُمسّ الـ writer.
 - **جديد (إضافيّ، يحاكي الخزائن):** `PaymentChannelRecord` في `core/models.py`، `SEED_PAYMENT_CHANNELS` في `core/constants.py`، `PaymentChannelListRepo` في `core/db.py` (+ ربط `connect`/`ensure_indexes`).
 - **تعديل:** `dashboard/app.py` (CRUD القنوات، حارس تكرار الكود على الخزائن/الموردين/القنوات، تنبيه المالك عبر `Bus`)، `dashboard/static` (شاشة موحّدة + بحث فوري).
 - **مسيَّج (كتابة writer):** ربط إملاءات القناة بـ`core/writers/moneyado/fields.py` (`_buy_payment_code`) بدل ثابت `MONEYADO_PAYMENT_CODE` — سلوك القنوات المعروفة يبقى حرفيًّا، والإملاءات إضافة. **بموافقة منفصلة.**

@@ -34,6 +34,7 @@ from .models import (
     LedgerEntry,
     OutgoingMessage,
     ParsedLeg,
+    PaymentChannelRecord,
     RawMessage,
     Room,
     SessionRecord,
@@ -401,6 +402,23 @@ class SupplierListRepo(_Repo):
     async def all_active(self) -> list[SupplierRecord]:
         cur = self.col.find({"active": True})
         return [SupplierRecord(**d) async for d in cur]
+
+
+class PaymentChannelListRepo(_Repo):
+    """قنوات الدفع المُدارة (لوحة V2 م٣) — نمط TreasuryListRepo. المفتاح name."""
+
+    async def upsert(self, rec: PaymentChannelRecord) -> None:
+        await self.col.update_one({"name": rec.name}, {"$set": self._dump(rec)}, upsert=True)
+
+    async def all_active(self) -> list[PaymentChannelRecord]:
+        cur = self.col.find({"active": True})
+        return [PaymentChannelRecord(**d) async for d in cur]
+
+    async def seed_if_missing(self, seed: list[dict]) -> None:
+        """يُدرِج القنوات الافتراضية الناقصة فقط ($setOnInsert) — لا يمسّ الموجود/تعديلات Dashboard."""
+        for s in seed:
+            doc = {"active": True, "aliases": [], **s}
+            await self.col.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
 
 
 class EmployeeListRepo(_Repo):
@@ -907,6 +925,7 @@ class Database:
         self.outgoing = OutgoingRepo(self.mdb, "outgoing", "_id")
         self.treasuries = TreasuryListRepo(self.mdb, "treasuries", "name")
         self.suppliers = SupplierListRepo(self.mdb, "suppliers", "name")
+        self.payment_channels = PaymentChannelListRepo(self.mdb, "payment_channels", "name")
         self.employees = EmployeeListRepo(self.mdb, "employees", "whatsapp_number")
         self.control = ControlRepo(self.mdb, "bot_control", "_key")
         self.dead_letter = DeadLetterRepo(self.mdb, "dead_letter", "_id")
@@ -957,6 +976,7 @@ class Database:
         # فالبنود غير المُرسَلة (بلا sent_at) لا تنتهي أبدًا → لا تُحذف تنبيهات المسؤول المعلّقة.
         await self.outgoing.col.create_index("sent_at", expireAfterSeconds=300, name="ttl_sent_at")
         await self.employees.col.create_index("whatsapp_number", unique=True)
+        await self.payment_channels.col.create_index("name", unique=True)
         # خانات المُرسِل (§7.3): خانة واحدة مفتوحة لكل (غرفة|مُرسِل) + TTL على expires_at.
         # TTL بلا partialFilter (قيد Mongo) — لكن الخانة مشتقّة فحذفها التلقائي غير ضارّ.
         await self.sender_slots.col.create_index("slot_key", unique=True)

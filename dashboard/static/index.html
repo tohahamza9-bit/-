@@ -118,6 +118,11 @@
       <tbody id="r_body"></tbody></table>
   </div>
 
+  <!-- بحث فوري في الخزائن/الموردين/القنوات (م٣) -->
+  <div class="card">
+    <div class="row"><input id="assetSearch" placeholder="🔎 بحث فوري في الخزائن/الموردين/القنوات (اسم/كود/إملاء)…"></div>
+  </div>
+
   <!-- الخزائن §13 -->
   <div class="card">
     <h2>إدارة الخزائن</h2>
@@ -151,6 +156,19 @@
     </div>
     <table><thead><tr><th>الاسم</th><th>الكود</th><th>إملاءات</th><th>الحالة</th><th></th></tr></thead>
       <tbody id="s_body"></tbody></table>
+  </div>
+
+  <!-- قنوات الدفع (م٣) — إدارة قائمة + إملاءات بديلة (لا ربط بالكتابة بعد) -->
+  <div class="card">
+    <h2>قنوات الدفع <span class="muted">(فودافون/انستا… + إملاءات بديلة لتصحيح الإملاء)</span></h2>
+    <div class="row write-only">
+      <input id="c_name" placeholder="اسم القناة">
+      <input id="c_code" placeholder="كود MONEYADO" style="max-width:130px">
+      <input id="c_alias" placeholder="إملاءات بديلة (فاصلة)">
+      <button onclick="addChannel()">حفظ</button>
+    </div>
+    <table><thead><tr><th>الاسم</th><th>الكود</th><th>إملاءات</th><th>الحالة</th><th></th></tr></thead>
+      <tbody id="c_body"></tbody></table>
   </div>
 
   <!-- الموظفون المعتمدون §13 -->
@@ -245,6 +263,7 @@ async function loadTreasuries() {
       ? `<button class="ghost danger" onclick="disableTreasury('${encodeURIComponent(t.name)}')">إيقاف</button>`
       : `<button class="ghost" onclick="enableTreasury('${encodeURIComponent(t.name)}')">تفعيل</button>`)}</td>
   </tr>`).join("");
+  applyAssetSearch();
 }
 async function addTreasury() {
   if (!$("t_name").value) return toast("الاسم مطلوب");
@@ -262,9 +281,13 @@ async function loadSuppliers() {
     <td>${s.name}</td><td>${s.code??'—'}</td>
     <td class="aliases">${(s.aliases||[]).join('، ')}</td>
     <td>${s.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
-    <td>${(canWrite() && s.active)?`<button class="ghost danger" onclick="disableSupplier('${encodeURIComponent(s.name)}')">إيقاف</button>`:''}</td>
+    <td>${!canWrite() ? '' : (s.active
+      ? `<button class="ghost danger" onclick="disableSupplier('${encodeURIComponent(s.name)}')">إيقاف</button>`
+      : `<button class="ghost" onclick="enableSupplier('${encodeURIComponent(s.name)}')">تفعيل</button>`)}</td>
   </tr>`).join("");
+  applyAssetSearch();
 }
+async function enableSupplier(n) { await api(`/suppliers/${n}/enable`,"POST"); loadSuppliers(); }
 async function addSupplier() {
   if (!$("s_name").value) return toast("الاسم مطلوب");
   await api("/suppliers","POST",{ name:$("s_name").value, code:$("s_code").value||null,
@@ -272,6 +295,39 @@ async function addSupplier() {
   ["s_name","s_code","s_alias"].forEach(i=>$(i).value=""); loadSuppliers();
 }
 async function disableSupplier(n) { await api(`/suppliers/${n}/disable`,"POST"); loadSuppliers(); }
+
+// ── قنوات الدفع (م٣) ──
+async function loadChannels() {
+  const rows = await api("/payment-channels");
+  $("c_body").innerHTML = rows.map(c => `<tr class="${c.active?'':'inactive'}">
+    <td>${c.name}</td><td>${c.code??'—'}</td>
+    <td class="aliases">${(c.aliases||[]).join('، ')}</td>
+    <td>${c.active?'<span class="pill on">فعّالة</span>':'<span class="pill off">موقوفة</span>'}</td>
+    <td>${!canWrite() ? '' : (c.active
+      ? `<button class="ghost danger" onclick="disableChannel('${encodeURIComponent(c.name)}')">إيقاف</button>`
+      : `<button class="ghost" onclick="enableChannel('${encodeURIComponent(c.name)}')">تفعيل</button>`)}</td>
+  </tr>`).join("");
+  applyAssetSearch();
+}
+async function addChannel() {
+  if (!$("c_name").value) return toast("الاسم مطلوب");
+  await api("/payment-channels","POST",{ name:$("c_name").value, code:$("c_code").value||null,
+    aliases:csv($("c_alias").value) });
+  ["c_name","c_code","c_alias"].forEach(i=>$(i).value=""); loadChannels();
+}
+async function disableChannel(n) { await api(`/payment-channels/${n}/disable`,"POST"); loadChannels(); }
+async function enableChannel(n) { await api(`/payment-channels/${n}/enable`,"POST"); loadChannels(); }
+
+// ── بحث فوري في الخزائن/الموردين/القنوات (م٣) — واجهة فقط ──
+function applyAssetSearch() {
+  const q = ($("assetSearch").value||"").trim();
+  ["t_body","s_body","c_body"].forEach(id => {
+    const tb = $(id); if (!tb) return;
+    tb.querySelectorAll("tr").forEach(tr => {
+      tr.style.display = (!q || tr.textContent.includes(q)) ? "" : "none";
+    });
+  });
+}
 
 // ── الموظفون ──
 async function loadEmployees() {
@@ -347,7 +403,8 @@ async function saveDetection(){
 }
 
 // تحميل أولي
-function refreshAll(){ loadControl(); loadRooms(); loadTreasuries(); loadSuppliers(); loadEmployees(); }
+$("assetSearch").addEventListener("input", applyAssetSearch);
+function refreshAll(){ loadControl(); loadRooms(); loadTreasuries(); loadSuppliers(); loadChannels(); loadEmployees(); }
 
 const ROLE_AR = { manager:"مدير", reviewer:"مراجع", data_entry:"مُدخل بيانات" };
 $("logoutBtn").onclick = async () => {

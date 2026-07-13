@@ -228,6 +228,18 @@ class SupplierRecord(BaseModel):
     active: bool = True
 
 
+class PaymentChannelRecord(BaseModel):
+    """قناة دفع مُدارة (فودافون/إنستا…) — لوحة V2 م٣. تحاكي TreasuryRecord.
+
+    **إدارة قائمة فقط** الآن (إملاءات بديلة لتصحيح أخطاء الإملاء مثل «فودافوان»)؛ ربطها الفعليّ
+    بشاشة الشراء (core/writers/moneyado/fields.py) مؤجّل لمرحلة مسيَّجة — لا يُمسّ الـ writer الآن.
+    """
+    code: Optional[str] = None                   # كود وسيلة الدفع في MONEYADO
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    active: bool = True
+
+
 class EmployeeRecord(BaseModel):
     """موظف معتمد — «تم»/الإلغاء تُقبل منه فقط (§8.3 §10 §13)."""
     whatsapp_number: str
