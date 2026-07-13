@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>قائمة الانتباه — MONEYADO</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2233; --line:#2c3853; --txt:#e7ecf5; --muted:#8a99b5;
+          --accent:#3b82f6; --ok:#22c55e; --warn:#ef4444; --amber:#eab308; --violet:#a855f7; --chip:#243049; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",Tahoma,system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); font-size:15px; line-height:1.6; }
+  header { padding:14px 20px; background:var(--card); border-bottom:1px solid var(--line);
+           display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+  header h1 { margin:0; font-size:19px; }
+  nav { display:flex; gap:6px; flex-wrap:wrap; }
+  nav a { color:var(--muted); text-decoration:none; font-size:14px; padding:4px 10px; border-radius:8px; }
+  nav a:hover, nav a.active { color:var(--txt); background:var(--chip); }
+  .userbox { display:flex; gap:10px; align-items:center; }
+  .role-badge { font-size:12px; font-weight:700; padding:2px 10px; border-radius:999px;
+                background:rgba(59,130,246,.15); color:var(--accent); border:1px solid var(--accent); }
+  button { font-family:inherit; font-size:14px; padding:7px 12px; border-radius:8px;
+           border:1px solid var(--line); background:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--txt); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .wrap { max-width:1000px; margin:0 auto; padding:16px; }
+  .item { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px;
+          margin-bottom:12px; border-inline-start:4px solid var(--line); }
+  .item.u0 { border-inline-start-color:var(--amber); }   /* HELD */
+  .item.u1 { border-inline-start-color:var(--accent); }  /* ESCALATED */
+  .item.u2 { border-inline-start-color:var(--warn); }    /* TECH_FAILED */
+  .item.u3 { border-inline-start-color:var(--violet); }  /* SELL_DONE */
+  .item.reviewed { opacity:.72; }
+  .top { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; }
+  .status { font-size:12px; font-weight:700; padding:2px 10px; border-radius:999px; background:var(--chip); }
+  .u0 .status { color:var(--amber); } .u1 .status { color:var(--accent); }
+  .u2 .status { color:var(--warn); }  .u3 .status { color:var(--violet); }
+  .meta { color:var(--muted); font-size:13px; margin-top:4px; }
+  .fields { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px 16px; font-size:14px; }
+  .fields b { color:var(--muted); font-weight:600; }
+  .mono { font-family:"Consolas",monospace; direction:ltr; display:inline-block; }
+  .reason { margin-top:8px; font-size:13.5px; color:#fca5a5; }
+  .rev { margin-top:8px; font-size:12.5px; color:var(--ok); }
+  .actions { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
+  #empty, #noaccess { display:none; text-align:center; color:var(--muted); padding:56px 16px; }
+  body.no-access .wrap { display:none; } body.no-access #noaccess { display:block; }
+  #msg { position:fixed; bottom:16px; inset-inline-start:16px; background:var(--card);
+         border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:9; }
+  /* لوح الخط الزمني */
+  #detail { position:fixed; inset:0; background:rgba(0,0,0,.5); display:none; z-index:20;
+            padding:16px; overflow:auto; }
+  #detail .panel { max-width:760px; margin:20px auto; background:var(--card); border:1px solid var(--line);
+                   border-radius:14px; padding:18px; }
+  .tl { border-inline-start:2px solid var(--line); margin:10px 0; padding-inline-start:14px; }
+  .ev { margin-bottom:12px; } .ev .t { font-size:12px; color:var(--muted); }
+  .ev .k { font-size:12px; font-weight:700; padding:1px 8px; border-radius:999px; background:var(--chip); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>قائمة الانتباه</h1>
+    <nav>
+      <a href="/attention" class="active">الانتباه</a>
+      <a href="/transfers">سجل الحوالات</a>
+      <a href="/" id="homeLink">الرئيسية</a>
+    </nav>
+  </div>
+  <div class="userbox">
+    <span id="roleBadge" class="role-badge" style="display:none"></span>
+    <span id="whoami" class="muted">…</span>
+    <button id="logoutBtn" class="ghost" style="display:none">خروج</button>
+  </div>
+</header>
+
+<div id="noaccess">لا صلاحية لعرض هذه الشاشة بحسابك الحالي.<br>تواصل مع المسؤول.</div>
+<div class="wrap">
+  <div id="list"></div>
+  <div id="empty">لا حوالات تحتاج انتباهًا الآن ✓</div>
+</div>
+<div id="detail" onclick="if(event.target===this)this.style.display='none'"><div class="panel" id="detailBody"></div></div>
+<div id="msg"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ROLE = null;
+const canEscalate = () => ROLE === "manager" || ROLE === "reviewer";
+function toast(t){ const m=$("msg"); m.textContent=t; m.style.display="block";
+  clearTimeout(window._tt); window._tt=setTimeout(()=>m.style.display="none",2600); }
+function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+async function api(path, method="GET", body=null){
+  const opt={method,headers:{},credentials:"same-origin"};
+  if(body){opt.headers["Content-Type"]="application/json";opt.body=JSON.stringify(body);}
+  const r=await fetch("/api"+path,opt);
+  if(r.status===401){location.replace("/login");throw new Error(401);}
+  if(!r.ok){let d="";try{d=(await r.json()).detail;}catch(e){}toast("خطأ "+r.status+(d?": "+d:""));throw new Error(r.status);}
+  return r.status===204?null:r.json();
+}
+function fmtAge(s){ if(s==null)return"—"; if(s<3600)return"منذ "+Math.floor(s/60)+" د";
+  if(s<86400)return"منذ "+Math.floor(s/3600)+" س"; return"منذ "+Math.floor(s/86400)+" ي"; }
+function num(v){ return v==null?"—":v; }
+
+function itemCard(it){
+  const rev = it.review
+    ? `<div class="rev">✓ راجعها ${esc(it.review.reviewed_by)} — ${esc((it.review.reviewed_at||"").replace("T"," ").slice(0,16))}${it.review.note?" · "+esc(it.review.note):""}</div>` : "";
+  const acts = canEscalate() ? `<div class="actions">
+      <button onclick="doEscalate('${esc(it.deal_id)}')">🚨 صعّد للمسؤول</button>
+      ${it.review?"":`<button class="ghost" onclick="doReview('${esc(it.deal_id)}')">علّم كمراجَع</button>`}
+      <button class="ghost" onclick="openDetail('${esc(it.deal_id)}')">التفاصيل ↗</button>
+    </div>` : `<div class="actions"><button class="ghost" onclick="openDetail('${esc(it.deal_id)}')">التفاصيل ↗</button></div>`;
+  return `<div class="item u${it.urgency_rank}${it.review?" reviewed":""}">
+    <div class="top">
+      <span class="status">${esc(it.status_label||it.status)}</span>
+      <span class="meta">${fmtAge(it.age_seconds)}${it.is_two_legged?" · طرفان":""}</span>
+    </div>
+    <div class="fields">
+      <span><b>المرجع:</b> <span class="mono">${esc(it.reference_number||"—")}</span></span>
+      <span><b>الهاتف:</b> <span class="mono">${esc(it.phone||"—")}</span></span>
+      <span><b>الاسم:</b> ${esc(it.customer_name||"—")}</span>
+      <span><b>المبلغ:</b> ${num(it.amount)} ${esc(it.currency||"")}</span>
+      <span><b>الخزينة:</b> ${esc(it.treasury_name||"—")}</span>
+    </div>
+    ${it.reason?`<div class="reason">⚠️ ${esc(it.reason)}</div>`:""}
+    ${rev}
+    ${acts}
+  </div>`;
+}
+
+async function load(){
+  let items; try{ items = await api("/attention"); }catch(e){ return; }
+  $("empty").style.display = items.length ? "none" : "block";
+  $("list").innerHTML = items.map(itemCard).join("");
+}
+async function doEscalate(id){
+  try{ await api(`/attention/${encodeURIComponent(id)}/escalate`,"POST"); toast("تم التصعيد للمسؤول ✓"); load(); }catch(e){}
+}
+async function doReview(id){
+  const note = prompt("ملاحظة (اختياري):","")||null;
+  try{ const r=await api(`/attention/${encodeURIComponent(id)}/review`,"POST",{note}); toast("سُجّلت المراجعة باسم "+r.reviewed_by+" ✓"); load(); }catch(e){}
+}
+async function openDetail(id){
+  let tl; try{ tl=await api(`/transfers/${encodeURIComponent(id)}`); }catch(e){ return; }
+  $("detailBody").innerHTML = renderTimeline(tl);
+  $("detail").style.display="block";
+}
+function renderTimeline(tl){
+  const d=tl.deal;
+  const ev = tl.timeline.map(e=>{
+    let body="";
+    if(e.type==="raw") body=`<span class="k">رسالة خام</span> <div class="mono">${esc(e.text||"")}</div>`;
+    else if(e.type==="extracted") body=`<span class="k">استُخرج</span> مبلغ: ${num(e.sell&&e.sell.amount)} · بعد الخصم: ${num(e.sell&&e.sell.amount_after_discount)}`;
+    else if(e.type==="amendment") body=`<span class="k">تعديل</span> الصافي: ${num(e.old_net)} ← ${num(e.new_net)}${e.reason?" · "+esc(e.reason):""}`;
+    else if(e.type==="ledger") body=`<span class="k">دفتر${e.is_reversal?" (عكسيّ)":""}</span> ${esc(e.operation||"")} ${num(e.amount)} ${esc(e.currency||"")}${e.sql_verified?" ✓SQL":""}`;
+    else if(e.type==="cancellation") body=`<span class="k">إلغاء</span> ${esc(e.reason||"")}`;
+    return `<div class="ev"><div class="t">${esc((e.at_iso||"").replace("T"," ").slice(0,19))}</div>${body}</div>`;
+  }).join("");
+  return `<div class="top"><h2 style="margin:0;font-size:17px">حوالة <span class="mono">${esc(d.deal_id)}</span></h2>
+      <button class="ghost" onclick="$('detail').style.display='none'">إغلاق ✕</button></div>
+    <div class="meta">المرجع ${esc(d.reference_number||"—")} · ${esc(d.customer_name||"—")} · ${esc(d.phone||"—")} · الحالة ${esc(d.status)}</div>
+    <div class="tl">${ev||"<span class='meta'>لا أحداث</span>"}</div>`;
+}
+
+const ROLE_AR={manager:"مدير",reviewer:"مراجع",data_entry:"مُدخل بيانات"};
+$("logoutBtn").onclick=async()=>{try{await fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"});}catch(e){}location.replace("/login");};
+async function boot(){
+  let me; try{ const r=await fetch("/api/auth/me",{credentials:"same-origin"}); if(!r.ok){location.replace("/login");return;} me=await r.json(); }
+  catch(e){ location.replace("/login"); return; }
+  ROLE=me.role; $("whoami").textContent=me.username;
+  const rb=$("roleBadge"); rb.textContent=ROLE_AR[ROLE]||ROLE; rb.style.display="inline-block";
+  $("logoutBtn").style.display="inline-block";
+  if(ROLE==="data_entry"){ document.body.classList.add("no-access"); return; }
+  load(); setInterval(load,15000);
+}
+boot();
+</script>
+</body>
+</html>

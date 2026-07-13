@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>سجل الحوالات — MONEYADO</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2233; --line:#2c3853; --txt:#e7ecf5; --muted:#8a99b5;
+          --accent:#3b82f6; --ok:#22c55e; --warn:#ef4444; --chip:#243049; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",Tahoma,system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); font-size:15px; line-height:1.6; }
+  header { padding:14px 20px; background:var(--card); border-bottom:1px solid var(--line);
+           display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+  header h1 { margin:0; font-size:19px; }
+  nav { display:flex; gap:6px; flex-wrap:wrap; }
+  nav a { color:var(--muted); text-decoration:none; font-size:14px; padding:4px 10px; border-radius:8px; }
+  nav a:hover, nav a.active { color:var(--txt); background:var(--chip); }
+  .userbox { display:flex; gap:10px; align-items:center; }
+  .role-badge { font-size:12px; font-weight:700; padding:2px 10px; border-radius:999px;
+                background:rgba(59,130,246,.15); color:var(--accent); border:1px solid var(--accent); }
+  button { font-family:inherit; font-size:14px; padding:8px 12px; border-radius:8px;
+           border:1px solid var(--line); background:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--txt); }
+  input { font-family:inherit; font-size:15px; padding:9px 12px; border-radius:9px;
+          border:1px solid var(--line); background:var(--bg); color:var(--txt); flex:1; min-width:180px; }
+  .wrap { max-width:1000px; margin:0 auto; padding:16px; }
+  .search { display:flex; gap:8px; margin-bottom:14px; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:right; padding:9px 8px; border-bottom:1px solid var(--line); font-size:14px; }
+  th { color:var(--muted); font-weight:600; }
+  tr.row { cursor:pointer; } tr.row:hover td { background:var(--chip); }
+  .mono { font-family:"Consolas",monospace; direction:ltr; display:inline-block; }
+  .pill { font-size:12px; padding:1px 8px; border-radius:999px; background:var(--chip); color:var(--muted); }
+  .pill.done { color:var(--ok); } .pill.cancelled { color:var(--warn); }
+  #empty,#noaccess { display:none; text-align:center; color:var(--muted); padding:48px 16px; }
+  body.no-access .wrap { display:none; } body.no-access #noaccess { display:block; }
+  #msg { position:fixed; bottom:16px; inset-inline-start:16px; background:var(--card);
+         border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:9; }
+  #detail { position:fixed; inset:0; background:rgba(0,0,0,.5); display:none; z-index:20; padding:16px; overflow:auto; }
+  #detail .panel { max-width:760px; margin:20px auto; background:var(--card); border:1px solid var(--line);
+                   border-radius:14px; padding:18px; }
+  .top { display:flex; gap:8px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+  .meta { color:var(--muted); font-size:13px; }
+  .tl { border-inline-start:2px solid var(--line); margin:10px 0; padding-inline-start:14px; }
+  .ev { margin-bottom:12px; } .ev .t { font-size:12px; color:var(--muted); }
+  .ev .k { font-size:12px; font-weight:700; padding:1px 8px; border-radius:999px; background:var(--chip); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>سجل الحوالات</h1>
+    <nav>
+      <a href="/attention">الانتباه</a>
+      <a href="/transfers" class="active">سجل الحوالات</a>
+      <a href="/">الرئيسية</a>
+    </nav>
+  </div>
+  <div class="userbox">
+    <span id="roleBadge" class="role-badge" style="display:none"></span>
+    <span id="whoami" class="muted">…</span>
+    <button id="logoutBtn" class="ghost" style="display:none">خروج</button>
+  </div>
+</header>
+
+<div id="noaccess">لا صلاحية لعرض هذه الشاشة بحسابك الحالي.<br>تواصل مع المسؤول.</div>
+<div class="wrap">
+  <div class="search">
+    <input id="q" placeholder="بحث بالمرجع أو الهاتف أو الاسم…" autocomplete="off">
+    <button id="btn">بحث</button>
+  </div>
+  <table><thead><tr><th>المرجع</th><th>الاسم</th><th>الهاتف</th><th>المبلغ</th><th>الخزينة</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+    <tbody id="body"></tbody></table>
+  <div id="empty">لا نتائج.</div>
+</div>
+<div id="detail" onclick="if(event.target===this)this.style.display='none'"><div class="panel" id="detailBody"></div></div>
+<div id="msg"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ROLE = null;
+function toast(t){ const m=$("msg"); m.textContent=t; m.style.display="block";
+  clearTimeout(window._tt); window._tt=setTimeout(()=>m.style.display="none",2600); }
+function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function num(v){ return v==null?"—":v; }
+async function api(path){
+  const r=await fetch("/api"+path,{credentials:"same-origin"});
+  if(r.status===401){location.replace("/login");throw new Error(401);}
+  if(!r.ok){let d="";try{d=(await r.json()).detail;}catch(e){}toast("خطأ "+r.status+(d?": "+d:""));throw new Error(r.status);}
+  return r.json();
+}
+function statusPill(d){
+  if(d.cancelled_at) return `<span class="pill cancelled">مُلغاة</span>`;
+  if(d.status==="completed") return `<span class="pill done">مكتملة</span>`;
+  return `<span class="pill">${esc(d.status||"—")}</span>`;
+}
+function rowHtml(d){
+  return `<tr class="row" onclick="openDetail('${esc(d.deal_id)}')">
+    <td><span class="mono">${esc(d.reference_number||"—")}</span></td>
+    <td>${esc(d.customer_name||"—")}</td>
+    <td><span class="mono">${esc(d.phone||"—")}</span></td>
+    <td>${num(d.amount)} ${esc(d.currency||"")}</td>
+    <td>${esc(d.treasury_name||"—")}</td>
+    <td>${statusPill(d)}</td>
+    <td class="meta">${esc((d.created_at||"").replace("T"," ").slice(0,16))}</td>
+  </tr>`;
+}
+async function search(){
+  let rows; try{ rows=await api("/transfers?q="+encodeURIComponent($("q").value.trim())); }catch(e){ return; }
+  $("empty").style.display = rows.length ? "none":"block";
+  $("body").innerHTML = rows.map(rowHtml).join("");
+}
+async function openDetail(id){
+  let tl; try{ tl=await api("/transfers/"+encodeURIComponent(id)); }catch(e){ return; }
+  $("detailBody").innerHTML = renderTimeline(tl);
+  $("detail").style.display="block";
+}
+function renderTimeline(tl){
+  const d=tl.deal;
+  const rev = tl.review?`<div class="meta" style="color:var(--ok)">✓ راجعها ${esc(tl.review.reviewed_by)} — ${esc((tl.review.reviewed_at||"").replace("T"," ").slice(0,16))}</div>`:"";
+  const ev = tl.timeline.map(e=>{
+    let body="";
+    if(e.type==="raw") body=`<span class="k">رسالة خام</span> <div class="mono">${esc(e.text||"")}</div>`;
+    else if(e.type==="extracted") body=`<span class="k">استُخرج</span> مبلغ: ${num(e.sell&&e.sell.amount)} · بعد الخصم: ${num(e.sell&&e.sell.amount_after_discount)}`;
+    else if(e.type==="amendment") body=`<span class="k">تعديل</span> الصافي: ${num(e.old_net)} ← ${num(e.new_net)}${e.reason?" · "+esc(e.reason):""}`;
+    else if(e.type==="ledger") body=`<span class="k">دفتر${e.is_reversal?" (عكسيّ)":""}</span> ${esc(e.operation||"")} ${num(e.amount)} ${esc(e.currency||"")}${e.sql_verified?" ✓SQL":""}`;
+    else if(e.type==="cancellation") body=`<span class="k">إلغاء</span> ${esc(e.reason||"")}`;
+    return `<div class="ev"><div class="t">${esc((e.at_iso||"").replace("T"," ").slice(0,19))}</div>${body}</div>`;
+  }).join("");
+  return `<div class="top"><h2 style="margin:0;font-size:17px">حوالة <span class="mono">${esc(d.deal_id)}</span></h2>
+      <button class="ghost" onclick="$('detail').style.display='none'">إغلاق ✕</button></div>
+    <div class="meta">المرجع ${esc(d.reference_number||"—")} · ${esc(d.customer_name||"—")} · ${esc(d.phone||"—")} · الحالة ${esc(d.status)}</div>
+    ${rev}<div class="tl">${ev||"<span class='meta'>لا أحداث</span>"}</div>`;
+}
+
+const ROLE_AR={manager:"مدير",reviewer:"مراجع",data_entry:"مُدخل بيانات"};
+$("btn").onclick=search;
+$("q").addEventListener("keydown",e=>{ if(e.key==="Enter") search(); });
+$("logoutBtn").onclick=async()=>{try{await fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"});}catch(e){}location.replace("/login");};
+async function boot(){
+  let me; try{ const r=await fetch("/api/auth/me",{credentials:"same-origin"}); if(!r.ok){location.replace("/login");return;} me=await r.json(); }
+  catch(e){ location.replace("/login"); return; }
+  ROLE=me.role; $("whoami").textContent=me.username;
+  const rb=$("roleBadge"); rb.textContent=ROLE_AR[ROLE]||ROLE; rb.style.display="inline-block";
+  $("logoutBtn").style.display="inline-block";
+  if(ROLE==="data_entry"){ document.body.classList.add("no-access"); return; }
+  search();
+}
+boot();
+</script>
+</body>
+</html>

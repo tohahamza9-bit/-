@@ -254,6 +254,18 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         html = ROOT / "dashboard" / "static" / "rooms.html"
         return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
 
+    @app.get("/attention")
+    async def attention_page():  # noqa: ANN201
+        """قائمة الانتباه (لوحة V2 م١) — البوّابة في الواجهة/الـ API."""
+        html = ROOT / "dashboard" / "static" / "attention.html"
+        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+
+    @app.get("/transfers")
+    async def transfers_page():  # noqa: ANN201
+        """سجل الحوالات (لوحة V2 م١)."""
+        html = ROOT / "dashboard" / "static" / "transfers.html"
+        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+
     return app
 
 

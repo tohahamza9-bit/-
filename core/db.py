@@ -27,6 +27,7 @@ from .logging_setup import get_logger
 from .models import (
     AuthEventRecord,
     BotControl,
+    DashboardReview,
     Deal,
     EmployeeRecord,
     LedgerEntry,
@@ -830,6 +831,39 @@ class AuthEventRepo(_Repo):
         return out
 
 
+class DashboardReviewRepo(_Repo):
+    """تعليقات «راجعتُها» على حوالات قائمة الانتباه (لوحة V2 م١). المفتاح deal_id.
+    أوّل مُراجِع يُثبَّت ولا يُدهَس (setOnInsert) — منع ازدواج المراجعة + محاسبة فردية.
+    لا يمسّ مجموعة `deals` إطلاقًا (سجل داشبورد-محليّ مستقلّ)."""
+
+    async def mark(self, *, deal_id: str, reviewed_by: str, note: Optional[str],
+                   now: datetime) -> DashboardReview:
+        """يثبّت أوّل مُراجِع (لا يدهس موجودًا). يُرجع السجل الفعليّ (الأوّل إن سبق)."""
+        rec = DashboardReview(deal_id=deal_id, reviewed_by=reviewed_by, note=note, reviewed_at=now)
+        await self.col.update_one(
+            {"deal_id": deal_id}, {"$setOnInsert": self._dump(rec)}, upsert=True
+        )
+        existing = await self.get(deal_id)
+        return existing or rec
+
+    async def get(self, deal_id: str) -> Optional[DashboardReview]:
+        doc = await self.col.find_one({"deal_id": deal_id})
+        if not doc:
+            return None
+        doc.pop("_id", None)
+        return DashboardReview(**doc)
+
+    async def map_for(self, deal_ids: list[str]) -> dict[str, dict]:
+        """خريطة deal_id → {reviewed_by, reviewed_at, note} للحوالات المطلوبة (عرض قائمة الانتباه)."""
+        if not deal_ids:
+            return {}
+        out: dict[str, dict] = {}
+        async for d in self.col.find({"deal_id": {"$in": deal_ids}}):
+            d.pop("_id", None)
+            out[d["deal_id"]] = d
+        return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # الواجهة الجامعة
 # ─────────────────────────────────────────────────────────────────────────────
@@ -863,6 +897,8 @@ class Database:
         self.users = UserListRepo(self.mdb, "users", "username")
         self.sessions = SessionRepo(self.mdb, "sessions", "token_hash")
         self.auth_events = AuthEventRepo(self.mdb, "auth_events", "_id")
+        # لوحة V2 (م١): تعليقات مراجعة قائمة الانتباه — سجل داشبورد-محليّ مستقلّ
+        self.reviews = DashboardReviewRepo(self.mdb, "dashboard_reviews", "deal_id")
         log.info("اتصال MongoDB: %s / %s", self._uri, self._db_name)
 
     async def ensure_indexes(self) -> None:
@@ -911,6 +947,7 @@ class Database:
         await self.sessions.col.create_index("username")
         await self.sessions.col.create_index("expires_at", expireAfterSeconds=0, name="ttl_session")
         await self.auth_events.col.create_index("at")
+        await self.reviews.col.create_index("deal_id", unique=True)
         log.info("تمّت تهيئة الفهارس")
 
     async def close(self) -> None:

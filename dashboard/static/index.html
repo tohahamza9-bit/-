@@ -66,11 +66,21 @@
   #noaccess { display:none; text-align:center; padding:64px 16px; color:var(--muted); font-size:16px; }
   body.no-access .wrap > .card { display:none; }
   body.no-access #noaccess { display:block; }
+  nav { display:flex; gap:6px; flex-wrap:wrap; margin-top:2px; }
+  nav a { color:var(--muted); text-decoration:none; font-size:14px; padding:4px 10px; border-radius:8px; }
+  nav a:hover, nav a.active { color:var(--txt); background:var(--chip); }
 </style>
 </head>
 <body>
 <header>
-  <h1>لوحة تحكّم MONEYADO</h1>
+  <div>
+    <h1>لوحة تحكّم MONEYADO</h1>
+    <nav>
+      <a href="/attention">الانتباه</a>
+      <a href="/transfers">سجل الحوالات</a>
+      <a href="/" class="active">الرئيسية</a>
+    </nav>
+  </div>
   <div class="userbox">
     <span id="roleBadge" class="role-badge" style="display:none"></span>
     <span id="whoami" class="muted">…</span>
@@ -305,6 +315,8 @@ async function boot() {
   $("logoutBtn").style.display = "inline-block";
   if (canWrite()) document.body.classList.add("can-write");
 
+  // reviewer: يدخل مباشرة على قائمة الانتباه (صفر نقرات إضافية — V2).
+  if (ROLE === "reviewer") { location.replace("/attention"); return; }
   // data_entry: بلا وصول للإعدادات الحالية (الـ backend يرفض بـ403) → شاشة «لا صلاحية».
   if (ROLE === "data_entry") { document.body.classList.add("no-access"); return; }
 

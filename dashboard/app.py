@@ -30,13 +30,14 @@ from core.logging_setup import get_logger
 from core.models import (
     BotControl,
     EmployeeRecord,
+    OutgoingMessage,
     Room,
     SupplierRecord,
     TreasuryRecord,
     UserRecord,
 )
 
-from . import auth
+from . import auth, transfers
 
 log = get_logger(__name__)
 
@@ -120,6 +121,11 @@ class PasswordIn(BaseModel):
 
 class RoleIn(BaseModel):
     role: Role
+
+
+class ReviewIn(BaseModel):
+    """تعليق «علّم كمراجَع» — ملاحظة اختيارية (لا يغيّر حالة الحوالة)."""
+    note: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -492,6 +498,60 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         log.info("إيقاف غرفة (بلا حذف): %s", jid)
         return {"jid": jid, "active": False}
 
+    # ── لوحة V2 (م١): سجل الحوالات + قائمة الانتباه — قراءة فقط لدورة الحياة ────
+    # 🔴 لا كتابة على deals/pipeline. «صعّد» يُنتج لطابور outgoing فقط (لا مسار Node مباشر).
+    @router.get("/transfers", dependencies=[reader])
+    async def list_transfers(q: str = "", limit: int = 50) -> list[dict]:
+        """أرشيف الحوالات — بحث فوريّ بالمرجع/الهاتف/الاسم (أو الأحدث)."""
+        return await transfers.search_transfers(db, q, limit)
+
+    @router.get("/transfers/{deal_id}", dependencies=[reader])
+    async def transfer_timeline(deal_id: str) -> dict:
+        """الخط الزمني الكامل لحوالة (خام ← مُستخرَج ← تعديلات ← دفتر ← إلغاء)."""
+        tl = await transfers.get_timeline(db, deal_id)
+        if tl is None:
+            raise HTTPException(status_code=404, detail=f"حوالة غير موجودة: {deal_id}")
+        return tl
+
+    @router.get("/attention", dependencies=[reader])
+    async def attention_list() -> list[dict]:
+        """قائمة الانتباه — الحوالات المحتاجة فعلًا بشريًا، مرتّبة بالإلحاح ثم الأقدم أولًا."""
+        return await transfers.attention_items(db, utcnow())
+
+    @router.post("/attention/{deal_id}/escalate")
+    async def escalate_transfer(deal_id: str,
+                                actor: UserRecord = Depends(require_read)) -> dict:
+        """«صعّد»: يُدرِج تنبيه المالك في طابور outgoing (is_alert) — نفس مسار ⚠️/🔴.
+
+        لا مسار HTTP للداشبورد إلى خدمة Node؛ الداشبورد يُنتج للطابور فقط (عزلة §2.2 سليمة).
+        """
+        d = await db.deals.col.find_one({"deal_id": deal_id})
+        if not d:
+            raise HTTPException(status_code=404, detail=f"حوالة غير موجودة: {deal_id}")
+        admin_jid = (settings.admin_room_jid or "").strip()
+        if not admin_jid:
+            raise HTTPException(status_code=503, detail="لا غرفة مسؤول مُهيّأة (admin_room_jid)")
+        d.pop("_id", None)
+        text = transfers.build_escalation_text(transfers._deal_summary(d), actor.username)
+        await db.outgoing.enqueue(OutgoingMessage(chat_jid=admin_jid, text=text, is_alert=True))
+        log.info("تصعيد يدويّ من اللوحة: حوالة %s بواسطة %s → طابور outgoing (مسؤول)",
+                 deal_id, actor.username)
+        return {"deal_id": deal_id, "escalated": True, "by": actor.username}
+
+    @router.post("/attention/{deal_id}/review")
+    async def review_transfer(deal_id: str, body: ReviewIn,
+                              actor: UserRecord = Depends(require_read)) -> dict:
+        """«علّم كمراجَع»: تعليق مرئيّ للجميع باسم المُراجِع ووقته (لا يغيّر حالة الحوالة).
+
+        أوّل مُراجِع يُثبَّت (منع ازدواج المراجعة + محاسبة فردية). يُرجع السجل الفعليّ.
+        """
+        if not await db.deals.col.find_one({"deal_id": deal_id}, {"_id": 1}):
+            raise HTTPException(status_code=404, detail=f"حوالة غير موجودة: {deal_id}")
+        rec = await db.reviews.mark(deal_id=deal_id, reviewed_by=actor.username,
+                                    note=body.note, now=utcnow())
+        return {"deal_id": deal_id, "reviewed_by": rec.reviewed_by,
+                "reviewed_at": rec.reviewed_at.isoformat(), "note": rec.note}
+
     return router
 
 
@@ -516,6 +576,16 @@ def create_app(db: Database, settings: Optional[Settings] = None) -> FastAPI:
     async def rooms_page() -> FileResponse:
         """صفحة إدارة الغرف البسيطة (§2.2) — تصنيف بالأسماء فقط، بلا إدخال JID يدوي."""
         return FileResponse(str(STATIC_DIR / "rooms.html"))
+
+    @app.get("/attention")
+    async def attention_page() -> FileResponse:
+        """قائمة الانتباه (لوحة V2 م١) — البوّابة في الواجهة/الـ API."""
+        return FileResponse(str(STATIC_DIR / "attention.html"))
+
+    @app.get("/transfers")
+    async def transfers_page() -> FileResponse:
+        """سجل الحوالات (لوحة V2 م١)."""
+        return FileResponse(str(STATIC_DIR / "transfers.html"))
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
