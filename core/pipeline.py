@@ -343,6 +343,17 @@ class Pipeline:
                 raw.message_key, forward_key=raw.message_key,
             )
 
+        # 🔴 (فيكس د) أرقام مجرّدة متعدّدة مرشّحة للمبلغ بلا حسم واثق (§0): يُصعَّد للمسؤول بدل التخمين
+        #    الصامت (المبلغ بقي None فالحوالة ليست «واضحة» — لا تُسجَّل قيمة مخمَّنة). قبل أي ربط/تصنيف.
+        if result.leg is not None and result.leg.ambiguous_amount:
+            _amts = "، ".join(f"{a:,.0f}" for a in result.leg.ambiguous_amount)
+            await self.bus.notify_admin(
+                f"⚠️ تنبيه: حوالة {result.leg.reference_number or '؟'} — أرقام مبلغ محتملة متعدّدة "
+                f"({_amts}) بلا كلمة عملة؛ تعذّر الحسم. يرجى تحديد المبلغ الصحيح.",
+                raw.message_key, forward_key=raw.message_key,
+            )
+            return None
+
         # ═══ ربط الرسالة الثانية — حتميّ بطبقتين (§7.3، بلا قرب/تجاور/تصعيد) ═══
         # الطبقة ١ (مرجع صريح): الرسالة تحمل ref يطابق صفقة منتظِرة → تُربَط به مباشرة (الشكل الجديد،
         #   المرجع مكرّر في الرسالتين). الطبقة ٢ (FIFO): بلا ref → أقدم صفقة منتظِرة لنفس المُرسِل (أول

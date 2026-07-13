@@ -26,10 +26,12 @@ from .classify import (
     is_out_of_scope,
 )
 from .normalize import (
+    _pick_phone,
     classify_phone,
     detect_currency,
     expand_alf_amounts,
     extract_phone,
+    extract_phone_candidates,
     is_phone_like,
     normalize_ar,
     normalize_digits,
@@ -292,26 +294,110 @@ def _split_supplier(val: str) -> tuple[Optional[str], Optional[str], Optional[st
     return code, name, rate
 
 
+# 🔴 (فيكس أ) تسميات صريحة (§3.2): مقطع = تسمية معروفة → قيمتها في المقطع **التالي**، بأولوية على
+#    الترتيب. الصيغ مطبَّعة (normalize_ar: ة→ه). التسمية نفسها لا تصير بيانات أبدًا.
+_EXPLICIT_LABELS = {
+    "الاسم": "recipient_name", "اسم": "recipient_name",
+    "الرقم": "phone", "رقم": "phone",
+    "المكان": "country", "مكان": "country",
+    "القيمه": "amount", "قيمه": "amount",
+}
+
+
+def _bind_labeled_value(field: str, val_seg: str, f: dict) -> bool:
+    """يربط قيمة المقطع التالي بحقلٍ حدّدته تسمية صريحة — **فقط إن تحقّق شكلها** (فيُرجِع True فتُستهلَك
+    القيمة)، وإلا False (فتمرّ للتصنيف العاديّ فلا يُبتلَع دفعٌ/عملةٌ مدموجة، مثل «مصر فدفون كاش»)."""
+    if field == "recipient_name":
+        if _ARABIC_RE.search(val_seg) and not re.search(r"\d", val_seg):
+            f.setdefault("recipient_name", val_seg.strip())
+            return True
+        return False
+    if field == "phone":
+        ph = extract_phone(val_seg)
+        if ph:
+            f.setdefault("phone", ph)
+            return True
+        return False
+    if field == "amount":                        # فيكس ب: يقبل رقمًا مجرّدًا بعد «القيمة» (بلا كلمة عملة)
+        amt = parse_amount(_strip_phones_for_amount(val_seg))
+        if amt is not None:
+            cur = detect_currency(val_seg)
+            if cur:
+                f.setdefault("currency", cur)
+            f.setdefault("amount", amt)
+            return True
+        return False
+    if field == "country":
+        place = _CITIES.get(normalize_ar(val_seg)) or _COUNTRIES.get(normalize_ar(val_seg))
+        if place:
+            f.setdefault("country", place)
+            return True
+        return False
+    return False
+
+
+def _bare_amount_candidates(text: str, f: dict) -> list[float]:
+    """🔴 (فيكس د) أرقام مجرّدة (مقاطع رقميّة صرفة بلا عملة/تسمية) قد تكون مبلغًا — تُستثنى المراجع
+    (بحروف)، الهواتف (يعزلها `_bare_amount` بأطوال 10-13)، والأرقام المُلتقَطة سلفًا (هاتف/كود/مرجع)."""
+    taken = {re.sub(r"\D", "", str(f[k]))
+             for k in ("phone", "phone_alt", "customer_code", "reference") if f.get(k)}
+    out: list[float] = []
+    for line in text.splitlines():
+        for seg in ([s.strip() for s in line.split("/")] if "/" in line else [line.strip()]):
+            if not seg or _ARABIC_RE.search(seg):        # مقطع رقميّ صرف فقط (بلا حرف عربيّ)
+                continue
+            if re.sub(r"\D", "", seg) in taken:          # رقم مُلتقَط سلفًا (هاتف/كود/مرجع)
+                continue
+            amt = _bare_amount(seg)                       # يستثني مجاري الهاتف (§3.5)
+            if amt is not None and amt not in out:
+                out.append(amt)
+    return out
+
+
 # ── الصيغة A (§3.2) ──────────────────────────────────────────────────────────
 def _parse_a_fields(text: str, treasuries: list[TreasuryRecord]) -> dict:
     """الصيغة A بمنهج **pattern-fishing** (§3.2 §7.3): المرابط الحاسمة تُفتَّش على **كامل النصّ**
-    بلا اعتماد على ترتيب الأسطر، ثم تُصنَّف المقاطع للحقول البنيوية.
-
-    المرابط المُفتَّشة كليًّا (`_fish_a_anchors`): الرقم الإشاري (Axxxx)، الهاتف (10-13 خانة)،
-    والمبلغ المُعنون («القيمة=»/«المبلغ:»/«القيمة:»). الحقول البنيوية (كود+اسم الزبون، الخزينة،
-    المبلغ+العملة الملتصقة، وسيلة الدفع، البلد) تبقى على تصنيف المقاطع لأنها تعتمد على تجاور
-    الرموز داخل المقطع. وكلّ ما لا يُطابِق (نصّ حرّ/تعليمات/مدن غير معروفة) يُتجاهَل تلقائيًّا."""
+    بلا اعتماد على ترتيب الأسطر، ثم تُصنَّف المقاطع للحقول البنيوية. التسميات الصريحة (فيكس أ)
+    تربط المقطع التالي بأولوية، والمبلغ المجرّد بلا عملة (فيكس د) يُلتقَط عند شكل حوالة صحيح."""
+    text = normalize_digits(text)            # مطبَّع سلفًا في parse_message؛ يُؤكَّد هنا لاستدعاءات مباشرة
     f: dict = {}
     _fish_a_anchors(text, f)                 # تفتيش كليّ للمرابط أولًا — يفوز على المقاطع (setdefault)
+    # اجمع كل المقاطع (سطور مقسّمة على «/») للسماح بربط التسمية بالمقطع التالي (فيكس أ/ب §7.3)
+    segs: list[tuple[str, bool]] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        segments = [s.strip() for s in line.split("/")] if "/" in line else [line]
-        is_header = len(segments) > 1
-        for seg in segments:
-            if seg:
-                _classify_segment(seg, f, treasuries, is_header)
+        parts = [s.strip() for s in line.split("/")] if "/" in line else [line]
+        is_header = len(parts) > 1
+        segs.extend((seg, is_header) for seg in parts if seg)
+    # مرور أوّل: تسمية صريحة (مقطع كامل) → قيمتها = المقطع التالي (إن تحقّق شكلها). التسمية تُستهلَك دومًا.
+    consumed: set[int] = set()
+    for i, (seg, _h) in enumerate(segs):
+        if i in consumed:
+            continue
+        field = _EXPLICIT_LABELS.get(normalize_ar(seg))
+        if field is None:
+            continue
+        consumed.add(i)                      # كلمة التسمية لا تصير بيانات (لا اسم مستلم زائف)
+        if (i + 1 < len(segs)
+                and normalize_ar(segs[i + 1][0]) not in _EXPLICIT_LABELS
+                and _bind_labeled_value(field, segs[i + 1][0], f)):
+            consumed.add(i + 1)              # القيمة تُستهلَك فقط عند الربط الناجح
+    # مرور ثانٍ: التصنيف النمطيّ للمقاطع غير المُستهلَكة (يحفظ الاستقلالية عن الموضع)
+    for i, (seg, is_header) in enumerate(segs):
+        if i not in consumed:
+            _classify_segment(seg, f, treasuries, is_header)
+    # 🔴 (فيكس د) مبلغ مجرّد بلا كلمة عملة: يُلتقَط فقط إن كانت الرسالة بشكل حوالة صحيح (مرجع/كود +
+    #    هاتف/اسم) كي لا يُلتقَط رقمٌ عابر. مرشّح واحد → مبلغ؛ تعدّد بلا حسم → تصعيد لا تخمين (§0).
+    if ("amount" not in f
+            and (f.get("reference") or f.get("customer_code"))
+            and (f.get("phone") or f.get("recipient_name") or f.get("customer_name"))):
+        bare = _bare_amount_candidates(text, f)
+        if len(bare) == 1:
+            f["amount"] = bare[0]
+        elif len(bare) > 1:
+            f["ambiguous_amount"] = bare
     return f
 
 
@@ -361,13 +447,16 @@ def _fish_a_anchors(text: str, f: dict) -> None:
             f["reference"] = tok
             break
     if "phone" not in f:
-        # الهاتف على مستوى **السطر** لا الرمز: يبقى مجرى الأرقام متّصلًا («+218 91-...» ليبي كامل
-        # فيُرفَض)، والعربية تكسره فيُعزَل عن المبلغ («01... مصر 100000» → الهاتف وحده) (§3.4).
-        for line in text.splitlines():
-            ph = extract_phone(line)          # مصري/تونسي، يرفض الليبي (classify_phone)
-            if ph:
-                f["phone"] = ph
-                break
+        # 🔴 (فيكس ج) كل مرشّحي الهاتف بلا اعتماد على الموضع (extract_phone_candidates يعزل الهاتف
+        #    عن المبلغ داخليًّا). مرشّح واحد → يُؤخَذ. رقمان بالضبط → يُحفَظ كلاهما (phone + phone_alt).
+        #    ثلاثة فأكثر → يكفي الأقوى ترجيحًا (غير-ليبيّ أولًا) بلا احتفاظ بالباقي.
+        cands = extract_phone_candidates(text)
+        if cands:
+            f["phone"] = _pick_phone(cands)
+            if len(cands) == 2:
+                alt = [c for c in cands if c != f["phone"]]
+                if alt:
+                    f["phone_alt"] = alt[0]
 
     # ٤) عملة على سطر مستقلّ + مبلغ على سطر مجاور — يُفحَص قبل حارس «amount» كي تُضبط العملة دومًا.
     _fish_standalone_currency_amount(text, f)
@@ -967,7 +1056,8 @@ def _build_leg(
     amount = f.get("amount")
     # في سياق EGP المستنتجة من الهاتف المصري: يُقبَل رقم مجرّد مبلغًا («2051»→2051) — إذ المسار
     # العاديّ يشترط رمز عملة، فالرقم بلا «ج.م» يسقط. fallback (بعد فشل الالتقاط العاديّ فقط، §3.4).
-    if amount is None and currency == Currency.EGP and not is_si:
+    # 🔴 (فيكس د) لا يُخمَّن أوّل رقم مجرّد عند وجود تعارض مُكتشَف (ambiguous_amount) — يُصعَّد بدل التخمين.
+    if amount is None and currency == Currency.EGP and not is_si and not f.get("ambiguous_amount"):
         amount = _first_bare_amount(full_text)
     amount_after = f.get("amount_after")
     commission = (
@@ -989,6 +1079,8 @@ def _build_leg(
         treasury=tref,
         reference_number=f.get("reference"),
         phone=f.get("phone"),
+        phone_alt=f.get("phone_alt"),                 # فيكس ج: رقم ثانٍ عند وجود مرشّحَين
+        ambiguous_amount=f.get("ambiguous_amount"),   # فيكس د: أرقام مجرّدة متعدّدة → للتصعيد
         payment_method=f.get("payment"),
         recipient_name=f.get("recipient_name"),
         notes=f.get("notes"),

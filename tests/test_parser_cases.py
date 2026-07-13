@@ -329,6 +329,57 @@ async def test_egyptian_phone_keeps_explicit_currency_and_amount(db):
 
 
 async def test_non_egyptian_phone_no_egp_inference(db):
-    """هاتف غير مصري لا يُستنتَج منه EGP، فالرقم المجرّد لا يُلتقَط (بلا عملة)."""
+    """هاتف غير مصري لا يُستنتَج منه EGP (العملة تبقى None)؛ لكن الرقم المجرّد يُلتقَط مبلغًا
+    (فيكس د: شكل حوالة صحيح — مرجع + هاتف — يكفي لالتقاط الرقم المجرّد الوحيد)."""
     res = parse_message("A100\n0925135252\n2000\nصافي", await _treas(db), [])
-    assert res.leg.currency is None and res.leg.amount is None
+    assert res.leg.currency is None
+    assert res.leg.amount == 2000        # فيكس د: رقم مجرّد + مرجع + هاتف → مبلغ
+
+
+# ── تقوية الجولة ٥: استقلالية الاستخراج عن الموضع (فيكس أ/ب/ج/د) ──────────────
+async def test_explicit_labels_on_separate_segments(db):
+    """فيكس أ: «الاسم/الرقم/القيمة» على مقاطع مستقلّة → تحدّد الحقل التالي، والتسمية لا تصير اسمًا."""
+    res = parse_message(
+        "A100\nالقيمة\n5000 ج م\nالاسم\nكرم\nالرقم\n01007285143\nفودافون كاش",
+        await _treas(db), [])
+    assert res.leg.amount == 5000
+    assert res.leg.recipient_name == "كرم"          # لا «الاسم» (كلمة التسمية)
+    assert res.leg.phone == "01007285143"
+    assert res.leg.payment_method == "فودافون كاش"
+
+
+async def test_labeled_bare_value_amount(db):
+    """فيكس ب: رقم مجرّد بعد تسمية «القيمة» (بلا كلمة عملة) → يُقبَل مبلغًا."""
+    res = parse_message("A103\nالاسم\nكرم\n01007285143\nالقيمة\n2900", await _treas(db), [])
+    assert res.leg.amount == 2900 and res.leg.recipient_name == "كرم"
+
+
+async def test_two_phone_candidates_keeps_both(db):
+    """فيكس ج: رقمان محتملان بالضبط → يُحفَظ كلاهما (phone + phone_alt) مرتبطين بالحوالة."""
+    res = parse_message("A104\nكرم\n27348472 او 0923134302\n5000 ج م", await _treas(db), [])
+    assert res.kind == "transfer"
+    assert res.leg.phone == "27348472"
+    assert res.leg.phone_alt == "0923134302"
+
+
+async def test_three_phone_candidates_keeps_strongest_only(db):
+    """فيكس ج: ثلاثة أرقام فأكثر → يكفي الأقوى ترجيحًا (بلا احتفاظ بالباقي)."""
+    res = parse_message(
+        "A106\nكرم\n27348472 او 0923134302 او 21694385651\n5000 ج م", await _treas(db), [])
+    assert res.leg.phone == "27348472"
+    assert res.leg.phone_alt is None
+
+
+async def test_bare_amount_no_currency_with_ref_and_phone(db):
+    """فيكس د: مبلغ مجرّد بلا كلمة عملة + كود A + هاتف واضح → يُستخرَج المبلغ."""
+    res = parse_message("A107\n01007285143\nكرم\n10000", await _treas(db), [])
+    assert res.kind == "transfer"
+    assert res.leg.amount == 10000
+    assert res.leg.phone == "01007285143"
+
+
+async def test_bare_amount_multiple_candidates_escalate(db):
+    """فيكس د: رقمان مجرّدان مرشّحان للمبلغ بلا حسم → ambiguous_amount (تصعيد لا تخمين)."""
+    res = parse_message("A109\n01007285143\nكرم\n10000\n7500", await _treas(db), [])
+    assert res.leg.amount is None
+    assert set(res.leg.ambiguous_amount or []) == {10000, 7500}

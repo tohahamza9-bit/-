@@ -138,6 +138,25 @@ def _pick_phone(candidates: list[str]) -> Optional[str]:
     return candidates[0] if candidates else None
 
 
+def extract_phone_candidates(s: Optional[str]) -> list[str]:
+    """كل مرشّحي الهاتف المميّزين في النصّ (لكشف التعدّد §0) — نفس منطق extract_phone المزدوج لكن
+    يُرجِع القائمة كاملةً بلا اختيار، فيحسم المُنادي. (أ) مجاري كاملة الشكل بلا دمج؛ (ب) بدمج داخل
+    السطر. الترتيب يحفظ ظهورها؛ المبالغ ≤7 خانات لا تدخل (طول الهاتف 8-14)."""
+    if not s:
+        return []
+    text = normalize_digits(s)
+    out: list[str] = []
+    for m in re.finditer(r"\d{8,14}", text.replace("-", "")):
+        if _is_complete_phone(m.group()) and m.group() not in out:
+            out.append(m.group())
+    for line in text.splitlines():
+        for m in re.finditer(r"\d{8,14}", re.sub(r"[\s\-+]", "", line)):
+            ph = classify_phone(m.group())
+            if ph and ph not in out:
+                out.append(ph)
+    return out
+
+
 def extract_phone(s: Optional[str]) -> Optional[str]:
     """يستخرج هاتف المستلم **كما كُتب** (بلا تحويل محلّي↔دوليّ، §3.4 قرار الجولة ٤). مرحلتان لعزله
     عن مبلغٍ مجاور: (أ) بلا دمج المسافات — تُلتقَط المجاري ذات **شكل الهاتف الكامل** فقط، فينفصل
