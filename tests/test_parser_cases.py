@@ -133,7 +133,7 @@ def test_parse_amount_candidates_takes_largest():
 
 # ── الهاتف: رفض الليبي، قبول التونسي 8-خانات والمصري 11، وعزله عن المبلغ (§3.4) ──
 @pytest.mark.parametrize("text, expected_phone", [
-    ("A200\n+218 91-2192050\n3000 دت", None),          # ليبي (+218) → يُرفَض
+    ("A200\n+218 91-2192050\n3000 دت", "218912192050"),  # ليبي (+218) → يُقبَل كما كُتب (جولة ٤)
     ("A201\n92192050\nمصر\n50000", "92192050"),         # تونسي 8-خانات (يبدأ 9)
     ("A202\n01029051735\nمصر\n50000", "01029051735"),   # مصري 11
     ("A203\n01064074568 مصر 100000", "01064074568"),    # الهاتف يُعزَل عن المبلغ
@@ -179,7 +179,7 @@ async def test_arabic_indic_digits_and_intl_phone(db):
 
 @pytest.mark.parametrize("raw, expected", [
     ("٠١٠٩٣٨٧١٣٨٢", "01093871382"),   # عربية-هندية
-    ("+20 100 745 3278", "01007453278"),  # مصري دوليّ (+20) → محلّي
+    ("+20 100 745 3278", "201007453278"),  # مصري دوليّ (+20) → كما كُتب بلا تحويل (جولة ٤)
 ])
 def test_phone_normalization(raw, expected):
     from core.parsing.normalize import extract_phone
@@ -281,7 +281,7 @@ async def test_first_message_bare_arabic_line_is_recipient(db):
     leg = parse_message(msg, await _treas(db), sp).leg
     assert leg.recipient_name == "خيرية"          # السطر العربيّ المنفرد التُقِط اسمَ مستلم
     assert leg.payment_method == "إنستا باي"       # «انستا باي» بقيت دفعًا (لم تُبتلَع كاسم مستلم)
-    assert leg.phone == "01152936804"
+    assert leg.phone == "201152936804"        # مصري دوليّ (+20) → كما كُتب بلا تحويل (جولة ٤)
     assert leg.amount == 14288
     assert leg.currency == Currency.EGP
 

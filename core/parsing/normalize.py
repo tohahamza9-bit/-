@@ -97,52 +97,66 @@ def normalize_payment(s: Optional[str]) -> Optional[str]:
     return None
 
 
-# ── رقم الهاتف (§3.4: رقم ملصوق بنص) ─────────────────────────────────────────
-def classify_phone(raw: Optional[str]) -> Optional[str]:
-    """يصنّف مجرى أرقام ويُرجع هاتف المستلم أو None (§3.4):
+# ── رقم الهاتف (§3.4، قرار الجولة ٤: كما كُتب، بلا تحويل محلّي↔دوليّ لأي دولة) ──────────────────
+def _is_libyan_phone(d: str) -> bool:
+    """رقم ليبيّ (دوليّ 218/00218 أو محلّي 09x بـ10 خانات) — أولويّته أدنى في الاختيار (§3.4)."""
+    return d.startswith("00218") or d.startswith("218") or (len(d) == 10 and d.startswith("09"))
 
-    - **ليبي** (218 / 00218 / +218) → None (يُرفَض دائمًا — ليس مستلمًا مصريًّا/تونسيًّا).
-    - **تونسي دوليّ** (216 / 00216 / +216) → يُقشَّر إلى المحلّي (8 خانات).
-    - **مصري** 11 خانة يبدأ 01x، أو **تونسي محلّي** 8 خانات يبدأ 2/5/9 → يُقبَل.
-    - غير ذلك: مجرى ≥9 خانات يُقبَل (توافق مع الصيغ المصرية/الدولية القائمة).
-    """
+
+def _is_complete_phone(d: str) -> bool:
+    """مجرى أرقام يطابق **شكل هاتف كامل** بالطول+البادئة (§3.4) — يميّزه عن مجموعةٍ جزئية من هاتفٍ
+    دوليّ مكتوبٍ بمجموعات، وعن مبلغٍ مجاور. يُستعمَل في المرحلة (أ) لعزل الهاتف بلا دمج مسافات."""
+    n = len(d)
+    if n == 8:
+        return d[0] in "259"                                # تونسي محلّي
+    if n == 10:
+        return d.startswith("09")                           # ليبي محلّي
+    if n == 11:
+        return d.startswith("01") or d.startswith("216")    # مصري محلّي / تونسي دوليّ
+    if n == 12:
+        return d[:3] in ("218", "216") or d.startswith("20")  # ليبي/تونسي/مصري دوليّ
+    if n in (13, 14):                                       # دوليّ ببادئة 00 أو صيغ أطول
+        return d.startswith(("00", "20", "216", "218"))
+    return False
+
+
+def classify_phone(raw: Optional[str]) -> Optional[str]:
+    """يصنّف مجرى أرقام ويُرجعه هاتفًا **كما كُتب** أو None (§3.4، قرار الجولة ٤). لا تحويل بين
+    المحلّي والدوليّ لأي دولة — يُنظَّف الترقيم فقط (عبر normalize_digits) وتُحفَظ الصيغة كما أدخلها
+    الموظّف. يُقبَل كل مجرى بطول هاتف صالح (8-14 خانة)؛ أولويّة الليبيّ تُدار في extract_phone."""
     if not raw:
         return None
     d = re.sub(r"\D", "", normalize_digits(raw))
-    if d.startswith("00"):            # بادئة الاتصال الدوليّ
-        d = d[2:]
-    if d.startswith("218"):          # ليبي → يُرفَض (§3.4)
-        return None
-    if d.startswith("216"):          # تونسي دوليّ → المحلّي
-        d = d[3:]
-    elif d.startswith("20") and len(d) == 12:   # مصري دوليّ (+20) → المحلّي (0…)
-        d = "0" + d[2:]
-    if not d:
-        return None
-    if len(d) == 8 and d[0] in "259":   # تونسي محلّي (2/5/9)
-        return d
-    if len(d) >= 9:                     # مصري 11 وغيره (توافق)
-        return d
-    return None
+    return d if 8 <= len(d) <= 14 else None
+
+
+def _pick_phone(candidates: list[str]) -> Optional[str]:
+    """يفضّل أوّل مرشّح مصريّ/تونسيّ؛ فإن غاب فأوّل ليبيّ (يُقبَل عند عدم وجود غيره، §3.4)."""
+    non_libyan = [c for c in candidates if not _is_libyan_phone(c)]
+    if non_libyan:
+        return non_libyan[0]
+    return candidates[0] if candidates else None
 
 
 def extract_phone(s: Optional[str]) -> Optional[str]:
-    """يستخرج هاتف المستلم (`0916174679واتس`→`0916174679`)؛ يرفض الليبي ويقبل التونسي 8-خانات.
-
-    مرحلتان لعزل الهاتف عن مبلغ ملاصق (#2): (أ) بلا دمج المسافات — «01… 5000» يأخذ الهاتف وحده
-    (المسافة تكسر المجرى)؛ (ب) إن فشل، بدمج المسافات — للهاتف الدوليّ المكتوب مجموعات «+20 100 745 3278»."""
+    """يستخرج هاتف المستلم **كما كُتب** (بلا تحويل محلّي↔دوليّ، §3.4 قرار الجولة ٤). مرحلتان لعزله
+    عن مبلغٍ مجاور: (أ) بلا دمج المسافات — تُلتقَط المجاري ذات **شكل الهاتف الكامل** فقط، فينفصل
+    «01029051735 50000» → الهاتف وحده؛ (ب) إن فشلت، بدمج المسافات **داخل كل سطر** (لا عبر الأسطر)
+    — للهاتف الدوليّ المكتوب بمجموعات «+218 91 3035690». يُفضَّل المصريّ/التونسيّ على الليبيّ."""
     if not s:
         return None
-    text = normalize_digits(s)                       # bidi + أرقام عربية-هندية (§3.5)
-    m = re.search(r"\d{8,13}", text.replace("-", ""))    # (أ) المسافات حدود → تعزل الهاتف عن المبلغ
-    if m:
-        ph = classify_phone(m.group())
-        # نقبل هنا الهاتف **النظيف** فقط (تونسي 8 / مصري 11) كي لا يُلتقط جزءُ رقمٍ مفصولٍ بمسافة
-        # (ليبي «+218 91-…» جزؤه 9 خانات) — الغامض يُترَك للمرحلة (ب) بالدمج فتظهر بادئته.
-        if ph and len(ph) in (8, 11):
-            return ph
-    m2 = re.search(r"\d{8,13}", re.sub(r"[\s-]", "", text))   # (ب) دمج المسافات (دوليّ/بمجموعات)
-    return classify_phone(m2.group()) if m2 else None
+    text = normalize_digits(s)
+    # (أ) المسافات/الأسطر حدود → مجاري كاملة الشكل فقط (تعزل الهاتف عن مبلغٍ مجاور)
+    a = [m.group() for m in re.finditer(r"\d{8,14}", text.replace("-", ""))
+         if _is_complete_phone(m.group())]
+    if (pick := _pick_phone(a)) is not None:
+        return pick
+    # (ب) دمج المسافات **داخل السطر** (هاتف دوليّ بمجموعات) — السطر الجديد حدّ صارم (لا يدمج مبلغًا)
+    b: list[str] = []
+    for line in text.splitlines():
+        b += [m.group() for m in re.finditer(r"\d{8,14}", re.sub(r"[\s\-+]", "", line))
+              if classify_phone(m.group())]
+    return _pick_phone(b)
 
 
 def is_phone_like(s: str) -> bool:
