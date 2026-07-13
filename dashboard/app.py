@@ -39,7 +39,7 @@ from core.models import (
     UserRecord,
 )
 
-from . import auth, transfers
+from . import auth, stats, transfers
 
 log = get_logger(__name__)
 
@@ -610,6 +610,11 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         """قائمة الانتباه — حالات محتاجة تدخّلًا + إشارات كشف الاحتيال (م٢)، مرتّبة."""
         cfg = await db.detection.get()
         return await transfers.attention_items(db, utcnow(), cfg)
+
+    @router.get("/stats", dependencies=[reader])
+    async def get_stats() -> dict:
+        """إحصاءات صحة اللوحة (م٤) — حجم اليوم/الأسبوع + اتجاه ٧ أيام + عدّاد الانتباه. قراءة فقط."""
+        return await stats.compute_stats(db, utcnow())
 
     # ── إعداد كشف الاحتيال (م٢) — عرض للقارئ، تعديل للمدير فقط ─────────────────
     @router.get("/settings/detection", dependencies=[reader])

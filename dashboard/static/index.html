@@ -71,6 +71,17 @@
   nav a:hover, nav a.active { color:var(--txt); background:var(--chip); }
   .dfield { display:flex; flex-direction:column; font-size:12px; color:var(--muted); flex:1; min-width:150px; gap:4px; }
   .dfield input { font-size:14px; flex:none; }
+  /* لوحة صحة المدير (م٤) */
+  .tiles { display:flex; gap:12px; flex-wrap:wrap; }
+  .tile { flex:1; min-width:130px; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:12px 14px; text-align:center; }
+  .tn { font-size:26px; font-weight:800; } .tn.ok { color:var(--ok); } .tn.warn { color:var(--warn); }
+  .tl { font-size:12.5px; color:var(--muted); margin-top:2px; }
+  .trend { display:flex; gap:8px; align-items:flex-end; height:96px; margin:26px 0 22px; }
+  .bar { flex:1; min-width:16px; background:var(--chip); border-radius:6px 6px 0 0; position:relative;
+         display:flex; flex-direction:column; justify-content:flex-end; }
+  .bar .fill { background:var(--accent); border-radius:6px 6px 0 0; width:100%; }
+  .bar .cap { position:absolute; top:-19px; inset-inline:0; text-align:center; font-size:11px; color:var(--muted); }
+  .bar .dl { position:absolute; bottom:-19px; inset-inline:0; text-align:center; font-size:10px; color:var(--muted); direction:ltr; }
 </style>
 </head>
 <body>
@@ -93,6 +104,20 @@
 <div id="noaccess">لا صلاحية لعرض هذه الشاشة بحسابك الحالي.<br>تواصل مع المسؤول.</div>
 
 <div class="wrap">
+
+  <!-- لوحة صحة المدير (م٤) — الصحة أوّلًا -->
+  <div class="card" id="healthCard" style="display:none">
+    <h2>صحة اللوحة <span class="muted">(اليوم/الأسبوع · توقيت ليبيا)</span></h2>
+    <div class="tiles">
+      <div class="tile"><div class="tn" id="h_today_total">—</div><div class="tl">حوالات اليوم</div></div>
+      <div class="tile"><div class="tn" id="h_today_done">—</div><div class="tl">مكتملة اليوم</div></div>
+      <div class="tile"><div class="tn ok" id="h_success">—</div><div class="tl">نسبة نجاح الأسبوع</div></div>
+      <div class="tile"><div class="tn warn" id="h_attention">—</div><div class="tl">تحتاج انتباهًا الآن</div></div>
+    </div>
+    <div class="muted" id="h_amount" style="margin-top:10px"></div>
+    <div class="muted" style="margin-top:16px;font-size:12.5px">اتجاه ٧ أيام (الإجمالي · المملوء = المكتملة)</div>
+    <div class="trend" id="h_trend"></div>
+  </div>
 
   <!-- تحكّم البوت (Kill Switch §13) -->
   <div class="card">
@@ -402,6 +427,26 @@ async function saveDetection(){
   try{ await api("/settings/detection","PUT",c); window._det=c; toast("حُفظت الحدود ✓"); }catch(e){}
 }
 
+// ── لوحة صحة المدير (م٤) ──
+async function loadStats(){
+  let s; try{ s = await api("/stats"); }catch(e){ return; }
+  $("healthCard").style.display = "";
+  $("h_today_total").textContent = s.today.total;
+  $("h_today_done").textContent = s.today.completed;
+  $("h_success").textContent = (s.week.success_rate==null) ? "—" : Math.round(s.week.success_rate*100)+"%";
+  $("h_attention").textContent = s.attention_now;
+  const amt = Object.entries(s.today.amount||{}).map(([k,v])=>`${v} ${k}`).join(" · ");
+  $("h_amount").textContent = amt ? ("مبالغ اليوم: "+amt) : "";
+  const max = Math.max(1, ...s.trend.map(d=>d.total));
+  $("h_trend").innerHTML = s.trend.map(d=>{
+    const h = Math.max(Math.round(d.total/max*100), 3);
+    const cf = d.total ? Math.round(d.completed/d.total*100) : 0;
+    return `<div class="bar" title="${d.day}: ${d.total} (مكتملة ${d.completed})" style="height:${h}%">
+      <div class="cap">${d.total||""}</div><div class="fill" style="height:${cf}%"></div>
+      <div class="dl">${d.day.slice(5)}</div></div>`;
+  }).join("");
+}
+
 // تحميل أولي
 $("assetSearch").addEventListener("input", applyAssetSearch);
 function refreshAll(){ loadControl(); loadRooms(); loadTreasuries(); loadSuppliers(); loadChannels(); loadEmployees(); }
@@ -433,9 +478,10 @@ async function boot() {
   if (ROLE === "data_entry") { document.body.classList.add("no-access"); return; }
 
   refreshAll();
-  if (canWrite()) loadDetection();   // محرّر حدود الكشف (المدير فقط)
+  if (canWrite()) { loadStats(); loadDetection(); }   // صحة المدير + محرّر الحدود (المدير فقط)
   setInterval(loadControl, 10000); // تحديث مؤشّر الحالة دوريًا
   setInterval(loadRooms, 30000);   // تحديث الغرف كل 30 ثانية (المطلوب)
+  if (canWrite()) setInterval(loadStats, 60000);   // تحديث الصحة كل دقيقة
 }
 boot();
 </script>
