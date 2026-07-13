@@ -328,6 +328,21 @@ class Pipeline:
         suppliers = await self.db.suppliers.all_active()
         result = parse_message(raw.text, treasuries, suppliers)
 
+        # 🔴 مبلغ بصيغة «ألف/آلاف» (§3.5): وُسِّع تلقائيًّا (32 ألف→32000) ويُسجَّل بالمبلغ المصحَّح
+        #    عبر المسار العادي — تنبيه المركزية (Reply) + المسؤول للتأكيد/التصحيح. حسابٌ مع إشعار، بلا إيقاف.
+        if result.alf_expansions and result.kind == "transfer":
+            _note = "؛ ".join(
+                f"{e['value']:,} (من «{e['original']}»)" for e in result.alf_expansions
+            )
+            _code = result.leg.reference_number if result.leg else None
+            await self.bus.reply_central(
+                f"⚠️ تم تسجيل المبلغ: {_note}", raw.message_key, is_alert=True)
+            await self.bus.notify_admin(
+                f"⚠️ تنبيه: حوالة {_code or '؟'} — الزبون كتب مبلغًا بصيغة «ألف»؛ "
+                f"سُجِّل تلقائيًّا {_note}. يرجى التأكيد أو التصحيح.",
+                raw.message_key, forward_key=raw.message_key,
+            )
+
         # ═══ ربط الرسالة الثانية — حتميّ بطبقتين (§7.3، بلا قرب/تجاور/تصعيد) ═══
         # الطبقة ١ (مرجع صريح): الرسالة تحمل ref يطابق صفقة منتظِرة → تُربَط به مباشرة (الشكل الجديد،
         #   المرجع مكرّر في الرسالتين). الطبقة ٢ (FIFO): بلا ref → أقدم صفقة منتظِرة لنفس المُرسِل (أول

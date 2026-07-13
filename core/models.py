@@ -109,6 +109,8 @@ class ParseResult(BaseModel):
     control_value: Optional[float] = None       # قيمة التعديل/التصحيح
     reason: Optional[str] = None                # سبب noise/ignore (للتسجيل T5)
     confidence: float = 1.0
+    # 🔴 توسّعات «ألف/آلاف» (§3.5): «32 ألف»→32000 — لتنبيه المركزية+المسؤول. [{original, value}]
+    alf_expansions: list[dict] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

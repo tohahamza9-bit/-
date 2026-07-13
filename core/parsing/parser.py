@@ -28,6 +28,7 @@ from .classify import (
 from .normalize import (
     classify_phone,
     detect_currency,
+    expand_alf_amounts,
     extract_phone,
     is_phone_like,
     normalize_ar,
@@ -139,6 +140,7 @@ def parse_message(
     if not text or not text.strip():
         return ParseResult(kind="noise", reason="رسالة فارغة", confidence=1.0)
     text = normalize_digits(text)          # أرقام عربية-هندية → لاتينية قبل أي استخراج (§3.5)
+    text, alf_expansions = expand_alf_amounts(text)   # «32 ألف»→32000 + سجلّ التوسّع للتنبيه (§3.5)
 
     # خارج النطاق (§0): تسليم يدوي/باليد → يُصعَّد لا يُدخَل.
     # 🔴 قرار المستخدم: وجود رقم إشاري (Axxxx) مرساة معاملة قاطعة → حوالة (pattern-fishing)
@@ -174,7 +176,9 @@ def parse_message(
         return ParseResult(kind="silent_ignore", reason="تسليم/صرف/قبض (§7.2)", confidence=1.0)
 
     if strong:
-        return ParseResult(kind="transfer", leg=leg, confidence=conf)
+        return ParseResult(
+            kind="transfer", leg=leg, confidence=conf, alf_expansions=alf_expansions,
+        )
 
     # هدرزة: بلا بنية حوالة بعد المهلة (§7.2)
     return ParseResult(
@@ -708,6 +712,38 @@ def _fish_treasury_from_tokens(
     return None, tokens
 
 
+def _fragment_line_name_tokens(line: str) -> list[str]:
+    """كلمات الاسم العربية في سطرٍ من الرسالة الثانية (تُستثنى الأرقام/الهواتف/العملة/«بنك»)."""
+    out: list[str] = []
+    for tok in (t for raw in line.split() for t in _split_glued_name_number(raw)):
+        if not _ARABIC_RE.search(tok):           # رقم/هاتف/رمز → ليس اسمًا
+            continue
+        n = normalize_ar(tok)
+        if n in _FRAGMENT_CURRENCY or "بنك" in n:
+            continue
+        out.append(tok)
+    return out
+
+
+def _fragment_supplier_name(residual: list[str], code: Optional[str]) -> Optional[str]:
+    """اسم المورد من **السطر الأساسيّ** فقط (§7.3): سطر الكود ذي الاسم أولًا، وإلا أوّل سطر يحمل
+    اسمًا. الأسطر الأخرى (كيان بديل «طه 6.16»/«البراق 6.19» بعد سعر المورد) تُسهم بأسعارها للـ min
+    لا بأسمائها — فلا يتلوّث «سراج مصراتي» بـ«طه» ولا «محمد زريق» بـ«البراق». يحفظ متانة الترتيب
+    داخل السطر (السعر قد يسبق الاسم/الكود) لأن الفصل بحدود الأسطر لا بترتيب الرموز."""
+    def _toks(line: str) -> list[str]:
+        return [t for raw in line.split() for t in _split_glued_name_number(raw)]
+
+    ordered: list[str] = []
+    if code is not None:                          # سطر الكود ذو الاسم له الأولوية
+        ordered += [ln for ln in residual if code in _toks(ln) and _fragment_line_name_tokens(ln)]
+    ordered += [ln for ln in residual if _fragment_line_name_tokens(ln)]   # ثم أوّل سطر باسم
+    for ln in ordered:
+        nm = " ".join(_fragment_line_name_tokens(ln)).strip()
+        if nm:
+            return nm
+    return None
+
+
 def parse_completion_fragment(
     text: str, treasuries: list[TreasuryRecord], suppliers: list[SupplierRecord],
 ) -> ParsedLeg:
@@ -791,7 +827,9 @@ def parse_completion_fragment(
         min(prices, key=lambda p: float(p.replace("،", ".").replace(",", "."))).replace("،", ".")
         if prices else None
     )
-    name = " ".join(name_tokens).strip() or None
+    # 🔴 (تلوّث الاسم §7.3): الاسم من السطر الأساسيّ فقط (سطر الكود/أوّل سطر باسم)؛ الكيان الثاني ذو
+    #    السعر («طه 6.16»/«البراق 6.19») يُسهم بسعره للـ min لا باسمه. fallback للسلوك العالميّ القديم.
+    name = _fragment_supplier_name(residual, code) or (" ".join(name_tokens).strip() or None)
     if currency is None and treasury_rec is not None:
         currency = treasury_rec.currency
     _raw, price_norm = normalize_price(price_raw, currency or Currency.EGP)

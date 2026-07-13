@@ -20,6 +20,10 @@ _DIACRITICS = re.compile("[ؐ-ًؚ-ٰٟۖ-ۭـ]")
 # الأرقام العربية-الهندية (٠-٩) والفارسية (۰-۹) → لاتينية 0-9 (§3.5) — قبل أي مطابقة/استخراج
 _ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
+# شرطة/مسافة غير فاصلة (§3.4): «‑» (U+2011) → «-» عادية، و«NBSP» (U+00A0) → مسافة عادية — تُطبَّع
+# قبل الاستخراج كي لا تكسر مجرى أرقام الهاتف/المبلغ («0100‑8235046» كان يُرجع None).
+_SPECIAL_PUNCT = str.maketrans({"‑": "-", " ": " "})
+
 # علامات bidi البصرية (RLM/LRM/التضمين) — واتساب RTL يحقنها حول الأرقام فتقلب ترتيبها البصريّ.
 _BIDI_MARKS = re.compile("[‎‏‪-‮]")
 
@@ -32,10 +36,11 @@ def repair_bidi_digits(s: Optional[str]) -> str:
 
 def normalize_digits(s: Optional[str]) -> str:
     """ينظّف علامات bidi ثم يحوّل الأرقام العربية-الهندية/الفارسية إلى لاتينية (٠١٠→010) — يُطبَّق
-    قبل استخراج الهاتف/المبلغ/الكود إذ الأنماط الرقمية تطابق `\\d` اللاتينية فقط (§3.5)."""
+    قبل استخراج الهاتف/المبلغ/الكود إذ الأنماط الرقمية تطابق `\\d` اللاتينية فقط (§3.5). ويطبّع
+    الشرطة غير الفاصلة U+2011→«-» والمسافة غير الفاصلة NBSP→مسافة كي لا تكسرا مجرى الأرقام (§3.4)."""
     if not s:
         return s or ""
-    return repair_bidi_digits(s).translate(_ARABIC_INDIC_DIGITS)
+    return repair_bidi_digits(s).translate(_ARABIC_INDIC_DIGITS).translate(_SPECIAL_PUNCT)
 
 
 def normalize_ar(s: Optional[str]) -> str:
@@ -198,6 +203,28 @@ def parse_amount(raw: Optional[str]) -> Optional[float]:
         log.warning("مبلغ ملتبس %r: مرشّحون %s — يُؤخَذ الأكبر (§3.5 §0).", raw, values)
         return max(values, key=abs)
     return values[0]
+
+
+# ── التباس «ألف/آلاف» (§3.5) 🔴 ───────────────────────────────────────────────
+# «32 ألف» كانت تُقرأ 32 (الكلمة تُهمَل) بدل 32000 — سبّبت عملية شبح بمبلغ خاطئ. القاعدة: عدد
+# صحيح (بلا نقطة/فاصلة/رقم قبله) + «ألف/آلاف» ككلمة تامّة → يُضرَب ×1000. حدّ الكلمة (?![ء-ي])
+# يمنع إشعال أسماء تبدأ بـ«الف» («الفرجاني/الفوني»)؛ «1.000 ألف»/«10.000»/«32,000» تمرّ (فاصل قبله).
+_ALF_EXPAND_RE = re.compile(r"(?<![.,،٫٬\d])(\d+)\s*(ألف|الف|آلاف|الاف)(?![ء-ي])")
+
+
+def expand_alf_amounts(raw: Optional[str]) -> tuple[str, list[dict]]:
+    """يوسّع «عدد + ألف/آلاف» → عدد×1000 داخل النصّ (§3.5). يُرجع (النصّ المُوسَّع، سجلّ التوسّعات
+    [{original, value}]؛ فارغ إن لا توسّع). يُطبَّق على نصّ بأرقام لاتينية (بعد normalize_digits)."""
+    if not raw:
+        return raw or "", []
+    expansions: list[dict] = []
+
+    def _repl(m: "re.Match[str]") -> str:
+        value = int(m.group(1)) * 1000
+        expansions.append({"original": m.group(0).strip(), "value": value})
+        return str(value)
+
+    return _ALF_EXPAND_RE.sub(_repl, raw), expansions
 
 
 # ── قواعد الأرقام: السعر حسب العملة (§3.6) 🔴 ────────────────────────────────
