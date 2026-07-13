@@ -295,11 +295,15 @@ class SessionRecord(BaseModel):
 
 
 class AuthEventRecord(BaseModel):
-    """سجل تدقيق دخول/خروج بسيط (من، متى، أي IP) — §14.3 بند ٦."""
+    """سجل تدقيق النظام (§14.3 بند ٦) — دخول/خروج + تغييرات الإعدادات (م٦).
+
+    detail: وصف التغيير للأحداث من نوع setting_change (مثل «POST /api/treasuries»).
+    """
     username: str                                # الاسم المُدخَل (قد لا يكون مستخدمًا حقيقيًا)
-    event: str                                   # login_success | login_fail | logout | locked
+    event: str                                   # login_success | login_fail | logout | locked | setting_change
     ip: Optional[str] = None
     at: datetime
+    detail: Optional[str] = None                 # وصف تغيير الإعداد (من/ماذا) — م٦
 
 
 class DashboardReview(BaseModel):

@@ -837,8 +837,9 @@ class SessionRepo(_Repo):
 class AuthEventRepo(_Repo):
     """تدقيق دخول/خروج (§14.3 بند ٦) — سجل بسيط للمراجعة الأمنية."""
 
-    async def log(self, *, username: str, event: str, ip: Optional[str], now: datetime) -> None:
-        rec = AuthEventRecord(username=username, event=event, ip=ip, at=now)
+    async def log(self, *, username: str, event: str, ip: Optional[str], now: datetime,
+                  detail: Optional[str] = None) -> None:
+        rec = AuthEventRecord(username=username, event=event, ip=ip, at=now, detail=detail)
         await self.col.insert_one(self._dump(rec))
 
     async def list_recent(self, limit: int = 50) -> list[dict]:

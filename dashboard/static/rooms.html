@@ -71,8 +71,25 @@
 
 <div class="wrap">
   <p class="muted">البوت يكتشف الغرف تلقائيًا من واتساب. حدّد وظيفة كل غرفة — يُحفظ فورًا.</p>
+  <!-- بحث + فلترة بالنوع (م٦) -->
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px">
+    <input id="roomSearch" placeholder="🔎 بحث بالاسم أو JID…"
+           style="flex:1; min-width:180px; font-family:inherit; font-size:15px; padding:9px 12px;
+                  border-radius:9px; border:1px solid var(--line); background:var(--bg); color:var(--txt)">
+    <select id="roomTypeFilter" style="min-width:150px; font-family:inherit; font-size:14px; padding:9px 12px;
+            border-radius:9px; border:1px solid var(--line); background:var(--bg); color:var(--txt); cursor:pointer">
+      <option value="">كل الأنواع</option>
+      <option value="unclassified">غير مصنّفة</option>
+      <option value="central">مركزية</option>
+      <option value="admin">مسؤول</option>
+      <option value="customer">زبون</option>
+      <option value="treasury">خزينة</option>
+      <option value="supplier">مورد</option>
+      <option value="ignore">متجاهَلة</option>
+    </select>
+  </div>
   <div id="list"></div>
-  <div id="empty" style="display:none">لا غرف مكتشَفة بعد.</div>
+  <div id="empty" style="display:none">لا غرف مطابِقة.</div>
 </div>
 <div id="msg"></div>
 
@@ -196,11 +213,23 @@ function render(rooms) {
   }
 }
 
+let ALL_ROOMS = [];
+function applyRoomFilter() {
+  const q = ($("roomSearch").value||"").trim().toLowerCase();
+  const t = $("roomTypeFilter").value;
+  const filtered = ALL_ROOMS.filter(r =>
+    (!t || r.type === t) &&
+    (!q || String(r.name||"").toLowerCase().includes(q) || String(r.jid||"").toLowerCase().includes(q)));
+  render(filtered);
+}
+$("roomSearch").addEventListener("input", applyRoomFilter);
+$("roomTypeFilter").addEventListener("change", applyRoomFilter);
+
 async function load() {
   try {
     TREASURIES = await api("/treasuries");
-    const rooms = await api("/rooms");
-    render(rooms);
+    ALL_ROOMS = await api("/rooms");
+    applyRoomFilter();
   } catch (e) { /* toast عُرض بالفعل */ }
 }
 

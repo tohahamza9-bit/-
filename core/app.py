@@ -273,6 +273,12 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         html = ROOT / "dashboard" / "static" / "connect.html"
         return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
 
+    @app.get("/settings")
+    async def settings_page():  # noqa: ANN201
+        """مركز الإعدادات (لوحة V2 م٦)."""
+        html = ROOT / "dashboard" / "static" / "settings.html"
+        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+
     return app
 
 

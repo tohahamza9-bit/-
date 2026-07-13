@@ -28,40 +28,31 @@
   button { cursor:pointer; background:var(--accent); border-color:var(--accent); color:#fff; }
   button.ghost { background:transparent; color:var(--txt); }
   button.danger { background:var(--warn); border-color:var(--warn); }
-  button:disabled { opacity:.5; cursor:not-allowed; }
   table { width:100%; border-collapse:collapse; margin-top:10px; }
   th, td { text-align:right; padding:8px; border-bottom:1px solid var(--line); font-size:14px; }
   th { color:var(--muted); font-weight:600; }
   .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:13px; }
   .pill.on { background:rgba(34,197,94,.15); color:var(--ok); }
   .pill.off { background:rgba(239,68,68,.15); color:var(--warn); }
-  .pill.err { background:rgba(234,179,8,.15); color:#eab308; }
-  /* ألوان أنواع الغرف */
-  .pill.central { background:rgba(59,130,246,.18); color:#3b82f6; }      /* أزرق */
-  .pill.admin { background:rgba(249,115,22,.18); color:#f97316; }        /* برتقالي */
-  .pill.customer { background:rgba(34,197,94,.18); color:#22c55e; }      /* أخضر */
-  .pill.treasury { background:rgba(168,85,247,.18); color:#a855f7; }     /* بنفسجي */
+  .pill.central { background:rgba(59,130,246,.18); color:#3b82f6; }
+  .pill.admin { background:rgba(249,115,22,.18); color:#f97316; }
+  .pill.customer { background:rgba(34,197,94,.18); color:#22c55e; }
+  .pill.treasury { background:rgba(168,85,247,.18); color:#a855f7; }
+  .pill.supplier { background:rgba(59,130,246,.18); color:#60a5fa; }
   .pill.unclassified { background:rgba(138,153,181,.18); color:var(--muted); }
   .pill.ignore { background:rgba(138,153,181,.1); color:#6b7280; }
   code.jid { cursor:pointer; font-family:"Consolas",monospace; font-size:12.5px; color:var(--txt);
              background:var(--chip); border:1px solid var(--line); border-radius:6px; padding:2px 8px;
              direction:ltr; display:inline-block; max-width:100%; overflow-wrap:anywhere; }
   code.jid:hover { border-color:var(--accent); }
-  .status-dot { width:12px; height:12px; border-radius:50%; display:inline-block; margin-inline-end:6px; }
-  .kill { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
-  .kill .big { font-size:16px; font-weight:700; }
-  .tok { display:flex; gap:8px; align-items:center; }
-  .tok input { max-width:180px; }
   .muted { color:var(--muted); font-size:13px; }
   .inactive td { opacity:.5; }
+  .aliases { font-size:12px; color:var(--muted); }
   #msg { position:fixed; bottom:16px; inset-inline-start:16px; background:var(--card);
          border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:9; }
-  .aliases { font-size:12px; color:var(--muted); }
-  /* المصادقة (§14.3): هويّة + خروج + بوّابة حسب الدور */
   .userbox { display:flex; gap:10px; align-items:center; }
   .role-badge { font-size:12px; font-weight:700; padding:2px 10px; border-radius:999px;
                 background:rgba(59,130,246,.15); color:var(--accent); border:1px solid var(--accent); }
-  /* عناصر الكتابة تظهر للمدير فقط (can-write) — الرفض الفعلي في الـ backend */
   body:not(.can-write) .write-only { display:none !important; }
   #noaccess { display:none; text-align:center; padding:64px 16px; color:var(--muted); font-size:16px; }
   body.no-access .wrap > .card { display:none; }
@@ -69,11 +60,9 @@
   nav { display:flex; gap:6px; flex-wrap:wrap; margin-top:2px; }
   nav a { color:var(--muted); text-decoration:none; font-size:14px; padding:4px 10px; border-radius:8px; }
   nav a:hover, nav a.active { color:var(--txt); background:var(--chip); }
-  .dfield { display:flex; flex-direction:column; font-size:12px; color:var(--muted); flex:1; min-width:150px; gap:4px; }
-  .dfield input { font-size:14px; flex:none; }
-  /* لوحة صحة المدير (م٤) */
+  /* لوحة صحة المدير (م٤/م٥) */
   .tiles { display:flex; gap:12px; flex-wrap:wrap; }
-  .tile { flex:1; min-width:130px; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:12px 14px; text-align:center; }
+  .tile { flex:1; min-width:120px; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:12px 14px; text-align:center; }
   .tn { font-size:26px; font-weight:800; } .tn.ok { color:var(--ok); } .tn.warn { color:var(--warn); }
   .tl { font-size:12.5px; color:var(--muted); margin-top:2px; }
   .trend { display:flex; gap:8px; align-items:flex-end; height:96px; margin:26px 0 22px; }
@@ -92,6 +81,7 @@
       <a href="/attention">الانتباه</a>
       <a href="/transfers">سجل الحوالات</a>
       <a href="/connect">الاتصال</a>
+      <a href="/settings">الإعدادات</a>
       <a href="/" class="active">الرئيسية</a>
     </nav>
   </div>
@@ -106,7 +96,7 @@
 
 <div class="wrap">
 
-  <!-- لوحة صحة المدير (م٤) — الصحة أوّلًا -->
+  <!-- لوحة صحة المدير (م٤/م٥) — الصحة أوّلًا -->
   <div class="card" id="healthCard" style="display:none">
     <h2>صحة اللوحة <span class="muted">(اليوم/الأسبوع · توقيت ليبيا)</span></h2>
     <div class="tiles">
@@ -114,31 +104,17 @@
       <div class="tile"><div class="tn" id="h_today_done">—</div><div class="tl">مكتملة اليوم</div></div>
       <div class="tile"><div class="tn ok" id="h_success">—</div><div class="tl">نسبة نجاح الأسبوع</div></div>
       <div class="tile"><div class="tn warn" id="h_attention">—</div><div class="tl">تحتاج انتباهًا الآن</div></div>
+      <div class="tile"><div class="tn" id="h_storage" style="font-size:18px">…</div><div class="tl">التخزين</div></div>
       <div class="tile"><div class="tn" id="h_wa" style="font-size:18px">…</div><div class="tl">اتصال واتساب</div></div>
       <div class="tile"><div class="tn" id="h_moneyado" style="font-size:18px">…</div><div class="tl">MONEYADO</div></div>
     </div>
     <div class="muted" id="h_amount" style="margin-top:10px"></div>
     <div class="muted" style="margin-top:16px;font-size:12.5px">اتجاه ٧ أيام (الإجمالي · المملوء = المكتملة)</div>
     <div class="trend" id="h_trend"></div>
+    <p class="muted" style="margin:6px 0 0">التحكّم والإعدادات في <a href="/settings" style="color:var(--accent)">مركز الإعدادات ↗</a></p>
   </div>
 
-  <!-- تحكّم البوت (Kill Switch §13) -->
-  <div class="card">
-    <h2>تحكّم البوت — Kill Switch</h2>
-    <div class="kill">
-      <span><span id="dot" class="status-dot"></span><span id="stateTxt" class="big">…</span></span>
-      <span id="storeTxt" class="pill off">التخزين: …</span>
-      <button id="toggleBtn">تبديل التخزين</button>
-      <span class="muted">تفعيل = يخزّن تلقائيًا · إيقاف = يتوقف عند «تخزين» · الافتراضي: إيقاف</span>
-    </div>
-    <div class="kill">
-      <span id="autoTrustTxt" class="pill off">وضع التلقائي: …</span>
-      <button id="autoTrustBtn" class="ghost">تبديل الوضع التلقائي</button>
-      <span class="muted">مُفعّل = يتخطّى مطابقة الغرف → بوابة الثقة مباشرة · الافتراضي: مُعطّل</span>
-    </div>
-  </div>
-
-  <!-- الغرف — العضويات المكتشَفة/المصنّفة (§2.2) -->
+  <!-- الغرف — نظرة عامة (§2.2) -->
   <div class="card">
     <h2>الغرف <span class="muted">(الغرف التي البوت عضو فيها · انقر JID لنسخه)</span>
       <a class="rooms-link" href="/rooms" target="_blank" rel="noopener">إدارة الغرف ↗</a></h2>
@@ -186,7 +162,7 @@
       <tbody id="s_body"></tbody></table>
   </div>
 
-  <!-- قنوات الدفع (م٣) — إدارة قائمة + إملاءات بديلة (لا ربط بالكتابة بعد) -->
+  <!-- قنوات الدفع (م٣) -->
   <div class="card">
     <h2>قنوات الدفع <span class="muted">(فودافون/انستا… + إملاءات بديلة لتصحيح الإملاء)</span></h2>
     <div class="row write-only">
@@ -199,83 +175,26 @@
       <tbody id="c_body"></tbody></table>
   </div>
 
-  <!-- الموظفون المعتمدون §13 -->
-  <div class="card">
-    <h2>الموظفون المعتمدون <span class="muted">(«تم» تُقبل من هؤلاء فقط)</span></h2>
-    <div class="row write-only">
-      <input id="e_num" placeholder="رقم واتساب">
-      <input id="e_name" placeholder="الاسم">
-      <button onclick="addEmployee()">إضافة</button>
-    </div>
-    <table><thead><tr><th>الاسم</th><th>رقم واتساب</th><th>الحالة</th><th></th></tr></thead>
-      <tbody id="e_body"></tbody></table>
-  </div>
-
-  <!-- كشف الاحتيال (م٢): حدود قابلة للتعديل — المدير فقط. تصميم قابل للانتقال لمركز الإعدادات لاحقًا -->
-  <div class="card write-only" id="detCard">
-    <h2>حدود كشف الاحتيال <span class="muted">(قواعد التصعيد — م٢)</span></h2>
-    <label style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
-      <input type="checkbox" id="d_enabled" style="flex:none;width:auto"> <span>تفعيل الكشف</span></label>
-    <div class="row" style="gap:12px">
-      <label class="dfield">مجموع التجزئة المشبوه<input id="d_sum" type="number" step="any"></label>
-      <label class="dfield">عدد التجزئة<input id="d_count" type="number"></label>
-      <label class="dfield">نافذة التجزئة (دقيقة)<input id="d_win" type="number"></label>
-    </div>
-    <div class="row" style="gap:12px">
-      <label class="dfield">نافذة إعادة المرجع (ساعة)<input id="d_refwin" type="number"></label>
-      <label class="dfield">تسامح انحراف الخصم (0-1)<input id="d_disc" type="number" step="any"></label>
-      <label class="dfield">حد أدنى عيّنات الخصم<input id="d_min" type="number"></label>
-    </div>
-    <div class="row" style="gap:12px">
-      <label class="dfield">نافذة المسح (ساعة)<input id="d_scan" type="number"></label>
-      <label class="dfield">كيان جديد: مهلة (ساعة)<input id="d_newent" type="number"></label>
-      <button onclick="saveDetection()" style="align-self:flex-end">حفظ الحدود</button>
-    </div>
-    <p class="muted" style="margin:8px 0 0">القيم بذرة متحفّظة موثّقة؛ تُحدَّث من التحليل التاريخي وتتحسّن مع تراكم الحوالات.</p>
-  </div>
-
 </div>
 <div id="msg"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let ROLE = null;                       // manager | reviewer | data_entry
+let ROLE = null;
 const canWrite = () => ROLE === "manager";
-
 function toast(t) { const m=$("msg"); m.textContent=t; m.style.display="block";
   clearTimeout(window._tt); window._tt=setTimeout(()=>m.style.display="none", 3000); }
-
 async function api(path, method="GET", body=null) {
   const opt = { method, headers:{}, credentials:"same-origin" };
   if (body) { opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
   const r = await fetch("/api"+path, opt);
   if (r.status === 401) { location.replace("/login"); throw new Error(401); }
-  if (!r.ok) {
-    let d = ""; try { d = (await r.json()).detail; } catch(e) {}
-    toast("خطأ "+r.status+(d?": "+d:"")); throw new Error(r.status);
-  }
+  if (!r.ok) { let d=""; try{ d=(await r.json()).detail; }catch(e){} toast("خطأ "+r.status+(d?": "+d:"")); throw new Error(r.status); }
   return r.status === 204 ? null : r.json();
 }
 const csv = (s) => s.split(",").map(x=>x.trim()).filter(Boolean);
 
-// ── Kill Switch ──
-async function loadControl() {
-  const c = await api("/control");
-  $("stateTxt").textContent = {running:"شغّال", stopped:"موقوف", error:"خطأ"}[c.state] || c.state;
-  const dot = $("dot");
-  dot.style.background = c.state==="running" ? "var(--ok)" : c.state==="error" ? "#eab308" : "var(--warn)";
-  const st = $("storeTxt");
-  st.textContent = "التخزين: " + (c.storage_enabled ? "مُفعّل" : "موقوف");
-  st.className = "pill " + (c.storage_enabled ? "on" : "off");
-  const at = $("autoTrustTxt");
-  at.textContent = "وضع التلقائي: " + (c.auto_trust ? "مُفعّل" : "مُعطّل");
-  at.className = "pill " + (c.auto_trust ? "on" : "off");
-}
-$("toggleBtn").onclick = async () => { await api("/control/toggle","POST"); await loadControl(); };
-$("autoTrustBtn").onclick = async () => { await api("/control/auto_trust","POST"); await loadControl(); };
-
 // ── الخزائن ──
-// عرض «البلد» من عملة الخزينة (db.treasuries مصدر الحقيقة) — عرض فقط، لا يؤثّر على التطبيع.
 const COUNTRY_BY_CURRENCY = { EGP: "🇪🇬 مصر", TND: "🇹🇳 تونس" };
 function countryCell(cur) { return COUNTRY_BY_CURRENCY[cur] || "—"; }
 async function loadTreasuries() {
@@ -283,8 +202,7 @@ async function loadTreasuries() {
   $("t_body").innerHTML = rows.map(t => `<tr class="${t.active?'':'inactive'}">
     <td>${t.name}</td><td>${t.code??'—'}</td>
     <td>${t.type==='sell_and_buy'?'بيع وشراء':'بيع فقط'}</td>
-    <td>${t.currency??'—'}</td>
-    <td>${countryCell(t.currency)}</td>
+    <td>${t.currency??'—'}</td><td>${countryCell(t.currency)}</td>
     <td class="aliases">${(t.aliases||[]).join('، ')}</td>
     <td>${t.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
     <td>${!canWrite() ? '' : (t.active
@@ -318,8 +236,7 @@ async function loadSuppliers() {
 async function enableSupplier(n) { await api(`/suppliers/${n}/enable`,"POST"); loadSuppliers(); }
 async function addSupplier() {
   if (!$("s_name").value) return toast("الاسم مطلوب");
-  await api("/suppliers","POST",{ name:$("s_name").value, code:$("s_code").value||null,
-    aliases:csv($("s_alias").value) });
+  await api("/suppliers","POST",{ name:$("s_name").value, code:$("s_code").value||null, aliases:csv($("s_alias").value) });
   ["s_name","s_code","s_alias"].forEach(i=>$(i).value=""); loadSuppliers();
 }
 async function disableSupplier(n) { await api(`/suppliers/${n}/disable`,"POST"); loadSuppliers(); }
@@ -339,43 +256,24 @@ async function loadChannels() {
 }
 async function addChannel() {
   if (!$("c_name").value) return toast("الاسم مطلوب");
-  await api("/payment-channels","POST",{ name:$("c_name").value, code:$("c_code").value||null,
-    aliases:csv($("c_alias").value) });
+  await api("/payment-channels","POST",{ name:$("c_name").value, code:$("c_code").value||null, aliases:csv($("c_alias").value) });
   ["c_name","c_code","c_alias"].forEach(i=>$(i).value=""); loadChannels();
 }
 async function disableChannel(n) { await api(`/payment-channels/${n}/disable`,"POST"); loadChannels(); }
 async function enableChannel(n) { await api(`/payment-channels/${n}/enable`,"POST"); loadChannels(); }
 
-// ── بحث فوري في الخزائن/الموردين/القنوات (م٣) — واجهة فقط ──
+// ── بحث فوري (م٣) — واجهة فقط ──
 function applyAssetSearch() {
   const q = ($("assetSearch").value||"").trim();
   ["t_body","s_body","c_body"].forEach(id => {
     const tb = $(id); if (!tb) return;
-    tb.querySelectorAll("tr").forEach(tr => {
-      tr.style.display = (!q || tr.textContent.includes(q)) ? "" : "none";
-    });
+    tb.querySelectorAll("tr").forEach(tr => { tr.style.display = (!q || tr.textContent.includes(q)) ? "" : "none"; });
   });
 }
 
-// ── الموظفون ──
-async function loadEmployees() {
-  const rows = await api("/employees");
-  $("e_body").innerHTML = rows.map(e => `<tr class="${e.active?'':'inactive'}">
-    <td>${e.name}</td><td>${e.whatsapp_number}</td>
-    <td>${e.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
-    <td>${!canWrite() ? '' : `<button class="ghost danger" onclick="delEmployee('${encodeURIComponent(e.whatsapp_number)}')">حذف</button>`}</td>
-  </tr>`).join("");
-}
-async function addEmployee() {
-  if (!$("e_num").value || !$("e_name").value) return toast("الرقم والاسم مطلوبان");
-  await api("/employees","POST",{ whatsapp_number:$("e_num").value, name:$("e_name").value });
-  $("e_num").value=""; $("e_name").value=""; loadEmployees();
-}
-async function delEmployee(n) { await api(`/employees/${n}`,"DELETE"); loadEmployees(); }
-
-// ── الغرف ──
+// ── الغرف (نظرة عامة) ──
 const ROOM_TYPE_AR = { central:"مركزية", admin:"مسؤول", customer:"زبون",
-  treasury:"خزينة", unclassified:"غير مصنّفة", ignore:"متجاهَلة" };
+  treasury:"خزينة", supplier:"مورد", unclassified:"غير مصنّفة", ignore:"متجاهَلة" };
 async function loadRooms() {
   const rows = await api("/rooms");
   $("r_body").innerHTML = rows.map(r => `<tr class="${r.active?'':'inactive'}">
@@ -386,51 +284,18 @@ async function loadRooms() {
   </tr>`).join("") || `<tr><td colspan="4" class="muted">لا غرف مكتشَفة بعد</td></tr>`;
 }
 function copyJid(el) {
-  const t = el.textContent;
-  const done = () => toast("تم نسخ JID");
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(t).then(done).catch(() => fallbackCopy(t, done));
-  } else { fallbackCopy(t, done); }
+  const t = el.textContent; const done = () => toast("تم نسخ JID");
+  if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t).then(done).catch(() => fallbackCopy(t, done)); }
+  else { fallbackCopy(t, done); }
 }
 function fallbackCopy(t, done) {
-  const ta = document.createElement("textarea");
-  ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+  const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
   document.body.appendChild(ta); ta.select();
   try { document.execCommand("copy"); done(); } catch (e) { toast("تعذّر النسخ"); }
   document.body.removeChild(ta);
 }
 
-// ── كشف الاحتيال (م٢): حدود قابلة للتعديل (المدير فقط) ──
-async function loadDetection(){
-  try{
-    const c = await api("/settings/detection"); window._det = c;
-    $("d_enabled").checked = !!c.enabled;
-    $("d_sum").value = c.structuring_sum_threshold;
-    $("d_count").value = c.structuring_count_threshold;
-    $("d_win").value = c.structuring_window_minutes;
-    $("d_refwin").value = c.ref_reuse_window_hours;
-    $("d_disc").value = c.discount_deviation_tolerance;
-    $("d_min").value = c.discount_min_samples;
-    $("d_scan").value = c.scan_window_hours;
-    $("d_newent").value = c.new_entity_lookback_hours;
-  }catch(e){}
-}
-async function saveDetection(){
-  const c = Object.assign({}, window._det||{}, {
-    enabled: $("d_enabled").checked,
-    structuring_sum_threshold: parseFloat($("d_sum").value),
-    structuring_count_threshold: parseInt($("d_count").value,10),
-    structuring_window_minutes: parseInt($("d_win").value,10),
-    ref_reuse_window_hours: parseInt($("d_refwin").value,10),
-    discount_deviation_tolerance: parseFloat($("d_disc").value),
-    discount_min_samples: parseInt($("d_min").value,10),
-    scan_window_hours: parseInt($("d_scan").value,10),
-    new_entity_lookback_hours: parseInt($("d_newent").value,10),
-  });
-  try{ await api("/settings/detection","PUT",c); window._det=c; toast("حُفظت الحدود ✓"); }catch(e){}
-}
-
-// ── لوحة صحة المدير (م٤) ──
+// ── لوحة صحة المدير (م٤/م٥) ──
 async function loadStats(){
   let s; try{ s = await api("/stats"); }catch(e){ return; }
   $("healthCard").style.display = "";
@@ -449,60 +314,49 @@ async function loadStats(){
       <div class="dl">${d.day.slice(5)}</div></div>`;
   }).join("");
 }
-
-// ── بلاطتا الاتصال + MONEYADO في لوحة الصحة (م٥) ──
+async function loadStorage(){
+  try{ const c = await api("/control"); const t=$("h_storage");
+    t.textContent = c.storage_enabled ? "مُفعّل" : "موقوف";
+    t.style.color = c.storage_enabled ? "var(--ok)" : "var(--warn)";
+  }catch(e){}
+}
 async function loadConnHealth(){
-  try{ const c = await api("/connection");
-    const t=$("h_wa");
+  try{ const c = await api("/connection"); const t=$("h_wa");
     if(!c.available){ t.textContent="؟"; t.style.color="var(--muted)"; }
     else if(c.connected){ t.textContent="متّصل"; t.style.color="var(--ok)"; }
     else if(c.loggedOut){ t.textContent="خروج"; t.style.color="var(--warn)"; }
     else { t.textContent="منقطع"; t.style.color="var(--warn)"; }
   }catch(e){}
-  try{ const m = await api("/moneyado/health");
-    const t=$("h_moneyado");
+  try{ const m = await api("/moneyado/health"); const t=$("h_moneyado");
     const map={visible:["يعمل","var(--ok)"],not_visible:["نافذة مخفية","var(--warn)"],
       not_running:["متوقّف","var(--warn)"],unknown_visibility:["؟","var(--muted)"],unavailable:["؟","var(--muted)"]};
-    const [lbl,col]=map[m.state]||[m.state,"var(--muted)"];
-    t.textContent=lbl; t.style.color=col;
+    const [lbl,col]=map[m.state]||[m.state,"var(--muted)"]; t.textContent=lbl; t.style.color=col;
   }catch(e){}
 }
 
-// تحميل أولي
 $("assetSearch").addEventListener("input", applyAssetSearch);
-function refreshAll(){ loadControl(); loadRooms(); loadTreasuries(); loadSuppliers(); loadChannels(); loadEmployees(); }
+function refreshAll(){ loadRooms(); loadTreasuries(); loadSuppliers(); loadChannels(); }
 
 const ROLE_AR = { manager:"مدير", reviewer:"مراجع", data_entry:"مُدخل بيانات" };
 $("logoutBtn").onclick = async () => {
   try { await fetch("/api/auth/logout", { method:"POST", credentials:"same-origin" }); } catch(e) {}
   location.replace("/login");
 };
-
-// بوّابة المصادقة (§14.3): هويّة → دور → عرض حسب الصلاحية.
 async function boot() {
   let me;
-  try {
-    const r = await fetch("/api/auth/me", { credentials:"same-origin" });
-    if (!r.ok) { location.replace("/login"); return; }
-    me = await r.json();
-  } catch (e) { location.replace("/login"); return; }
-
-  ROLE = me.role;
-  $("whoami").textContent = me.username;
+  try { const r = await fetch("/api/auth/me", { credentials:"same-origin" }); if (!r.ok) { location.replace("/login"); return; } me = await r.json(); }
+  catch (e) { location.replace("/login"); return; }
+  ROLE = me.role; $("whoami").textContent = me.username;
   const rb = $("roleBadge"); rb.textContent = ROLE_AR[ROLE] || ROLE; rb.style.display = "inline-block";
   $("logoutBtn").style.display = "inline-block";
   if (canWrite()) document.body.classList.add("can-write");
-
-  // reviewer: يدخل مباشرة على قائمة الانتباه (صفر نقرات إضافية — V2).
   if (ROLE === "reviewer") { location.replace("/attention"); return; }
-  // data_entry: بلا وصول للإعدادات الحالية (الـ backend يرفض بـ403) → شاشة «لا صلاحية».
   if (ROLE === "data_entry") { document.body.classList.add("no-access"); return; }
 
   refreshAll();
-  if (canWrite()) { loadStats(); loadConnHealth(); loadDetection(); }   // صحة المدير + محرّر الحدود (المدير فقط)
-  setInterval(loadControl, 10000); // تحديث مؤشّر الحالة دوريًا
-  setInterval(loadRooms, 30000);   // تحديث الغرف كل 30 ثانية (المطلوب)
-  if (canWrite()) { setInterval(loadStats, 60000); setInterval(loadConnHealth, 10000); }
+  if (canWrite()) { loadStats(); loadStorage(); loadConnHealth(); }
+  setInterval(loadRooms, 30000);
+  if (canWrite()) { setInterval(loadStats, 60000); setInterval(loadStorage, 10000); setInterval(loadConnHealth, 10000); }
 }
 boot();
 </script>

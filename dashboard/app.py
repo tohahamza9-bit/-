@@ -171,7 +171,25 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
     current_user = auth.make_current_user(db, settings)
     require_manager = auth.make_require_roles(current_user, Role.MANAGER)
     require_read = auth.make_require_roles(current_user, Role.MANAGER, Role.REVIEWER)
-    manager = Depends(require_manager)
+
+    async def require_manager_audited(request: Request,
+                                      user: UserRecord = Depends(require_manager)) -> UserRecord:
+        """حارس المدير + **سجل تقنيّ (م٦)**: يدوّن كل طلب غير-GET يمرّ عبره (من/ماذا/متى).
+
+        يلتقط كل تحوّلات الإعدادات تلقائيًا (كلها محروسة بالمدير) — الأثر الدائم المكمّل للتنبيه
+        اللحظيّ. best-effort: لا يوقف العملية إن فشل التسجيل (T5).
+        """
+        if request.method != "GET":
+            try:
+                await db.auth_events.log(
+                    username=user.username, event="setting_change",
+                    ip=auth.client_ip(request), now=utcnow(),
+                    detail=f"{request.method} {request.url.path}")
+            except Exception as exc:
+                log.warning("تعذّر تسجيل تدقيق الإعداد (متابعة): %s", exc)
+        return user
+
+    manager = Depends(require_manager_audited)
     reader = Depends(require_read)
 
     async def _active_managers() -> int:
@@ -266,7 +284,7 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
 
     @router.post("/users/{username}/disable")
     async def disable_user(username: str,
-                           actor: UserRecord = Depends(require_manager)) -> dict:
+                           actor: UserRecord = Depends(require_manager_audited)) -> dict:
         """تعطيل مستخدم (بلا حذف §13) + إبطال فوري لكل جلساته. لا تعطيل للذات/آخر مدير."""
         if username == actor.username:
             raise HTTPException(status_code=400, detail="لا يمكنك تعطيل حسابك الحالي")
@@ -290,7 +308,7 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
 
     @router.post("/users/{username}/password")
     async def change_password(username: str, body: PasswordIn,
-                              actor: UserRecord = Depends(require_manager)) -> dict:
+                              actor: UserRecord = Depends(require_manager_audited)) -> dict:
         """تغيير كلمة مرور مستخدم + إبطال جلساته (إلزام دخول جديد)."""
         if not await db.users.update_password(username, auth.hash_password(body.password)):
             raise HTTPException(status_code=404, detail=f"مستخدم غير موجود: {username}")
@@ -300,7 +318,7 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
 
     @router.post("/users/{username}/role")
     async def change_role(username: str, body: RoleIn,
-                          actor: UserRecord = Depends(require_manager)) -> dict:
+                          actor: UserRecord = Depends(require_manager_audited)) -> dict:
         """تغيير دور مستخدم. يُقرأ الدور حيًّا في كل طلب فيَسري فورًا. لا تنزيل لآخر مدير."""
         target = await db.users.get(username)
         if target is None:
@@ -742,6 +760,11 @@ def create_app(db: Database, settings: Optional[Settings] = None) -> FastAPI:
     async def connect_page() -> FileResponse:
         """صفحة الاتصال + QR + صحة MONEYADO (لوحة V2 م٥) — البوّابة في الواجهة/الـ API."""
         return FileResponse(str(STATIC_DIR / "connect.html"))
+
+    @app.get("/settings")
+    async def settings_page() -> FileResponse:
+        """مركز الإعدادات (لوحة V2 م٦): مستخدمون + Kill Switch + موظفون + كشف + سجل تقنيّ."""
+        return FileResponse(str(STATIC_DIR / "settings.html"))
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
