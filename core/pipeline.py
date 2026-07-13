@@ -54,6 +54,7 @@ from .parsing import (
     parse_message,
 )
 from .parsing.normalize import normalize_price
+from .parsing.parser import _has_reference
 from .parsing.resolve import resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
 from .queue.service import (
@@ -439,6 +440,24 @@ class Pipeline:
                 return await self.queue.absorb_fragment(
                     frag, raw.chat_jid, raw.message_key, now
                 )
+            # 🔴 «حوالة محتملة فشل استخراجها» (م: A292): رسالة تحمل مرجعًا (Axxxx/SIxxxx) لكنها
+            #    سقطت noise (خطأ إملاء عملة/حقل) → **لا سقوط صامت**: تنبيه المالك (is_alert) + ⚠️.
+            #    الهدرزة الحقيقية (بلا مرجع) تبقى تجاهلًا صامتًا كالسابق.
+            has_ref = bool((result.leg is not None and result.leg.reference_number)
+                           or _has_reference(raw.text or ""))
+            if has_ref:
+                ref = (result.leg.reference_number if result.leg else None) or "؟"
+                log.warning("⚠️ رسالة تبدو حوالة (مرجع %s) فشل استخراجها — تنبيه المالك: %s",
+                            ref, raw.message_key)
+                await self.bus.notify_admin(
+                    f"⚠️ رسالة تبدو حوالة لكن فشل استخراجها (مرجع {ref}) — راجعها يدويًا:\n"
+                    f"{(raw.text or '').strip()[:120]}",
+                    raw.message_key, forward_key=raw.message_key,
+                )
+                if raw.chat_jid == self.bus.central_jid:   # علامة ⚠️ على المركزية (إن كانت منها)
+                    await self.bus.mark_central(raw.message_key, Mark.WARN.value)
+                    await self.bus.flush_reactions()
+                return None
             log.info("هدرزة — تجاهل صامت: %s", raw.message_key)
             return None
         if result.kind == "control":
@@ -656,10 +675,12 @@ class Pipeline:
                     log.warning("🔴 لا خزينة (non-SI) للصفقة %s — تصعيد لغرفة المسؤول", deal.deal_id)
                     return deal
                 deal.status = Status.HELD
-                deal.mark = Mark.WARN
+                deal.mark = Mark.MATCHED   # 🟡 «قيد المراجعة» — انتظار لا فشل (قرار المالك)
                 await self.db.deals.upsert(deal)
-                await self.matcher.apply_mark(deal, Mark.WARN)  # ⚠️ Reply بالسبب
-                log.warning("تعليق ⚠️ للصفقة %s: %s", deal.deal_id, reason)
+                await self.matcher.apply_mark(deal, Mark.MATCHED)  # 🟡 على الأولى (§8.3)
+                await self.bus.reply_central(f"🟡 قيد المراجعة: {reason}",
+                                             self._deal_key(deal), is_alert=True)  # يُبقي السبب نصًّا
+                log.warning("🟡 تعليق للصفقة %s: %s", deal.deal_id, reason)
                 return deal
 
             # الحارس قبل الكتابة (§9): لم تُنزَّل + لا إلغاء
@@ -787,6 +808,26 @@ class Pipeline:
                 return False, f"خزينة «{leg.treasury.name}» بلا كود MONEYADO (معلّق)"
         return True, None
 
+    async def _set_mark(self, deal: Deal, mark: Mark) -> None:
+        """يحدّث **علامة** الصفقة فقط في DB (بلا لمس الحالة) — نقطة إصدار علامة لا قرار.
+        🔴 مهم: لا نستخدم upsert للصفقة كاملة هنا كي لا تُدهَس الحالة (READY) بحالة قديمة في الذاكرة."""
+        deal.mark = mark
+        await self.db.deals.col.update_one(
+            {"deal_id": deal.deal_id}, {"$set": {"mark": mark.value}})
+
+    async def _mark_pending(self, deal: Deal) -> None:
+        """🟡 «بانتظار التأكيد» على كل رسائل الصفقة (نفس تغطية ✅ لكن بلا يقين: تخزين موقوف/
+        dry_run/بلا تأكيد SQL). نقطة إصدار علامة فقط — لا تغيّر حالة الصفقة ولا قرار الكتابة/المطابقة."""
+        keys = list(deal.source_message_keys)
+        if not keys:
+            k = self._deal_key(deal)
+            keys = [k] if k else []
+        for key in keys:
+            if key:
+                await self.bus.mark_central(key, Mark.MATCHED.value)   # 🟡
+        if keys:
+            await self.bus.wait_for_reaction_sent(keys)
+
     # ═════════════════════════════════════════════════════════════════════════
     # الكتابة + التحقّق + الدفتر + العلامة (§9 §11 §11.4 §13)
     # ═════════════════════════════════════════════════════════════════════════
@@ -871,23 +912,43 @@ class Pipeline:
         # بلا حالة COMPLETED ولا دفتر (كي لا يُحجب التشغيل الحقيقي لاحقًا §9). لا يمسّ Kill Switch.
         # ✅ يُوضع مرّة واحدة (mark != DONE) فلا يتكرّر إن أُعيدت معالجة الصفقة في نبضة لاحقة.
         if dry_run_seen:
-            if key and deal.mark != Mark.DONE:
-                deal.mark = Mark.DONE
-                await self.db.deals.upsert(deal)                # نحفظ العلامة فقط، لا الحالة
-                await self.matcher.apply_mark(deal, Mark.DONE)  # ✅ صامت (§8.3)
-                await self.bus.flush_reactions()                # دفع فوري (§8.3)
-                log.info("✅ DRY_RUN — الصفقة %s عُبّئت ومُعروضة (بلا تخزين).", deal.deal_id)
+            # 🟡 لا ✅: DRY_RUN عُبّئ بلا تخزين فعليّ → «بانتظار» لا «تمّ» (قاعدة المالك: ✅ عند اليقين فقط).
+            # الحالة تبقى MATCHED (عُبّئ ومُعروض)؛ المطابقة أصلًا تضع 🟡، فلا نُكرّرها إن كانت موجودة.
+            if key:
+                already_pending = (deal.mark == Mark.MATCHED)
+                deal.mark = Mark.MATCHED
+                await self.db.deals.upsert(deal)                # يعيد الحالة MATCHED (بعد أن جعلها build READY)
+                if not already_pending:
+                    await self._mark_pending(deal)              # 🟡 إن لم تضعها المطابقة
+                log.info("🟡 DRY_RUN — الصفقة %s عُبّئت ومُعروضة (بلا تخزين).", deal.deal_id)
             return deal
 
         # اكتملت كل الأطراف بنجاح (أو Kill Switch إيقاف)
         if commit:
-            deal.status = Status.COMPLETED
-            deal.mark = Mark.DONE
-            await self.db.deals.set_status(deal.deal_id, Status.COMPLETED, mark=Mark.DONE.value)
-            if key:
-                await self.matcher.apply_mark(deal, Mark.DONE)  # ✅ صامت (§8.3)
-                await self.bus.flush_reactions()                # دفع فوري (§8.3)
-            log.info("✅ الصفقة %s تمّت وتأكّدت", deal.deal_id)
+            deal.status = Status.COMPLETED                       # 🔴 قرار الحالة كما هو (لا تغيير منطق)
+            if self.verifier.enabled:
+                # ✅ فقط عند تأكيد SQL الفعليّ (§11.4) — اليقين الوحيد أن MONEYADO حفظت السجل.
+                deal.mark = Mark.DONE
+                await self.db.deals.set_status(deal.deal_id, Status.COMPLETED, mark=Mark.DONE.value)
+                if key:
+                    await self.matcher.apply_mark(deal, Mark.DONE)  # ✅ صامت (§8.3)
+                    await self.bus.flush_reactions()
+                log.info("✅ الصفقة %s تمّت وتأكّدت (SQL §11.4)", deal.deal_id)
+            else:
+                # SQL معطّل: خُزِّنت واجهيًّا (ok=True) لكن **بلا يقين** → 🟡 «بانتظار التأكيد» لا ✅
+                # (قاعدة المالك: ✅ عند اليقين ١٠٠٪ فقط). فعّل SQL لتظهر ✅.
+                deal.mark = Mark.MATCHED
+                await self.db.deals.set_status(deal.deal_id, Status.COMPLETED, mark=Mark.MATCHED.value)
+                if key:
+                    await self._mark_pending(deal)                # 🟡 على كل الرسائل
+                log.info("🟡 الصفقة %s خُزِّنت بلا تأكيد SQL — بانتظار التأكيد (فعّل SQL للـ✅)", deal.deal_id)
+        else:
+            # Kill Switch إيقاف: عُبّئت الشاشة بلا تخزين (المنطقة الميتة سابقًا: بلا أي علامة) →
+            # 🟡 «عُبّئت — بانتظار تفعيل التخزين» كي يرى الموظف إشعارًا في الوضع الآمن. (علامة فقط، مرّة.)
+            if key and deal.mark != Mark.MATCHED:
+                await self._set_mark(deal, Mark.MATCHED)          # علامة فقط (يُبقي READY — لا كتابة مزدوجة)
+                await self._mark_pending(deal)                    # 🟡 على كل الرسائل
+                log.info("🟡 الصفقة %s عُبّئت والتخزين موقوف — بانتظار التفعيل", deal.deal_id)
         return deal
 
     async def _verify_and_record(self, deal: Deal, job: WriteJob) -> tuple[bool, Optional[str]]:

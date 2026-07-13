@@ -747,15 +747,17 @@ async def test_dry_run_marks_done_without_store_or_ledger(db):
     assert len(await db.deals.by_status(Status.COMPLETED)) == 0
     matched = await db.deals.by_status(Status.MATCHED)
     assert len(matched) == 1, "DRY_RUN يترك الصفقة MATCHED (بلا اكتمال)"
-    assert matched[0].mark == Mark.DONE, "علامة ✅ محفوظة (بلا حالة COMPLETED)"
+    # قاعدة المالك: DRY_RUN عُبّئ بلا تخزين → 🟡 «بانتظار» لا ✅ (✅ عند اليقين فقط)
+    assert matched[0].mark == Mark.MATCHED, "علامة 🟡 محفوظة (بلا حالة COMPLETED)"
     entries = await db.ledger.entries_for_deal(matched[0].deal_id)
     assert entries == [], "DRY_RUN لا يكتب دفترًا"
 
-    # لكن ✅ بصري وُضع على المركزية فقط (§8.3)
+    # 🟡 بصري وُضع على المركزية فقط (§8.3) — لا ✅ (لم يُخزَّن)
     outs = await db.outgoing.next_unsent(50)
     assert all(o["chat_jid"] in {CENTRAL, ADMIN} for o in outs)
-    done_reactions = [o for o in outs if o.get("reaction") == Mark.DONE.value and o["chat_jid"] == CENTRAL]
-    assert len(done_reactions) == 1, "✅ DRY_RUN مرّة واحدة على المركزية"
+    pending_reactions = [o for o in outs if o.get("reaction") == Mark.MATCHED.value and o["chat_jid"] == CENTRAL]
+    assert len(pending_reactions) >= 1, "🟡 DRY_RUN على المركزية"
+    assert not any(o.get("reaction") == Mark.DONE.value for o in outs), "لا ✅ في DRY_RUN"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
