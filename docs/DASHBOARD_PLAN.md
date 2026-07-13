@@ -181,7 +181,13 @@
 - **جديد:** `dashboard/stats.py` (تجميعات على `deals`/`ledger` — لا توجد أي إحصاءات اليوم).
 - **تعديل:** `dashboard/app.py` (`GET /stats`)، `dashboard/static/index.html` (لوحة صحة المدير).
 
-### المرحلة ٥ — الاتصال/QR + صحة MONEYADO (أكثر أطرافًا خارجية → متأخّرة)
+### المرحلة ٥ — الاتصال/QR + صحة MONEYADO — ✅ مكتملة ومدموجة
+**المُنجَز:** إضافة `GET /status`+`/qr` (قراءة فقط، بحارس `x-internal-token`) لخادم Node القائم
+(التقاط `latestQr` بلا لمس الالتقاط/الإرسال)؛ `core/writers/moneyado/health.py` (صحة نافذة قراءة
+فقط تعيد استخدام دوال `screens.py` بلا تعديلها)؛ توسيط `GET /connection` + `/moneyado/health`
+(reader) و`/connection/qr` (**المدير فقط** — QR حسّاس) مع تعامل رشيق عند تعذّر Node؛ صفحة
+`connect.html` (المدير) + بلاطتا اتصال/MONEYADO في لوحة صحة المدير. إجراءات الجلسة (restart/logout)
+مؤجّلة مسيَّجة. الميزات المتقدّمة (استعادة الجلسة/عدّاد QR/تذكير البروفايل) خارج نطاق بنيتنا الحالية.
 - **تعديل (إضافيّ):** `whatsapp/src/index.js` (+ `config.js`) — إضافة `GET /status` و`GET /qr` على خادم `127.0.0.1`، بلا لمس الالتقاط/الإرسال.
 - **جديد:** `core/writers/moneyado/health.py` (صحة النافذة قراءةً فقط، يعيد استخدام دوال `screens.py` بلا تعديلها).
 - **تعديل:** `dashboard/app.py` (توسيط `/connection`, `/connection/qr`, `/moneyado/health`)، `dashboard/static/connect.html`.

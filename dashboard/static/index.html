@@ -91,6 +91,7 @@
     <nav>
       <a href="/attention">الانتباه</a>
       <a href="/transfers">سجل الحوالات</a>
+      <a href="/connect">الاتصال</a>
       <a href="/" class="active">الرئيسية</a>
     </nav>
   </div>
@@ -113,6 +114,8 @@
       <div class="tile"><div class="tn" id="h_today_done">—</div><div class="tl">مكتملة اليوم</div></div>
       <div class="tile"><div class="tn ok" id="h_success">—</div><div class="tl">نسبة نجاح الأسبوع</div></div>
       <div class="tile"><div class="tn warn" id="h_attention">—</div><div class="tl">تحتاج انتباهًا الآن</div></div>
+      <div class="tile"><div class="tn" id="h_wa" style="font-size:18px">…</div><div class="tl">اتصال واتساب</div></div>
+      <div class="tile"><div class="tn" id="h_moneyado" style="font-size:18px">…</div><div class="tl">MONEYADO</div></div>
     </div>
     <div class="muted" id="h_amount" style="margin-top:10px"></div>
     <div class="muted" style="margin-top:16px;font-size:12.5px">اتجاه ٧ أيام (الإجمالي · المملوء = المكتملة)</div>
@@ -447,6 +450,24 @@ async function loadStats(){
   }).join("");
 }
 
+// ── بلاطتا الاتصال + MONEYADO في لوحة الصحة (م٥) ──
+async function loadConnHealth(){
+  try{ const c = await api("/connection");
+    const t=$("h_wa");
+    if(!c.available){ t.textContent="؟"; t.style.color="var(--muted)"; }
+    else if(c.connected){ t.textContent="متّصل"; t.style.color="var(--ok)"; }
+    else if(c.loggedOut){ t.textContent="خروج"; t.style.color="var(--warn)"; }
+    else { t.textContent="منقطع"; t.style.color="var(--warn)"; }
+  }catch(e){}
+  try{ const m = await api("/moneyado/health");
+    const t=$("h_moneyado");
+    const map={visible:["يعمل","var(--ok)"],not_visible:["نافذة مخفية","var(--warn)"],
+      not_running:["متوقّف","var(--warn)"],unknown_visibility:["؟","var(--muted)"],unavailable:["؟","var(--muted)"]};
+    const [lbl,col]=map[m.state]||[m.state,"var(--muted)"];
+    t.textContent=lbl; t.style.color=col;
+  }catch(e){}
+}
+
 // تحميل أولي
 $("assetSearch").addEventListener("input", applyAssetSearch);
 function refreshAll(){ loadControl(); loadRooms(); loadTreasuries(); loadSuppliers(); loadChannels(); loadEmployees(); }
@@ -478,10 +499,10 @@ async function boot() {
   if (ROLE === "data_entry") { document.body.classList.add("no-access"); return; }
 
   refreshAll();
-  if (canWrite()) { loadStats(); loadDetection(); }   // صحة المدير + محرّر الحدود (المدير فقط)
+  if (canWrite()) { loadStats(); loadConnHealth(); loadDetection(); }   // صحة المدير + محرّر الحدود (المدير فقط)
   setInterval(loadControl, 10000); // تحديث مؤشّر الحالة دوريًا
   setInterval(loadRooms, 30000);   // تحديث الغرف كل 30 ثانية (المطلوب)
-  if (canWrite()) setInterval(loadStats, 60000);   // تحديث الصحة كل دقيقة
+  if (canWrite()) { setInterval(loadStats, 60000); setInterval(loadConnHealth, 10000); }
 }
 boot();
 </script>

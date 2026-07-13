@@ -616,6 +616,46 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         """إحصاءات صحة اللوحة (م٤) — حجم اليوم/الأسبوع + اتجاه ٧ أيام + عدّاد الانتباه. قراءة فقط."""
         return await stats.compute_stats(db, utcnow())
 
+    # ── الاتصال + صحة MONEYADO (م٥) — قراءة فقط ───────────────────────────────
+    # توسيط قراءة حالة/QR من خدمة Node (127.0.0.1 + X-Internal-Token). معلومة واردة فقط؛
+    # 🔴 لا يُرسل الداشبورد أي رسالة عبر Node (عزلة الإرسال تبقى: التنبيهات عبر طابور outgoing).
+    async def _bridge_get(path: str) -> dict:
+        import httpx
+        url = f"{settings.whatsapp_bridge_url.rstrip('/')}{path}"
+        headers = {"X-Internal-Token": settings.internal_token} if settings.internal_token else {}
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            r = await client.get(url, headers=headers)
+            r.raise_for_status()
+            return r.json()
+
+    @router.get("/connection", dependencies=[reader])
+    async def connection_status() -> dict:
+        """حالة اتصال واتساب (من خدمة Node). تعامل رشيق عند تعذّر الوصول (لا 500)."""
+        try:
+            data = await _bridge_get("/status")
+            return {"available": True, **data}
+        except Exception as exc:  # T5 — Node متوقّفة/غير مهيّأة → متاح=false بلا كسر
+            log.info("تعذّر قراءة حالة اتصال Node: %s", exc)
+            return {"available": False, "connected": False,
+                    "detail": "تعذّر الاتصال بخدمة واتساب"}
+
+    @router.get("/connection/qr", dependencies=[manager])
+    async def connection_qr() -> dict:
+        """سلسلة QR للربط (المدير فقط — حسّاسة: مسحها يربط جلسة واتساب)."""
+        try:
+            data = await _bridge_get("/qr")
+            return {"available": True, "qr": data.get("qr"),
+                    "connected": data.get("connected", False)}
+        except Exception as exc:  # T5
+            log.info("تعذّر قراءة QR من Node: %s", exc)
+            return {"available": False, "qr": None, "detail": "تعذّر الاتصال بخدمة واتساب"}
+
+    @router.get("/moneyado/health", dependencies=[reader])
+    async def moneyado_health_endpoint() -> dict:
+        """صحة نافذة MONEYADO (قراءة فقط) — يميّز غير مشغّل/غير مرئي/مرئي (§11.3)."""
+        from core.writers.moneyado.health import moneyado_health
+        return moneyado_health()
+
     # ── إعداد كشف الاحتيال (م٢) — عرض للقارئ، تعديل للمدير فقط ─────────────────
     @router.get("/settings/detection", dependencies=[reader])
     async def get_detection() -> dict:
@@ -697,6 +737,11 @@ def create_app(db: Database, settings: Optional[Settings] = None) -> FastAPI:
     async def transfers_page() -> FileResponse:
         """سجل الحوالات (لوحة V2 م١)."""
         return FileResponse(str(STATIC_DIR / "transfers.html"))
+
+    @app.get("/connect")
+    async def connect_page() -> FileResponse:
+        """صفحة الاتصال + QR + صحة MONEYADO (لوحة V2 م٥) — البوّابة في الواجهة/الـ API."""
+        return FileResponse(str(STATIC_DIR / "connect.html"))
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

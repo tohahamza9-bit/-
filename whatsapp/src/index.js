@@ -103,6 +103,7 @@ async function main() {
   let healthTimer = null;       // مؤقّت نبضة الصحّة (يُنظَّف عند الإغلاق)
   let loggedOut = false;        // 401 — الجلسة مسجّلة خروجًا: نبضة الصحّة **لا** تعيد الاتصال (تنبيه فقط)
   let lastLoggedOutAlertAt = 0; // خنق تنبيه loggedOut الدوريّ (كل ~5د لا كل نبضة)
+  let latestQr = null;          // لوحة V2 م٥: آخر سلسلة QR للعرض (قراءة فقط عبر GET /qr) — تُمسح عند الاتصال
   let botJid = state.creds?.me?.id || '';
   const getBotJid = () => botJid;
 
@@ -186,11 +187,13 @@ async function main() {
         }
         logger.info('امسح رمز QR (محاولة %d/%d):', breaker.qrCount, breaker.maxQr);
         qrcode.generate(qr, { small: true });
+        latestQr = qr;                  // م٥: أتِح السلسلة للعرض في اللوحة (قراءة فقط)
       }
       if (connection === 'open') {
         breaker.onConnectionOpen();
         connected = true;
         everConnected = true;
+        latestQr = null;                // م٥: اتّصل → لا حاجة لـ QR
         loggedOut = false;              // اتصال ناجح (إعادة ربط) → أطفئ علم الخروج
         lastConnectedAt = Date.now();   // مرجع نبضة الصحّة (آخر اتصال حيّ)
         botJid = sock.user?.id || botJid;
@@ -255,19 +258,32 @@ async function main() {
   // بلا انتظار polling. محصور على 127.0.0.1 (محلّي فقط)؛ فحص X-Internal-Token إن ضُبط.
   // حارس التزامن في sender.tick يمنع تشابك هذه الجولة مع الجولة الدورية (لا إرسال مزدوج).
   const flushServer = http.createServer((req, res) => {
+    const authed = !cfg.internalToken || req.headers['x-internal-token'] === cfg.internalToken;
     if (req.method === 'POST' && req.url === '/flush') {
-      if (cfg.internalToken && req.headers['x-internal-token'] !== cfg.internalToken) {
-        res.writeHead(403); res.end('forbidden'); return;
-      }
+      if (!authed) { res.writeHead(403); res.end('forbidden'); return; }
       res.writeHead(200); res.end('ok');
       sender.tick().catch((e) => logger.error({ err: e }, 'خطأ في tick عبر /flush')); // T5
+      return;
+    }
+    // لوحة V2 م٥: قراءة فقط لحالة الاتصال + QR (محلّي 127.0.0.1 + حارس التوكن).
+    // لا يمسّ الالتقاط/الإرسال/القائمة البيضاء — معلومة واردة فقط يوسّطها الداشبورد للعرض.
+    if (req.method === 'GET' && req.url === '/status') {
+      if (!authed) { res.writeHead(403); res.end('forbidden'); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ connected, everConnected, loggedOut, lastConnectedAt, botJid }));
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/qr') {
+      if (!authed) { res.writeHead(403); res.end('forbidden'); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ qr: latestQr, connected }));
       return;
     }
     res.writeHead(404); res.end('not found');
   });
   flushServer.on('error', (e) => logger.error({ err: e }, '🔴 تعذّر تشغيل خادم /flush — polling fallback')); // T5
   flushServer.listen(cfg.flushPort, '127.0.0.1', () =>
-    logger.info('خادم الإشعار الفوري يعمل على 127.0.0.1:%d (POST /flush)', cfg.flushPort));
+    logger.info('خادم محلّي على 127.0.0.1:%d (POST /flush · GET /status · GET /qr)', cfg.flushPort));
 
   // 🩺 نبضة صحّة كل 30s (§14.1):
   //  (أ) حارس ذاكرة — **تسجيل فقط** عند RSS>500MB، بلا إعادة تشغيل تلقائيّة (قرار المستخدم).

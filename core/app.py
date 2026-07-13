@@ -267,6 +267,12 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         html = ROOT / "dashboard" / "static" / "transfers.html"
         return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
 
+    @app.get("/connect")
+    async def connect_page():  # noqa: ANN201
+        """صفحة الاتصال + QR + صحة MONEYADO (لوحة V2 م٥)."""
+        html = ROOT / "dashboard" / "static" / "connect.html"
+        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+
     return app
 
 
