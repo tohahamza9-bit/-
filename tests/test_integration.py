@@ -157,6 +157,29 @@ async def test_synthesize_buy_leg_for_sell_and_buy_with_supplier(db):
     assert deal.sell_leg.amount == 20271 and deal.sell_leg.commission is None
 
 
+async def test_resolve_two_leg_both_net_no_commission(db):
+    """🔴 المسار A المباشر (_resolve_two_leg، طرفان بشراء صريح موجود): قاعدة الطرفين → كلا القيدين
+    بالصافي (NET) بلا عمولة — يوثّق المسار A مباشرةً (نظير المسار B أعلاه)."""
+    from core.constants import Currency
+    from core.models import Deal, TreasuryRef
+    pipe = _make_pipeline(db)
+    treas = TreasuryRef(code="90", name="خصم 1%", type=TreasuryType.SELL_AND_BUY, currency=Currency.EGP)
+    # بيع GROSS=1010/NET=1000/عمولة-10، شراء مورد صريح NET=1000 — كلاهما بخزينة محسومة (يُتخطّى الإسناد)
+    sell = ParsedLeg(operation=OperationType.SELL, customer_code="570", amount=1010.0,
+                     amount_after_discount=1000.0, commission=-10.0, currency=Currency.EGP,
+                     price_normalized="5.9", treasury=treas)
+    buy = ParsedLeg(operation=OperationType.BUY, customer_code="760", amount=1000.0,
+                    currency=Currency.EGP, is_supplier_counterpart=True,
+                    price_normalized="5.86", treasury=treas)
+    deal = Deal(deal_id="d-2leg-A", status=Status.PARSED, sell_leg=sell, buy_leg=buy,
+                is_two_legged=True, created_at=PAST, updated_at=PAST)
+
+    await pipe._resolve_two_leg(deal)
+
+    assert deal.sell_leg.amount == 1000.0 and deal.sell_leg.commission is None
+    assert deal.buy_leg.amount == 1000.0 and deal.buy_leg.commission is None
+
+
 async def test_synthesize_buy_leg_uses_supplier_code_and_rate(db):
     # SI مع مورد: طرف الشراء المشتقّ = كود المورد + سعر المورد (لا نسخة صرفة من البيع)
     from core.constants import OperationType
