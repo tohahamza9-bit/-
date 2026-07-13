@@ -475,6 +475,11 @@ class QueueService:
         if leg is not None and is_treasury_second_reply(leg):
             sell = deal.sell_leg
             if sell is not None:
+                # 🔴 (إصلاح ٢) سجّل مفتاح الرسالة الثانية قبل الدمج — كي يضيفه _merge_discount إلى
+                #    source_message_keys. بدونه تفقد كل حوالة خصم تكتمل عبر خانة المُرسِل مفتاح رسالتها
+                #    الثانية، فيفشل إلغاؤها/تعديلها بالرد عليها بـ«لم يُعثر» (A9030/A9062/A9079).
+                if not leg.source_message_key:
+                    leg.source_message_key = raw.message_key
                 pair = discount_pair(sell, leg)
                 if pair is not None:
                     merged = await self._merge_discount(deal, pair[0], pair[1], now)
