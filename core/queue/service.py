@@ -402,13 +402,16 @@ class QueueService:
                 log.info("صفقة %s: رسالة ثانية بخزينة «%s» (نفس الرقم %s) → أُكملت الخزينة",
                          deal.deal_id, leg.treasury.name, ref)
                 return deal
-        # لا صفقة معلّقة بنفس الرقم — خزينة-فقط (بلا مبلغ) وصلت قبل الأولى → احفظها ردًّا معلّقًا (Fix 2)
-        if leg.amount is None:
-            await self.db.pending_replies.add(
-                message_key=raw.message_key, chat_jid=raw.chat_jid, leg=leg, received_at=now,
-            )
-            log.info("رد خزينة بنفس الرقم %s بلا صفقة معلّقة — حُفِظ ردًّا معلّقًا (%ss، سيُربَط لاحقًا)",
-                     ref, PENDING_REPLY_MAX_SECONDS)
+        # لا صفقة معلّقة بنفس الرقم — رسالة ثانية بمرجع صريح وصلت قبل أُولاها → احفظها ردًّا معلّقًا
+        #   **بمرجعها** ريثما تصل الأولى (Fix 1ب). يشمل الآن **تسوية الخصم** (تحمل مبلغًا بعد الخصم)،
+        #   لا الخزينة-فقط فحسب — كانت تسوية الخصم تسقط سابقًا فتصير صفقة headless تبتلع هويةً أجنبية
+        #   (حادثة A9078). المفتاح مضبوط (سطر 384-385)؛ عند وصول الأولى يسحبها _pull_pending_reply
+        #   بالمرجع فيُحتسَب الخصم. إن لم تصل خلال المهلة → تصعيد ⚠️ (sweep_expired) لا هدرزة صامتة.
+        await self.db.pending_replies.add(
+            message_key=raw.message_key, chat_jid=raw.chat_jid, leg=leg, received_at=now,
+        )
+        log.info("رسالة ثانية بمرجع %s (خزينة/تسوية) بلا صفقة معلّقة — حُفِظت ردًّا معلّقًا (%ss، تُربَط بأُولاها)",
+                 ref, PENDING_REPLY_MAX_SECONDS)
         return None
 
     async def waiting_candidates_for_second(
@@ -700,31 +703,48 @@ class QueueService:
         leg0 = deal.sell_leg or deal.buy_leg
         ref = _norm_ref(leg0.reference_number) if leg0 is not None else ""
         sender = self._leg_sender(deal)
-        # الطبقة ١: ردّ معلّق بمرجع الصفقة نفسه (أولوية قصوى، بلا قرب)
-        doc = await self.db.pending_replies.find_by_reference(chat_jid, ref, now, PENDING_REPLY_MAX_SECONDS) if ref else None
-        # الطبقة ٢: ردّ معلّق عديم‑مرجع لنفس المُرسِل (FIFO) — يُقبَل فقط إن كان هدفًا صالحًا للصفقة
-        #   (frag يحمل هوية → لصفقة بلا كود؛ frag خزينة فقط → لصفقة تنتظر خزينة). يمنع سحب هوية خاطئة.
+        # الطبقة ١: ردّ معلّق بمرجع الصفقة نفسه (أولوية قصوى، بلا قرب) — **استحواذ ذرّي** (claim)
+        #   يمنع أخذ صفقتين لنفس الرد تحت الضغط (Fix 1أ). فشل الحجز = محجوز لأخرى → لا يُعتبر «موجودًا».
+        doc = await self.db.pending_replies.claim_by_reference(
+            chat_jid, ref, now, PENDING_REPLY_MAX_SECONDS) if ref else None
+        via_ref = doc is not None
+        # الطبقة ٢: ردّ معلّق عديم‑مرجع لنفس المُرسِل (FIFO، استحواذ ذرّي) — يُقبَل فقط إن كان هدفًا
+        #   صالحًا للصفقة (frag يحمل هوية → لصفقة بلا كود؛ خزينة فقط → لصفقة تنتظر خزينة). غير ذلك يُطلَق سراحه.
         if doc is None:
-            cand = await self.db.pending_replies.find_fifo_for_sender(
+            cand = await self.db.pending_replies.claim_fifo_for_sender(
                 chat_jid, sender, now, PENDING_REPLY_MAX_SECONDS)
-            if cand is not None and self._fragment_targets(deal, ParsedLeg(**cand["leg"])):
-                doc = cand
+            if cand is not None:
+                if self._fragment_targets(deal, ParsedLeg(**cand["leg"])):
+                    doc = cand
+                else:
+                    await self.db.pending_replies.release(cand.get("message_key"))
         if doc is None:
             return False
         frag = ParsedLeg(**doc["leg"])
+        mk = doc.get("message_key")
+        if mk and not frag.source_message_key:
+            frag.source_message_key = mk
         # 🔴 شرط العملة (§4.1): رد معلّق بعملة معروفة (من خزينته أو **سعره** 35→TND/5.90→EGP) لا
-        #    يُسحَب إلى صفقة بعملة مختلفة — يمنع تلوّث حادثة A8755(TND)↔A8756(EGP): رد تونسي (فتحي/
-        #    سعر 35) كان يُدمَج في صفقة مصرية عبر هذا المسار (لا يمرّ بـfragment_link_candidates).
+        #    يُسحَب إلى صفقة بعملة مختلفة — يمنع تلوّث حادثة A8755(TND)↔A8756(EGP). فشل التوافق بعد
+        #    الحجز الذرّي → إطلاق سراح الرد (يبقى متاحًا لصفقة أصحّ) بدل ابتلاعه/ضياعه.
         frag_cur = self._leg_currency(frag) or self._currency_from_price(frag.price_raw)
         if not self._currency_compatible(deal, frag_cur):
+            await self.db.pending_replies.release(mk)
             return False
+        # 🔴 تسوية خصم بمرجع صريح (شكل جديد A9078): الرد المعلّق يحمل خزينة + مبلغ بعد الخصم بنفس مرجع
+        #    الصفقة ذات الهوية → يُدمَج خصمًا (discount_pair→_merge_discount) فيُحتسَب المبلغ بعد الخصم
+        #    والعمولة — لا مجرّد إكمال خزينة (_apply_fragment) الذي كان يُضيّع الخصم (Fix 1ب).
+        pair = discount_pair(deal.sell_leg, frag) if (via_ref and deal.sell_leg is not None) else None
+        if pair is not None:
+            await self._merge_discount(deal, pair[0], pair[1], now)   # يضيف مفتاحي الرسالتين ويُخزّن
+            log.info("رُبط الرد المعلّق %s بالصفقة الجديدة %s (تسوية خصم بمرجع)", mk, deal.deal_id)
+            return True
         self._apply_fragment(deal, frag)
         deal.status = Status.PARSED
         deal.waiting_deadline = None
-        mk = doc.get("message_key")
         if mk and mk not in deal.source_message_keys:
             deal.source_message_keys.append(mk)
-        await self.db.pending_replies.consume(mk)
+        await self.db.deals.upsert(deal)
         log.info("رُبط الرد المعلّق %s بالصفقة الجديدة %s", mk, deal.deal_id)
         return True
 

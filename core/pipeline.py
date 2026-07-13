@@ -392,8 +392,10 @@ class Pipeline:
             completed = await self.queue.try_absorb_treasury_second(result.leg, raw, now)
             if completed is not None:
                 return completed   # المعالجة مؤجَّلة لفرز الدفعة بـ first_received_at (§7.3)
-            if is_treasury_only_reply(result.leg):
-                # وصلت الخزينة قبل الأولى → حُفِظت ردًّا معلّقًا (§7.3) — لا هدرزة، ستُربَط عند وصول الأولى.
+            if is_treasury_second_reply(result.leg):
+                # رسالة ثانية بمرجع صريح (خزينة عادية أو تسوية خصم) لم تجد صفقتها → حُفِظت ردًّا معلّقًا
+                #   بمرجعها (Fix 1ب) — لا تُنشأ صفقة headless تبتلع هويةً أجنبية (A9078). تُربَط عند
+                #   وصول أُولاها، أو تُصعَّد ⚠️ إن انتهت المهلة (sweep_expired).
                 return None
 
         if result.kind == "noise":
@@ -516,9 +518,16 @@ class Pipeline:
     # ═════════════════════════════════════════════════════════════════════════
     async def tick(self, now: datetime) -> None:
         """نبضة دورية: تصعيد المتأخّر (§7.3)، تذكير/تصعيد المطابقة (§8.1)، ومعالجة الجاهز."""
-        # ردود خزينة/مورد معلّقة تجاوزت المهلة بلا حوالة تطابقها → تُسقَط كهدرزة (§7.3)
+        # ردود خزينة/مورد معلّقة تجاوزت المهلة بلا حوالة تطابقها → تُسقَط (§7.3). الردود **ذات المرجع**
+        #   المنتهية = رسالة ثانية بمرجع صريح لم تصل أُولاها → تصعيد ⚠️ للمركزية لا هدرزة صامتة (Fix 1ب).
         from .constants import PENDING_REPLY_MAX_SECONDS
-        await self.db.pending_replies.sweep_expired(now, PENDING_REPLY_MAX_SECONDS)
+        for exp in await self.db.pending_replies.sweep_expired(now, PENDING_REPLY_MAX_SECONDS):
+            await self.bus.reply_central(
+                f"⚠️ {exp['reference_number']} — وصلت رسالة ثانية (خزينة/تسوية) بلا رسالتها الأولى "
+                f"خلال المهلة؛ لم تُربَط. مراجعة يدوية.",
+                exp.get("message_key"), is_alert=True,
+            )
+            log.warning("رد معلّق بمرجع %s تجاوز المهلة بلا رسالته الأولى → تصعيد ⚠️", exp["reference_number"])
 
         # حوالة A ناقصة (رسالة أولى بلا رسالة ثانية §7.3، قرار المستخدم):
         #   90s → تنبيه خفيف في المركزية (تبقى منتظِرة)؛ 15 دقيقة → تصعيد لغرفة المسؤول.

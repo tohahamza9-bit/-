@@ -534,20 +534,82 @@ class PendingReplyRepo(_Repo):
             return d
         return None
 
+    async def _try_claim(self, doc_id: Any) -> bool:
+        """حجز ذرّي لوثيقة بعينها: consumed=false → true بشرط أنها لم تُحجَز بعد (findOneAndUpdate
+        عبر update_one المشروط). يُرجع True إن فاز هذا الاستدعاء بالحجز، False إن سبقه غيره (سباق)."""
+        res = await self.col.update_one(
+            {"_id": doc_id, "consumed": False}, {"$set": {"consumed": True}}
+        )
+        return res.modified_count == 1
+
+    async def claim_by_reference(self, chat_jid: str, ref: str, now: datetime,
+                                 within_seconds: int) -> Optional[dict]:
+        """الطبقة ١ (استحواذ ذرّي §7.3): يختار **الأقدم** غير المحجوز بنفس المرجع ويحجزه بعملية
+        ذرّية واحدة (consumed=true) — يمنع أخذ صفقتين لنفس الرد تحت الضغط. يُرجع الوثيقة المحجوزة أو
+        None (لا مطابق/سبقه غيره). المطابقة/الحجز في نفس المسح؛ عند خسارة السباق يجرّب التالي."""
+        if not ref:
+            return None
+        nref = re.sub(r"\s+", "", ref).upper()
+        horizon = _naive_utc(now) - timedelta(seconds=within_seconds)
+        cur = self.col.find({"chat_jid": chat_jid, "consumed": False}).sort("received_at", 1)
+        async for d in cur:
+            if _naive_utc(d["received_at"]) < horizon:
+                continue
+            pref = re.sub(r"\s+", "", (d.get("leg") or {}).get("reference_number") or "").upper()
+            if pref and pref == nref and await self._try_claim(d["_id"]):
+                d.pop("_id", None)
+                d["consumed"] = True
+                return d
+        return None
+
+    async def claim_fifo_for_sender(self, chat_jid: str, sender_jid: Optional[str], now: datetime,
+                                    within_seconds: int) -> Optional[dict]:
+        """الطبقة ٢ (استحواذ ذرّي FIFO §7.3): **أقدم** ردّ عديم‑مرجع لنفس المُرسِل، يُحجَز ذرّيًّا في
+        نفس المسح — أول فتح أول قفل بلا سباق. يُرجع الوثيقة المحجوزة أو None."""
+        horizon = _naive_utc(now) - timedelta(seconds=within_seconds)
+        cur = self.col.find({"chat_jid": chat_jid, "consumed": False}).sort("received_at", 1)
+        async for d in cur:
+            if _naive_utc(d["received_at"]) < horizon:
+                continue
+            leg = d.get("leg") or {}
+            if (leg.get("reference_number") or "").strip():
+                continue                                   # ذو مرجع → للطبقة ١ لا FIFO
+            psender = leg.get("sender_jid")
+            if sender_jid and psender and psender != sender_jid:
+                continue                                   # مُرسِل مختلف → تخطَّ
+            if await self._try_claim(d["_id"]):
+                d.pop("_id", None)
+                d["consumed"] = True
+                return d
+        return None
+
+    async def release(self, message_key: str) -> None:
+        """إطلاق سراح حجزٍ سابق (consumed=false): يُستدعى إن فشل التحقّق بعد الحجز الذرّي (هدف/عملة
+        غير متوافقة) فتبقى متاحةً لصفقة أصحّ بدل ضياعها."""
+        await self.col.update_one({"message_key": message_key}, {"$set": {"consumed": False}})
+
     async def consume(self, message_key: str) -> None:
         await self.col.update_one({"message_key": message_key}, {"$set": {"consumed": True}})
 
-    async def sweep_expired(self, now: datetime, ttl_seconds: int) -> int:
-        """الردود المعلّقة التي تجاوزت المهلة بلا حوالة → تُسقَط (هدرزة). يُرجع العدد المُسقَط."""
+    async def sweep_expired(self, now: datetime, ttl_seconds: int) -> list[dict]:
+        """الردود المعلّقة التي تجاوزت المهلة بلا حوالة → تُسقَط. **الردود ذات المرجع** المنتهية تُرجَع
+        للتصعيد (⚠️): رسالة ثانية بمرجع صريح لم تصل أُولاها = فشل ربط يستوجب تنبيهًا لا هدرزةً صامتة
+        (Fix 1ب). الردود عديمة‑المرجع («بلس» شاردة) تبقى هدرزةً صامتة. يُرجع قائمة المنتهية ذات المرجع."""
         horizon = _naive_utc(now) - timedelta(seconds=ttl_seconds)
-        dropped = 0
+        expired_refd: list[dict] = []
         async for d in self.col.find({"consumed": False}):
             if _naive_utc(d["received_at"]) < horizon:
                 await self.col.update_one({"_id": d["_id"]}, {"$set": {"consumed": True}})
-                log.info("رد معلّق %s تجاوز %ss بلا حوالة → أُسقِط كهدرزة",
-                         d.get("message_key"), ttl_seconds)
-                dropped += 1
-        return dropped
+                ref = ((d.get("leg") or {}).get("reference_number") or "").strip()
+                if ref:
+                    log.warning("رد معلّق بمرجع %s (%s) تجاوز %ss بلا وصول رسالته الأولى → تصعيد ⚠️",
+                                ref, d.get("message_key"), ttl_seconds)
+                    expired_refd.append({"reference_number": ref, "message_key": d.get("message_key"),
+                                         "chat_jid": d.get("chat_jid")})
+                else:
+                    log.info("رد معلّق %s تجاوز %ss بلا حوالة → أُسقِط كهدرزة",
+                             d.get("message_key"), ttl_seconds)
+        return expired_refd
 
 
 # ─────────────────────────────────────────────────────────────────────────────
