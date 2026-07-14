@@ -214,12 +214,41 @@ class MatchingService:
             return True
         supplier_rooms = await self._resolve_rooms(RoomType.SUPPLIER, [])
         if not supplier_rooms:
+            # خيار (ب) — قرار المالك (X542): وضع التلقائي (auto_trust) + مورّد **معروف بالـDB**
+            #   (مسجَّل بكود) → قبول مباشر بلا غرفة مورد (المورّد المسجَّل موثوق، لا يلزم غرفته).
+            #   الخزائن **لا** تتأثّر (مسارها المنفصل _match_treasury_room). بلا auto_trust أو مورّد
+            #   مجهول → السلوك كما هو (اعتماد يدوي «تم» ثم تصعيد).
+            if await self._auto_trust_known_supplier(deal, buy):
+                deal.supplier_no_room = False
+                return True
             deal.supplier_no_room = True
             log.info("صفقة الطرفين %s بلا غرفة مورد مضافة → اعتماد يدوي («تم») مطلوب (§8)",
                      deal.deal_id)
             return False
         deal.supplier_no_room = False
         return await self.find_room_match_by_ref(deal, buy, supplier_rooms)
+
+    async def _auto_trust_known_supplier(self, deal: Deal, buy: ParsedLeg) -> bool:
+        """خيار (ب): الوضع التلقائي مفعَّل **و** المورّد (طرف الشراء) مسجَّل بالـDB بكود؟
+        (يخصّ الموردين فقط — الخزائن مسارها منفصل.) الأخطاء → False (تحفّظ: لا تخطٍّ بلا يقين)."""
+        try:
+            control = await self._db.control.get()
+            if not getattr(control, "auto_trust", False):
+                return False
+            code = (buy.customer_code
+                    or (buy.supplier.code if buy.supplier else None)
+                    or (deal.sell_leg.supplier.code
+                        if deal.sell_leg and deal.sell_leg.supplier else None))
+            if not code:
+                return False
+            known = await self._db.suppliers.col.find_one({"code": code}) is not None
+            if known:
+                log.info("auto_trust + مورّد معروف بالـDB (كود %s) → قبول بلا غرفة مورد (§8، خيار ب).",
+                         code)
+            return known
+        except Exception as exc:  # T5: لا تخطٍّ صامت بلا يقين
+            log.warning("فحص auto_trust/مورّد للصفقة %s فشل — لا تخطٍّ (§0): %s", deal.deal_id, exc)
+            return False
 
     async def find_room_match_by_ref(
         self, deal: Deal, leg: ParsedLeg, room_jids: list[str]

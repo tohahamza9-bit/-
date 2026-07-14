@@ -405,6 +405,26 @@ def _make_two_legged(**kw) -> Deal:
     return make_deal(sell, buy_leg=buy, is_two_legged=True, deal_id="d2l", **kw)
 
 
+async def test_auto_trust_known_supplier_skips_supplier_room(db):
+    """خيار (ب) — X542: auto_trust + مورّد **مسجَّل بالـDB** → قبول طرف الشراء بلا غرفة مورد.
+    بلا auto_trust أو مورّد مجهول → supplier_no_room (اعتماد يدوي «تم») كما هو (لا تخطٍّ بلا يقين)."""
+    from core.models import BotControl, SupplierRecord
+    svc = MatchingService(db, make_bus(db), customer_room_jids=[])
+    await db.suppliers.upsert(SupplierRecord(code="760", name="طه", active=True))  # مورّد مسجَّل
+
+    await db.control.set(BotControl(auto_trust=False, state="running"), "test")     # مطفأ
+    d = _make_two_legged()
+    assert await svc._match_supplier_room(d) is False and d.supplier_no_room is True
+
+    await db.control.set(BotControl(auto_trust=True, state="running"), "test")      # مفعَّل + مسجَّل
+    d = _make_two_legged()
+    assert await svc._match_supplier_room(d) is True and d.supplier_no_room is False
+
+    d = _make_two_legged()                                                         # مفعَّل + مجهول
+    d.buy_leg.supplier = SupplierRef(code="999", name="مجهول")
+    assert await svc._match_supplier_room(d) is False and d.supplier_no_room is True
+
+
 async def test_two_legged_no_supplier_room_needs_manual_confirm(db):
     # صفقة طرفين وزبون+خزينة موجودان لكن لا غرفة مورد مضافة → لا اعتماد تلقائي؛ «تم» يدوي (§8).
     bus = make_bus(db)
