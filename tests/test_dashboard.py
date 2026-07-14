@@ -435,6 +435,39 @@ async def test_edit_treasury_updates_aliases_currency_and_alerts(db):
     assert any("بلاس فون" in (m.get("text") or "") for m in await _alerts(db)), "تنبيه is_alert للمالك"
 
 
+async def test_push_treasury_alias_appends_and_dedupes(db):
+    """زر «إضافة» (push): يُلحِق إملاءً واحدًا لمكدّس aliases بلا إعادة إرسال كل الحقول، بلا تكرار."""
+    pytest.importorskip("fastapi")
+    await db.treasuries.upsert(
+        TreasuryRecord(name="بلاس فون", code="74", type=TreasuryType.SELL_ONLY, aliases=["بلاس"]))
+    async with _client(db, settings=_admin_settings()) as ac:
+        r = await ac.post("/api/treasuries/بلاس فون/aliases", json={"alias": "بلاصو"})
+        assert r.status_code == 200 and r.json()["aliases"] == ["بلاس", "بلاصو"]
+        r2 = await ac.post("/api/treasuries/بلاس فون/aliases", json={"alias": "بلاصو"})  # مكرّر
+        assert r2.json()["aliases"] == ["بلاس", "بلاصو"], "لا تكرار ($addToSet)"
+        r3 = await ac.post("/api/treasuries/بلاس فون/aliases", json={"alias": "  بلس  "})  # يُشذّب
+        assert r3.json()["aliases"] == ["بلاس", "بلاصو", "بلس"]
+    doc = await db.treasuries.col.find_one({"name": "بلاس فون"})
+    assert doc["aliases"] == ["بلاس", "بلاصو", "بلس"]
+    assert any("بلاس فون" in (m.get("text") or "") for m in await _alerts(db)), "تنبيه للمالك"
+
+
+async def test_push_treasury_alias_unknown_404(db):
+    pytest.importorskip("fastapi")
+    async with _client(db) as ac:
+        r = await ac.post("/api/treasuries/لا-توجد/aliases", json={"alias": "x"})
+        assert r.status_code == 404
+
+
+async def test_push_treasury_alias_reviewer_forbidden(db):
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    await db.treasuries.upsert(TreasuryRecord(name="بلاس فون", code="74", type=TreasuryType.SELL_ONLY))
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        r = await ac.post("/api/treasuries/بلاس فون/aliases", json={"alias": "x"})
+        assert r.status_code == 403, "reviewer يرى لكن لا يضيف إملاءً"
+
+
 async def test_edit_treasury_reviewer_forbidden(db):
     pytest.importorskip("fastapi")
     from core.constants import Role

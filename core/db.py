@@ -348,6 +348,12 @@ class TreasuryListRepo(_Repo):
     async def upsert(self, rec: TreasuryRecord) -> None:
         await self.col.update_one({"name": rec.name}, {"$set": self._dump(rec)}, upsert=True)
 
+    async def add_alias(self, name: str, alias: str) -> bool:
+        """يُلحِق إملاءً بديلاً (push) لمكدّس aliases الخزينة بلا تكرار ($addToSet). حيّ فورًا
+        (all_active يقرؤه لكل رسالة بلا إعادة تشغيل §4.5). يُرجِع False إن لم تُوجد الخزينة بالاسم."""
+        res = await self.col.update_one({"name": name}, {"$addToSet": {"aliases": alias}})
+        return res.matched_count > 0
+
     async def all_active(self) -> list[TreasuryRecord]:
         cur = self.col.find({"active": True})
         return [TreasuryRecord(**d) async for d in cur]

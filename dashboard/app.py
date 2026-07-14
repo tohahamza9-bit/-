@@ -96,6 +96,11 @@ class UnknownTermAssignIn(BaseModel):
     target_code: str = Field(..., min_length=1)
 
 
+class AliasPushIn(BaseModel):
+    """إملاء بديل واحد يُلحَق (push) لمكدّس aliases الخزينة."""
+    alias: str = Field(..., min_length=1)
+
+
 class RoomClassifyIn(BaseModel):
     """تصنيف غرفة مكتشَفة. 🔴 لا يغيّر حدود الكتابة (المركزية/المسؤول من env فقط)."""
     type: RoomType
@@ -384,6 +389,21 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         log.info("تعديل خزينة: %s", name)
         await _notify_owner(_owner_text("خزينة", "تعديل", rec.name, rec.code))
         return rec.model_dump(mode="json")
+
+    @router.post("/treasuries/{name}/aliases", dependencies=[manager])
+    async def push_treasury_alias(name: str, body: AliasPushIn) -> dict:
+        """يُلحِق إملاءً بديلاً واحدًا (push) لمكدّس aliases الخزينة — بلا تكرار، حيّ فورًا (§4.5).
+
+        بديلٌ سريع للتعديل inline الكامل: يُضيف إملاءً واحدًا دون إعادة إرسال كل الحقول."""
+        alias = body.alias.strip()
+        if not alias:
+            raise HTTPException(status_code=400, detail="إملاء فارغ")
+        if not await db.treasuries.add_alias(name, alias):
+            raise HTTPException(status_code=404, detail=f"خزينة غير موجودة: {name}")
+        doc = await db.treasuries.col.find_one({"name": name})
+        log.info("push إملاء «%s» للخزينة %s", alias, name)
+        await _notify_owner(_owner_text("خزينة", f"إضافة إملاء «{alias}»", name))
+        return {"name": name, "aliases": list(doc.get("aliases") or [])}
 
     @router.post("/treasuries/{name}/disable", dependencies=[manager])
     async def disable_treasury(name: str) -> dict:
