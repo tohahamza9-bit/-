@@ -293,6 +293,69 @@ async def test_cancel_without_reply_rejected(db):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# X515 — «الغاء» منفصلة بلا Reply: تُتجاهَل مع رد توجيهيّ، لا تُسقط أيّ حوالة قائمة
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_cancel_without_reply_ignored_does_not_drop_existing(db):
+    """رسالة «الغاء» منفصلة بلا Reply → رد توجيهيّ فقط، ولا تمسّ حوالة X515 القائمة (م: X515)."""
+    await _enable_storage(db)
+    pipe = _pipeline(db)
+    await _seed_completed(db, deal_id="dX515",
+                          sell=_sell_leg(ref="X515", code="1208", amount=600.0),
+                          src_keys=["x515-orig"])
+
+    await pipe.capture(RawMessage(message_key="canc-noreply", chat_jid=CENTRAL, sender_jid=EMP,
+                                  text="الغاء", reply_to_key=None,
+                                  received_at=NOW + timedelta(seconds=20)))
+    await pipe.process_inbox(NOW + timedelta(seconds=22))
+
+    d = await db.deals.get("dX515")
+    assert d is not None and d.status == Status.COMPLETED and d.cancelled_at is None  # لم تُسقَط/تُلغَ
+    assert any(cid == CENTRAL and "الإلغاء يتطلب الرد (Reply)" in t
+               for cid, t in await _texts(db))                # رد توجيهيّ صريح
+
+
+async def test_cancel_with_reply_still_intercepted(db):
+    """«الغاء» **مع** Reply → تُعترَض وتُنفَّذ إلغاءً (سلوك حالي محفوظ) عبر process_inbox."""
+    await _enable_storage(db)
+    writer = _RecWriter()
+    pipe = _pipeline(db, writer)
+    await _seed_completed(db)                                  # صفقة d1، src=orig
+
+    await pipe.capture(_cancel_raw(reply="orig", text="الغاء", key="canc-reply",
+                                   at=NOW + timedelta(seconds=10)))
+    await pipe.process_inbox(NOW + timedelta(seconds=12))
+
+    assert (await db.deals.get("d1")).status == Status.CANCELLED
+    assert any(j.is_reversal for j in writer.jobs)            # قيد عكسيّ كُتب
+
+
+async def test_x515_transfer_registers_unaffected_by_separate_cancel(db):
+    """حوالة X515 (600 ج.م) تُسجَّل، ورسالة «الغاء» منفصلة بلا Reply لا تؤثّر عليها إطلاقًا."""
+    await _enable_storage(db)
+    pipe = _pipeline(db)
+    txt = ("X515\nالمطلوب: تحويل\n01007934207\nبأسم : نهى علي حسن\n"
+           "انستا باي / بدون خصم\nالقيمة: 600 ج.م")
+    await pipe.capture(RawMessage(message_key="x515", chat_jid=CENTRAL, sender_jid=EMP,
+                                  text=txt, received_at=NOW))
+    await pipe.process_inbox(NOW + timedelta(seconds=120))
+
+    d = await db.deals.find_by_source_key("x515")
+    assert d is not None and d.sell_leg is not None
+    assert d.sell_leg.reference_number == "X515" and d.sell_leg.amount == 600.0
+    status_before = d.status
+
+    # رسالة «الغاء» منفصلة بلا Reply — لا تمسّ الحوالة السابقة
+    await pipe.capture(RawMessage(message_key="canc", chat_jid=CENTRAL, sender_jid=EMP,
+                                  text="الغاء", reply_to_key=None,
+                                  received_at=NOW + timedelta(seconds=120)))
+    await pipe.process_inbox(NOW + timedelta(seconds=240))
+
+    d2 = await db.deals.find_by_source_key("x515")
+    assert d2 is not None and d2.status == status_before and d2.cancelled_at is None
+    assert any("الإلغاء يتطلب الرد (Reply)" in t for _, t in await _texts(db))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # الإلغاء من شخص غير مُرسل الحوالة الأصلية → ينجح (لا فحص مُرسِل)
 # ═════════════════════════════════════════════════════════════════════════════
 async def test_cancel_by_different_sender_succeeds(db):

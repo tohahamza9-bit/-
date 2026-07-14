@@ -191,6 +191,15 @@ class Pipeline:
                     detect_cancellation(raw.text) is not None
                     or detect_amendment(raw.text) is not None
                 ):
+                    # 🔴 إلغاء بلا Reply (م: X515): يُتجاهَل تمامًا — لا يُعالَج تحكّمًا (لا يدخل
+                    #    control_ops/_handle_cancellation) ولا يدخل _ingest، فلا يُسقط أيّ حوالة قائمة.
+                    #    رد توجيهيّ فقط. الإلغاء الفعليّ يتطلّب Reply على رسالة الحوالة المراد إلغاؤها.
+                    if detect_cancellation(raw.text) is not None and raw.reply_to_key is None:
+                        await self.bus.reply_central(
+                            "🔴 الإلغاء يتطلب الرد (Reply) على رسالة الحوالة المراد إلغاؤها",
+                            raw.message_key, is_alert=True)
+                        await self.db.raw.mark_processed(raw.message_key)
+                        continue
                     control_ops.append(raw)
                     await self.db.raw.mark_processed(raw.message_key)
                     continue
