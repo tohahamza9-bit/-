@@ -114,7 +114,8 @@ def _is_complete_phone(d: str) -> bool:
     if n == 11:
         return d.startswith("01") or d.startswith("216")    # مصري محلّي / تونسي دوليّ
     if n == 12:
-        return d[:3] in ("218", "216") or d.startswith("20")  # ليبي/تونسي/مصري دوليّ
+        # ليبي/تونسي/مصري دوليّ + مصريّ محلّي بصفر زائد «010»+9 أرقام (خطأ إدخال شائع) → مصريّ high
+        return d[:3] in ("218", "216") or d.startswith("20") or d.startswith("010")
     if n in (13, 14):                                       # دوليّ ببادئة 00 أو صيغ أطول
         return d.startswith(("00", "20", "216", "218"))
     return False
@@ -167,11 +168,11 @@ def extract_phone_candidates(s: Optional[str]) -> list[str]:
         return []
     text = normalize_digits(s)
     out: list[str] = []
-    for m in re.finditer(r"\d{8,15}", text.replace("-", "")):
+    for m in re.finditer(r"(?<!\d)\d{8,15}(?!\d)", text.replace("-", "")):
         if _is_complete_phone(m.group()) and m.group() not in out:
             out.append(m.group())
     for line in text.splitlines():
-        for m in re.finditer(r"\d{8,15}", re.sub(r"[\s\-+]", "", line)):
+        for m in re.finditer(r"(?<!\d)\d{8,15}(?!\d)", re.sub(r"[\s\-+]", "", line)):
             ph = classify_phone(m.group())
             if ph and ph not in out:
                 out.append(ph)
@@ -187,14 +188,14 @@ def extract_phone(s: Optional[str]) -> Optional[str]:
         return None
     text = normalize_digits(s)
     # (أ) المسافات/الأسطر حدود → مجاري كاملة الشكل فقط (تعزل الهاتف عن مبلغٍ مجاور)
-    a = [m.group() for m in re.finditer(r"\d{8,15}", text.replace("-", ""))
+    a = [m.group() for m in re.finditer(r"(?<!\d)\d{8,15}(?!\d)", text.replace("-", ""))
          if _is_complete_phone(m.group())]
     if (pick := _pick_phone(a)) is not None:
         return pick
     # (ب) دمج المسافات **داخل السطر** (هاتف دوليّ بمجموعات) — السطر الجديد حدّ صارم (لا يدمج مبلغًا)
     b: list[str] = []
     for line in text.splitlines():
-        b += [m.group() for m in re.finditer(r"\d{8,15}", re.sub(r"[\s\-+]", "", line))
+        b += [m.group() for m in re.finditer(r"(?<!\d)\d{8,15}(?!\d)", re.sub(r"[\s\-+]", "", line))
               if classify_phone(m.group())]
     return _pick_phone(b)
 

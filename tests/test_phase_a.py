@@ -47,6 +47,20 @@ def test_phone_layers_confidence():
     assert classify_phone("+90278328453") == "90278328453"                 # لا رفض (القائمة البيضاء أُلغيت)
 
 
+def test_iban_16plus_not_captured_as_phone():
+    """رقم 16+ خانة (IBAN/حساب) لا يُلتقَط كهاتف — حدود الكلمة تمنع بتره إلى 15 (م: X540)."""
+    from core.parsing.normalize import extract_phone, extract_phone_candidates
+    assert extract_phone("X540 حساب 7766000100009061 مبلغ 5000 ج م") is None
+    assert extract_phone_candidates("X540 7766000100009061 5000") == []
+    assert extract_phone("رقم 12345678901234567 مبلغ") is None            # 17 خانة أيضًا
+
+
+def test_egyptian_010_extra_zero_is_high():
+    """«010»+9 أرقام (12 خانة، صفر زائد) → مصريّ high بلا تعديل للرقم (م: X542)."""
+    assert phone_confidence("010084257553") == "high"
+    assert classify_phone("010084257553") == "010084257553"                # كما كُتب، بلا تعديل
+
+
 # ═════════════════════ تكامل عبر الأنبوب (إصلاح ٣ + الطبقات) ═════════════════════
 async def _drive(db, text, key="m1"):
     pipe = build_pipeline(db)
