@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from core.bus import Bus
 from core.cancellation import detect_cancellation, within_cancellation_window
-from core.constants import Mark, OperationType, Status, TreasuryType
+from core.constants import Currency, Mark, OperationType, Status, TreasuryType
 from core.models import (
     BotControl,
     Deal,
@@ -42,10 +42,12 @@ class _RecWriter:
 
 
 class _StubVerifier:
-    enabled = False
+    # مُفعّل ويؤكّد: الطبقة ٣ للتحقّق قبل الإلغاء (م: SI2891) تتطلّب تأكيد SQL فعليّ
+    # كي يُسمح بالعكس التلقائيّ. هذه الاختبارات تختبر آليّة العكس ⇒ حالة «مؤكَّدة».
+    enabled = True
 
     async def verify_transaction(self, *a, **k):
-        return (False, None)
+        return (True, "MREF")
 
     async def find_last_pending(self, *a, **k):
         return None
@@ -77,6 +79,17 @@ async def _seed_completed(db, *, deal_id="d1", sell=None, buy=None, created=None
         source_message_keys=src_keys or ["orig"],
     )
     await db.deals.upsert(deal)
+    # قيد أصليّ في الدفتر (طبقة ٢ للتحقّق قبل الإلغاء) — محاكاة صفقة مكتوبة فعلًا في MONEYADO
+    import uuid as _uuid
+
+    from core.models import LedgerEntry
+    slg = deal.sell_leg
+    await db.ledger.append(LedgerEntry(
+        entry_id=str(_uuid.uuid4()), deal_id=deal_id, message_key=f"led-{deal_id}",
+        reference_number=slg.reference_number, operation=OperationType.SELL, is_reversal=False,
+        amount=slg.amount or 0.0, currency=slg.currency or Currency.EGP,
+        customer_code=slg.customer_code, status=Status.COMPLETED, sql_verified=True,
+        created_at=created or NOW))
     return deal
 
 

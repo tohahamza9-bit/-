@@ -1071,6 +1071,19 @@ class Pipeline:
     # ═════════════════════════════════════════════════════════════════════════
     # ميزة الإلغاء عبر Reply (§10 نسخة نهائية) — مسار معزول تمامًا عن باقي المسارات
     # ═════════════════════════════════════════════════════════════════════════
+    async def _cancel_sql_confirmed(self, deal: Deal) -> bool:
+        """طبقة ٣ للإلغاء (قراءة فقط): هل قيد الصفقة مؤكَّد فعليًّا في MONEYADO عبر SQL؟
+        SQL معطّل ⇒ **غير مؤكَّد** (False) — لا يُتّخذ قرار عكس تلقائيّ بلا يقين (§11.4)."""
+        if not self.verifier.enabled:
+            return False
+        leg = deal.sell_leg or deal.buy_leg
+        if leg is None:
+            return False
+        verified, _ = await self.verifier.verify_transaction(
+            leg.reference_number or "", leg.amount or 0.0,
+            leg.customer_code or "", leg.operation)
+        return bool(verified)
+
     async def _handle_cancellation(self, raw: RawMessage, now: datetime) -> None:
         """يُلغي حوالة بـ Reply عليها (كلمة إلغاء). معزول: لا يمسّ _ingest ولا مسارات الربط.
 
@@ -1107,8 +1120,32 @@ class Pipeline:
             await self.bus.reply_central(
                 f"✅ أُلغيت الحوالة {ref} (لم تكن مُدخَلة في MONEYADO).", raw.message_key)
             return
-        # (و) COMPLETED → انتقال ذرّي ثم قيد عكسي في MONEYADO
+        # (و) COMPLETED → **طبقة تحقّق ثلاثية قبل أي عكس** (لا إلغاء بلا يقين كامل — م: SI2891):
+        #     ١) DB (هنا): الحالة COMPLETED.  ٢) الدفتر: قيد أصليّ موجود؟  ٣) MONEYADO/SQL: مؤكَّد؟
+        #     أيّ غموض → HELD + تنبيه المالك، **لا قرار أوتوماتيكيّ** (لا عكس فراغ، لا إلغاء غير مؤكَّد).
         if deal.status == Status.COMPLETED:
+            # طبقة ٢: الدفتر — قيد أصليّ (غير عكسيّ) موجود؟
+            entries = await self.db.ledger.entries_for_deal(deal.deal_id)
+            if not any(not e.is_reversal for e in entries):
+                await self.db.deals.set_status(
+                    deal.deal_id, Status.HELD,
+                    hold_reason="إلغاء مطلوب — لا قيد في السجل (خطر عكس فراغ)")
+                await self.bus.notify_admin(
+                    f"🔴 {ref} — طُلب إلغاؤها لكن لا قيد بالسجل — خطر، راجع يدويًا قبل الإلغاء.",
+                    raw.message_key, forward_key=self._deal_key(deal))
+                log.error("إلغاء %s: لا قيد بالسجل → HELD + تصعيد (لا عكس فراغ)", ref)
+                return
+            # طبقة ٣: MONEYADO/SQL — مؤكَّد فعليًّا؟ (SQL معطّل ⇒ غير مؤكَّد)
+            if not await self._cancel_sql_confirmed(deal):
+                await self.db.deals.set_status(
+                    deal.deal_id, Status.HELD,
+                    hold_reason="إلغاء مطلوب — القيد غير مؤكَّد بـMONEYADO")
+                await self.bus.notify_admin(
+                    f"🟡 {ref} — طُلب إلغاؤها، القيد موجود بالسجل لكن لم يُؤكَّد بـMONEYADO — "
+                    f"راجع يدويًا ثم أكّد.", raw.message_key, forward_key=self._deal_key(deal))
+                log.warning("إلغاء %s: القيد غير مؤكَّد بـSQL → HELD + تصعيد", ref)
+                return
+            # مؤكَّد ١٠٠٪ (دفتر + SQL) → الإلغاء الطبيعيّ + العكس (السلوك القائم)
             if not await self.db.deals.begin_cancelling(deal.deal_id):
                 await self.bus.reply_central(f"🔴 الحوالة {ref} مُلغاة مسبقًا.", raw.message_key, is_alert=True)
                 return
