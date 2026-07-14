@@ -38,6 +38,8 @@ from .normalize import (
     normalize_payment,
     normalize_price,
     parse_amount,
+    phone_confidence,
+    scan_amount_deviations,
 )
 from .resolve import resolve_supplier, resolve_treasury
 
@@ -1101,6 +1103,16 @@ def _build_leg(
         else None
     )
 
+    # ── مرحلة أ: ثقة الهاتف + سجلّ الانحرافات (telemetry — لا يمسّ matching/writer) ──
+    phone_conf = phone_confidence(f.get("phone"), full_text)
+    deviation_log: list[dict] = list(scan_amount_deviations(full_text))   # مبلغ سالب… (abs)
+    if phone_conf == "uncertain":                          # الدوليّ يُقبَل بلا مراجعة؛ المجهول يُسجَّل
+        deviation_log.append({
+            "field": "recipient", "raw_value": f.get("phone"),
+            "extracted_value": f.get("phone"), "method": "phone_uncertain",
+            "confidence": "MEDIUM",
+        })
+
     leg = ParsedLeg(
         operation=op,
         customer_code=f.get("customer_code"),
@@ -1115,6 +1127,7 @@ def _build_leg(
         reference_number=f.get("reference"),
         phone=f.get("phone"),
         phone_alt=f.get("phone_alt"),                 # فيكس ج: رقم ثانٍ عند وجود مرشّحَين
+        phone_confidence=phone_conf,                  # مرحلة أ: high/international/uncertain
         ambiguous_amount=f.get("ambiguous_amount"),   # فيكس د: أرقام مجرّدة متعدّدة → للتصعيد
         payment_method=f.get("payment"),
         recipient_name=f.get("recipient_name"),
@@ -1127,6 +1140,7 @@ def _build_leg(
         is_supplier_counterpart=is_supplier,
         is_si_format=is_si,
         unresolved_treasury=unresolved_treasury,
+        deviation_log=deviation_log,
     )
     return leg, _confidence(leg, tref, currency)
 

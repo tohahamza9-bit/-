@@ -102,6 +102,10 @@ class ParsedLeg(BaseModel):
     is_supplier_counterpart: bool = False      # §5.3: الطرف اسمه مورد (⇒ شراء) لا زبون
     is_si_format: bool = False                 # §3.3: حوالة SI معنونة مكتملة برسالة واحدة (لا تنتظر طرفًا ثانيًا)
     unresolved_treasury: Optional[str] = None  # اسم خزينة SI معنون لم يُحلّ → يُلتقط مجهولًا (db.unknown_terms)
+    # ── مرحلة أ (لا خسارة صامتة + قيمة مالية أولوية) ──
+    phone_confidence: Optional[str] = None     # high (مصري/تونسي/ليبي) / international (كود دولة) / uncertain
+    deviation_log: list[dict] = Field(default_factory=list)  # استخراجات بتخمين للمراجعة (لوحة الانتباه):
+    #   [{field, raw_value, extracted_value, method, confidence}] — telemetry لا يغيّر منطق matching/writer
 
 
 class ParseResult(BaseModel):

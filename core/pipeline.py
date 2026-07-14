@@ -458,9 +458,18 @@ class Pipeline:
                 ref = (result.leg.reference_number if result.leg else None) or "؟"
                 log.warning("⚠️ رسالة تبدو حوالة (مرجع %s) فشل استخراجها — تنبيه المالك: %s",
                             ref, raw.message_key)
+                # مرحلة أ (لا خسارة صامتة §0): مرجع + قيمة مالية → لا تُسقط أبدًا. تصعيد غنيّ:
+                #   النصّ الخام + ما استُخرج + سبب عدم الاكتمال. 🔴 لو بلا مبلغ (فشل كامل)، وإلا ⚠️.
+                _l = result.leg
+                _ext = (f"مبلغ={getattr(_l, 'amount', None)} عملة={getattr(_l, 'currency', None)} "
+                        f"هاتف={getattr(_l, 'phone', None)} كود={getattr(_l, 'customer_code', None)}"
+                        if _l is not None else "لا شيء")
+                _sev = "⚠️" if (_l is not None and _l.amount is not None) else "🔴"
                 await self.bus.notify_admin(
-                    f"⚠️ رسالة تبدو حوالة لكن فشل استخراجها (مرجع {ref}) — راجعها يدويًا:\n"
-                    f"{(raw.text or '').strip()[:120]}",
+                    f"{_sev} رسالة تبدو حوالة لكن فشل استخراجها (مرجع {ref}) — راجعها يدويًا:\n"
+                    f"سبب: {result.reason or '؟'}\n"
+                    f"استُخرج: {_ext}\n"
+                    f"النصّ الخام:\n{(raw.text or '').strip()[:200]}",
                     raw.message_key, forward_key=raw.message_key,
                 )
                 if raw.chat_jid == self.bus.central_jid:   # علامة ⚠️ على المركزية (إن كانت منها)
@@ -480,6 +489,9 @@ class Pipeline:
         leg = result.leg
         leg.source_message_key = raw.message_key
         leg.sender_jid = raw.sender_jid          # مُرسِل الرسالة الأولى (لربط الرد بنفس المُرسِل §7.3)
+
+        # مرحلة أ: تنبيهات best-effort (القيمة المالية أولوية) — لا تمسّ الربط/المطابقة/الكتابة.
+        await self._phase_a_alerts(leg, raw)
 
         # الحارس (§9): نُزّلت من قبل؟ → تجاهل (منع تكرار)
         if await self.guard.already_downloaded(raw.message_key):
@@ -504,6 +516,31 @@ class Pipeline:
                 window_seconds=SENDER_SLOT_WINDOW_SECONDS,
             )
         return deal
+
+    async def _phase_a_alerts(self, leg: ParsedLeg, raw: RawMessage) -> None:
+        """مرحلة أ (best-effort، **لا يمسّ** الربط/المطابقة/الكتابة): تنبيهات القيمة المالية أولوية.
+        - مبلغ موجود بلا رقم مستلم (الطبقة ٤) → 🔴 خطر ماليّ، راجع فورًا (recipient=None محفوظ).
+        - رقم غير مؤكَّد الدولة (الطبقة ٣ uncertain) → ⚠️ سُجّل كما هو، راجع.
+        - مبلغ سالب (abs) وغيره من deviation_log → ⚠️ استخراج بتخمين، راجع.
+        الأخطاء تُبتلَع (best-effort) فلا توقف المعالجة."""
+        ref = leg.reference_number or "؟"
+        try:
+            if leg.amount is not None and not leg.phone:
+                cur = leg.currency.value if leg.currency else ""
+                await self.bus.notify_admin(
+                    f"🔴 {ref} — بلا رقم مستلم مؤكَّد، القيمة {leg.amount:g} {cur} — خطر ماليّ، راجع فورًا",
+                    raw.message_key, forward_key=raw.message_key)
+            elif leg.phone_confidence == "uncertain":
+                await self.bus.notify_admin(
+                    f"⚠️ {ref} — رقم هاتف غير مؤكَّد الدولة ({leg.phone})، سُجّل كما هو — راجع",
+                    raw.message_key)
+            neg = [d for d in (leg.deviation_log or []) if d.get("method") == "abs_negative"]
+            if neg:
+                vals = "، ".join(str(d.get("extracted_value")) for d in neg)
+                await self.bus.notify_admin(
+                    f"⚠️ {ref} — مبلغ سالب سُجّل كموجب (abs): {vals} — راجع", raw.message_key)
+        except Exception as exc:      # best-effort: لا يوقف المعالجة (T5 — نسجّل فقط)
+            log.warning("تنبيه مرحلة أ فشل (%s) — تجاهل best-effort: %s", raw.message_key, exc)
 
     # ═════════════════════════════════════════════════════════════════════════
     # (5·أ) حجْر الإقلاع: صفقات معلّقة قديمة لا تُعالَج تلقائيًّا بعد إعادة التشغيل

@@ -127,7 +127,28 @@ def classify_phone(raw: Optional[str]) -> Optional[str]:
     if not raw:
         return None
     d = re.sub(r"\D", "", normalize_digits(raw))
-    return d if 8 <= len(d) <= 14 else None
+    return d if 8 <= len(d) <= 15 else None                  # مرحلة أ: 8-15 (كل دول العالم)
+
+
+def phone_confidence(phone: Optional[str], context_text: Optional[str] = None) -> Optional[str]:
+    """ثقة تصنيف الهاتف (مرحلة أ، ٤ طبقات بالأولويّة). None إن لا رقم صالح الطول (8-15):
+    - «high»: نمط معروف (مصري/تونسي/ليبي) — يُقبَل بلا تنبيه.
+    - «international»: يبدأ بـ«+»/«00» + كود دولة (تركي +90، فرنسي +33…) — يُقبَل «كما كُتب».
+    - «uncertain»: طول صالح بلا نمط/بادئة معروفة — يُقبَل مع تنبيه best-effort «راجع الدولة»."""
+    if not phone:
+        return None
+    d = re.sub(r"\D", "", str(phone))
+    if not (8 <= len(d) <= 15):
+        return None
+    if _is_complete_phone(d) or _is_libyan_phone(d):
+        return "high"
+    if d.startswith("00"):
+        return "international"
+    if context_text:                                          # «+» في النصّ الأصليّ قبل الرقم → دوليّ
+        compact = re.sub(r"[\s\-]", "", normalize_digits(context_text))
+        if ("+" + d) in compact:
+            return "international"
+    return "uncertain"
 
 
 def _pick_phone(candidates: list[str]) -> Optional[str]:
@@ -146,11 +167,11 @@ def extract_phone_candidates(s: Optional[str]) -> list[str]:
         return []
     text = normalize_digits(s)
     out: list[str] = []
-    for m in re.finditer(r"\d{8,14}", text.replace("-", "")):
+    for m in re.finditer(r"\d{8,15}", text.replace("-", "")):
         if _is_complete_phone(m.group()) and m.group() not in out:
             out.append(m.group())
     for line in text.splitlines():
-        for m in re.finditer(r"\d{8,14}", re.sub(r"[\s\-+]", "", line)):
+        for m in re.finditer(r"\d{8,15}", re.sub(r"[\s\-+]", "", line)):
             ph = classify_phone(m.group())
             if ph and ph not in out:
                 out.append(ph)
@@ -166,14 +187,14 @@ def extract_phone(s: Optional[str]) -> Optional[str]:
         return None
     text = normalize_digits(s)
     # (أ) المسافات/الأسطر حدود → مجاري كاملة الشكل فقط (تعزل الهاتف عن مبلغٍ مجاور)
-    a = [m.group() for m in re.finditer(r"\d{8,14}", text.replace("-", ""))
+    a = [m.group() for m in re.finditer(r"\d{8,15}", text.replace("-", ""))
          if _is_complete_phone(m.group())]
     if (pick := _pick_phone(a)) is not None:
         return pick
     # (ب) دمج المسافات **داخل السطر** (هاتف دوليّ بمجموعات) — السطر الجديد حدّ صارم (لا يدمج مبلغًا)
     b: list[str] = []
     for line in text.splitlines():
-        b += [m.group() for m in re.finditer(r"\d{8,14}", re.sub(r"[\s\-+]", "", line))
+        b += [m.group() for m in re.finditer(r"\d{8,15}", re.sub(r"[\s\-+]", "", line))
               if classify_phone(m.group())]
     return _pick_phone(b)
 
@@ -187,55 +208,90 @@ def is_phone_like(s: str) -> bool:
 # «.» «،» «'» والفراغات = فاصل آلاف يُشال (5.000=5000، 17.400=17400، 5.802=5802).
 # قاعدة الصحّة: كل مجموعة بعد الأولى يجب أن تكون 3 أرقام؛ غيرها «غير معتاد» → تصحيح + تحذير
 # (مثال: 60.0000 → 60000، لا 600000). لا تصعيد — البوت يصحّح وينبّه.
-_AMOUNT_TOKEN_RE = re.compile(r"-?\d[\d.،,'‏‎\s]*")   # المقطع الرقمي مع فواصله
-_AMOUNT_SPLIT_RE = re.compile(r"[.،,'‏‎\s]+")          # فواصل الآلاف
+# المقطع الرقمي مع فواصله؛ يقبل إشارة سالبة **بادئة** «-123» أو **لاحقة** «123-» (شائعة في التصدير).
+_AMOUNT_TOKEN_RE = re.compile(r"-?\d[\d.،,'‏‎\s]*-?")
+_AMOUNT_SPLIT_RE = re.compile(r"[.،,'‏‎\s]+")          # فواصل الآلاف/العشري
 
 
-def _parse_one_amount(token: str, raw: object) -> Optional[float]:
-    """يحوّل مقطعًا رقميًّا واحدًا إلى قيمة بقاعدة فاصل الآلاف (§3.5): كل مجموعة بعد الأولى = 3 أرقام؛
-    غيرها تُصحّح (>3→أول 3؛ <3→كما هي) مع log.warning، بلا تصعيد."""
+def _parse_one_amount(token: str, raw: object,
+                      deviations: Optional[list[dict]] = None) -> Optional[float]:
+    """يحوّل مقطعًا رقميًّا واحدًا إلى قيمة بـ**القاعدة الذهبية** (مرحلة أ، §3.5):
+    - فاصل واحد يتبعه **٣ أرقام** بالضبط → فاصل آلاف (6.200=6200).
+    - فاصل واحد يتبعه **١-٢ رقم** → عشري (6.22=6.22، 6.5=6.5).
+    - فواصل متعدّدة → آلاف (1.234.567)؛ مجموعة داخليّة ليست 3 أرقام تُصحّح + تحذير (بلا تصعيد).
+    - إشارة سالبة (بادئة/لاحقة) → abs() + تنبيه best-effort للمالك (يُسجَّل في `deviations` إن مُرِّر).
+    القيمة المالية أولوية مطلقة: لا تُفقَد لانحراف في الصيغة."""
     token = token.strip()
-    neg = token.startswith("-")
-    groups = [g for g in _AMOUNT_SPLIT_RE.split(token.lstrip("-")) if g]
+    neg = token.startswith("-") or token.endswith("-")       # سالب: بادئة أو لاحقة
+    core = token.strip("-").strip()
+    groups = [g for g in _AMOUNT_SPLIT_RE.split(core) if g]
     if not groups:
         return None
     if len(groups) == 1:
         digits = groups[0]
+    elif len(groups) == 2 and 1 <= len(groups[1]) <= 2:
+        digits = groups[0] + "." + groups[1]                 # عشري: فاصل واحد + 1-2 رقم
     else:
-        norm = [groups[0]]
+        norm = [groups[0]]                                   # فاصل آلاف: كل مجموعة بعد الأولى = 3
         for g in groups[1:]:
             if len(g) != 3:
                 log.warning(
-                    "مبلغ بصيغة غير معتادة %r: المجموعة «%s» ليست 3 أرقام (§3.5) — "
-                    "تُصحّح إلى 3، بلا تصعيد.", raw, g,
+                    "مبلغ بصيغة غير معتادة %r: المجموعة «%s» ليست 3 أرقام (§3.5) — تُصحّح، بلا تصعيد.",
+                    raw, g,
                 )
                 g = g[:3] if len(g) > 3 else g  # >3 → أول 3 (60.0000→60000)؛ <3 → كما هي
             norm.append(g)
         digits = "".join(norm)
     try:
         val = float(digits)
-        return -val if neg else val
     except (ValueError, TypeError) as exc:  # T5: لا silent catch
         log.error("تعذّر تحويل المبلغ %r: %s", raw, exc)
         return None
+    if neg:
+        val = abs(val)
+        log.warning("مبلغ سالب %r → abs()=%s + تنبيه best-effort للمالك (§3.5).", raw, val)
+        if deviations is not None:
+            deviations.append({"field": "amount", "raw_value": token,
+                               "extracted_value": val, "method": "abs_negative",
+                               "confidence": "MEDIUM"})
+    return val
 
 
-def parse_amount(raw: Optional[str]) -> Optional[float]:
-    """المبلغ: الفواصل فواصل آلاف تُشال دائمًا (§3.5). يُرجع None إن تعذّر.
+def parse_amount(raw: Optional[str],
+                 deviations: Optional[list[dict]] = None) -> Optional[float]:
+    """المبلغ بالقاعدة الذهبية (§3.5) — انظر _parse_one_amount. يُرجع None إن تعذّر.
 
     🔴 مرشّحون (§3.5 §0): تُجمَع كل المقاطع الرقمية المحتملة. مرشّح واحد → يُؤخَذ مباشرة؛ أكثر من
-    مرشّح → **مبلغ ملتبس** فيُسجَّل تحذير ويُؤخَذ **الأكبر** (الأرجح أنّه المبلغ لا كود/سعر)."""
+    مرشّح → **مبلغ ملتبس** فيُسجَّل تحذير ويُؤخَذ **الأكبر** (الأرجح أنّه المبلغ لا كود/سعر).
+    `deviations` (اختياريّ): تُلحَق به انحرافات الاستخراج (سالب…) للـ deviation_log."""
     if raw is None:
         return None
     text = normalize_digits(str(raw))                        # bidi + أرقام عربية-هندية (§3.5)
     values = [v for tok in _AMOUNT_TOKEN_RE.findall(text)
-              if (v := _parse_one_amount(tok, raw)) is not None]
+              if (v := _parse_one_amount(tok, raw, deviations)) is not None]
     if not values:
         return None
     if len(values) > 1:
         log.warning("مبلغ ملتبس %r: مرشّحون %s — يُؤخَذ الأكبر (§3.5 §0).", raw, values)
         return max(values, key=abs)
     return values[0]
+
+
+_NEG_TOKEN_RE = re.compile(r"-?\d[\d.،,']*-?")   # مقطع رقميّ ضمن السطر (بلا عبور مسافات/أسطر)
+
+
+def scan_amount_deviations(raw: Optional[str]) -> list[dict]:
+    """telemetry (deviation_log): يفحص النصّ عن مبالغ **سالبة** فقط (تُسجَّل abs_negative للمراجعة)
+    دون تغيير أيّ قيمة مستخرَجة ولا ضجيج سجلّات (لا يعبر المسافات/الأسطر). مرحلة أ §0."""
+    if not raw:
+        return []
+    sink: list[dict] = []
+    text = normalize_digits(str(raw))
+    for m in _NEG_TOKEN_RE.finditer(text):
+        tok = m.group()
+        if tok.startswith("-") or tok.endswith("-"):     # مقطع سالب فقط
+            _parse_one_amount(tok, raw, sink)            # يُلحق abs_negative بالمصرف
+    return sink
 
 
 # ── التباس «ألف/آلاف» (§3.5) 🔴 ───────────────────────────────────────────────

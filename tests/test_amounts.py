@@ -63,8 +63,13 @@ def test_egp_short_meem_after_or_before_number():
     assert detect_currency("760 طه محمد") is None            # «م» ليست token منفصلة
 
 
-def test_amount_negative_preserved():
-    assert parse_amount("-35") == -35
+def test_amount_negative_becomes_abs():
+    # مرحلة أ (§3.5): السالب → abs() + تنبيه best-effort (القيمة المالية أولوية، لا تُفقد لإشارة)
+    assert parse_amount("-35") == 35
+    assert parse_amount("34.540-") == 34540
+    from core.parsing.normalize import scan_amount_deviations
+    devs = scan_amount_deviations("القيمة 34.540- ج م")
+    assert devs and devs[0]["method"] == "abs_negative" and devs[0]["extracted_value"] == 34540
 
 
 def test_amount_none_when_no_digits():
