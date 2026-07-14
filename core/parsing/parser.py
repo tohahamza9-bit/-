@@ -716,6 +716,9 @@ def _parse_name_price_supplier(
 # سطر «اسم كود سعر» (الكود في **الوسط** §3.2): «احمد بوزويص 876 5.88» → (code, name, price).
 # نطاق الأحرف العربية الصحيح [ء-ي] (لا [ي-ء] المقلوب). يُجرَّب بعد نمط «كود أولاً» (_parse_customer_line).
 _NAME_CODE_PRICE_RE = re.compile(r"^([ء-ي].+?)\s+(\d{2,4})\s+(\d+(?:[.,،]\d+)?)$")
+# سطر «كود سعر اسم» (السعر **قبل** الاسم §3.2): «769 6.06 طه» → (code, name, price). يميّزه اشتراط
+# سعر عشريّ في الوسط عن «كود مبلغ …» (مبلغ صحيح بلا كسر). للرسالة الثانية (سطر مورد/زبون) فقط.
+_CODE_PRICE_NAME_RE = re.compile(r"^(\d{2,4})\s+(\d+[.,،]\d+)\s+([ء-ي].+)$")
 
 
 def extract_code_name_price_lines(
@@ -741,6 +744,10 @@ def extract_code_name_price_lines(
             m = _NAME_CODE_PRICE_RE.match(ln)     # «اسم كود سعر» (الكود في الوسط §3.2)
             if m:
                 pairs.append((m.group(2), m.group(1).strip(), m.group(3).replace("،", ".")))
+                continue
+            m2 = _CODE_PRICE_NAME_RE.match(ln)    # «كود سعر اسم» (السعر قبل الاسم — م: X539 «769 6.06 طه»)
+            if m2:
+                pairs.append((m2.group(1), m2.group(3).strip(), m2.group(2).replace("،", ".")))
                 continue
             if suppliers:                        # بلا كود: طابِق موردًا مسجّلًا بالاسم (كوده من db)
                 s = _parse_name_price_supplier(ln, suppliers)

@@ -61,6 +61,16 @@ def test_egyptian_010_extra_zero_is_high():
     assert classify_phone("010084257553") == "010084257553"                # كما كُتب، بلا تعديل
 
 
+def test_code_price_name_order_supplier_line():
+    """سطر «كود سعر اسم» («769 6.06 طه») يُلتقَط في أزواج الرسالة الثانية (م: X539)."""
+    from core.parsing import extract_code_name_price_lines
+    assert extract_code_name_price_lines("769 6.06 طه", _S) == [("769", "طه", "6.06")]
+    pairs = extract_code_name_price_lines("1300 عبدالله 5.82\n769 6.06 طه", _S)
+    assert ("769", "طه", "6.06") in pairs and ("1300", "عبدالله", "5.82") in pairs
+    # «كود مبلغ اسم» (مبلغ صحيح بلا كسر عشريّ) لا يُلتبَس سعرًا
+    assert extract_code_name_price_lines("769 5000 محمد", _S) == []
+
+
 # ═════════════════════ تكامل عبر الأنبوب (إصلاح ٣ + الطبقات) ═════════════════════
 async def _drive(db, text, key="m1"):
     pipe = build_pipeline(db)
