@@ -425,6 +425,23 @@ async def test_auto_trust_known_supplier_skips_supplier_room(db):
     assert await svc._match_supplier_room(d) is False and d.supplier_no_room is True
 
 
+async def test_auto_trust_two_legged_completes_skipping_supplier_room(db):
+    """الخيار الجزئيّ end-to-end (X542): auto_trust + مورّد مسجَّل + زبون/خزينة مطابَقان + بلا غرفة
+    مورد → المطابقة الثلاثية تكتمل (طرف المورد يُتخطّى، لا «تم» يدوي) → MATCHED. الخزينة **طُوبقت**."""
+    from core.models import BotControl, SupplierRecord
+    svc = MatchingService(db, make_bus(db), customer_room_jids=[CUST_ROOM])
+    await _seed_treasury_room(db)
+    await _seed_room(db, CUST_ROOM, "c1", "احمد العكاري 8475")
+    await _seed_room(db, TREAS_ROOM, "t1", "تحويل 8475 على 01115233493")
+    await db.suppliers.upsert(SupplierRecord(code="760", name="طه", active=True))   # مورّد مسجَّل
+    await db.control.set(BotControl(auto_trust=True, state="running"), "test")
+
+    deal = await svc.match_in_rooms(_make_two_legged(), now=T0 + timedelta(seconds=12))
+    assert deal.matched_customer_room is True and deal.matched_treasury_room is True  # الخزينة طُوبقت
+    assert deal.matched_supplier_room is True and deal.supplier_no_room is False       # المورد تُخطّي
+    assert deal.status is Status.MATCHED
+
+
 async def test_two_legged_no_supplier_room_needs_manual_confirm(db):
     # صفقة طرفين وزبون+خزينة موجودان لكن لا غرفة مورد مضافة → لا اعتماد تلقائي؛ «تم» يدوي (§8).
     bus = make_bus(db)
