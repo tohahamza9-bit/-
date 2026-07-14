@@ -1168,32 +1168,42 @@ class Pipeline:
             await self.bus.reply_central(
                 f"✅ أُلغيت الحوالة {ref} (لم تكن مُدخَلة في MONEYADO).", raw.message_key)
             return
-        # (و) COMPLETED → **طبقة تحقّق ثلاثية قبل أي عكس** (لا إلغاء بلا يقين كامل — م: SI2891):
-        #     ١) DB (هنا): الحالة COMPLETED.  ٢) الدفتر: قيد أصليّ موجود؟  ٣) MONEYADO/SQL: مؤكَّد؟
-        #     أيّ غموض → HELD + تنبيه المالك، **لا قرار أوتوماتيكيّ** (لا عكس فراغ، لا إلغاء غير مؤكَّد).
+        # (و) COMPLETED → قرار الإلغاء حسب cancellation_mode (§10، افتراضي immediate). القيد بالدفتر
+        #     شرطٌ دائمٌ (منع عكس الفراغ)؛ SQL يبقى للتدقيق الدوري ولا يؤثّر على القرار إلا في وضع
+        #     sql_required. immediate = عكس فوريّ؛ sql_required = يشترط تأكيد MONEYADO؛ manual = تصعيد يدويّ.
         if deal.status == Status.COMPLETED:
-            # طبقة ٢: الدفتر — قيد أصليّ (غير عكسيّ) موجود؟
+            mode = (await self.db.control.get()).cancellation_mode
+            # شرط دائم: قيد أصليّ (غير عكسيّ) موجود بالدفتر؟ لا → 🔴 «قيد مفقود» (خطر عكس فراغ).
             entries = await self.db.ledger.entries_for_deal(deal.deal_id)
             if not any(not e.is_reversal for e in entries):
                 await self.db.deals.set_status(
                     deal.deal_id, Status.HELD,
-                    hold_reason="إلغاء مطلوب — لا قيد في السجل (خطر عكس فراغ)")
+                    hold_reason="إلغاء مطلوب — قيد مفقود بالسجل (خطر عكس فراغ)")
                 await self.bus.notify_admin(
-                    f"🔴 {ref} — طُلب إلغاؤها لكن لا قيد بالسجل — خطر، راجع يدويًا قبل الإلغاء.",
+                    f"🔴 {ref} — طُلب إلغاؤها لكن القيد مفقود بالسجل — خطر، راجع يدويًا قبل الإلغاء.",
                     raw.message_key, forward_key=self._deal_key(deal))
-                log.error("إلغاء %s: لا قيد بالسجل → HELD + تصعيد (لا عكس فراغ)", ref)
+                log.error("إلغاء %s: قيد مفقود بالسجل → HELD + تصعيد (لا عكس فراغ)", ref)
                 return
-            # طبقة ٣: MONEYADO/SQL — مؤكَّد فعليًّا؟ (SQL معطّل ⇒ غير مؤكَّد)
-            if not await self._cancel_sql_confirmed(deal):
+            # وضع «يدويّ»: لا عكس تلقائيّ إطلاقًا → تصعيد للمراجعة اليدوية.
+            if mode == "manual":
+                await self.db.deals.set_status(
+                    deal.deal_id, Status.HELD, hold_reason="إلغاء مطلوب — وضع يدويّ (manual)")
+                await self.bus.notify_admin(
+                    f"🟡 {ref} — طُلب إلغاؤها (وضع الإلغاء «يدويّ») — نفّذ القيد العكسي يدويًا.",
+                    raw.message_key, forward_key=self._deal_key(deal))
+                log.info("إلغاء %s: وضع يدويّ → HELD + تصعيد", ref)
+                return
+            # وضع «SQL مطلوب»: يشترط تأكيد MONEYADO/SQL قبل العكس (السلوك القديم، اختياريّ الآن).
+            if mode == "sql_required" and not await self._cancel_sql_confirmed(deal):
                 await self.db.deals.set_status(
                     deal.deal_id, Status.HELD,
-                    hold_reason="إلغاء مطلوب — القيد غير مؤكَّد بـMONEYADO")
+                    hold_reason="إلغاء مطلوب — القيد غير مؤكَّد بـMONEYADO (sql_required)")
                 await self.bus.notify_admin(
-                    f"🟡 {ref} — طُلب إلغاؤها، القيد موجود بالسجل لكن لم يُؤكَّد بـMONEYADO — "
+                    f"🟡 {ref} — طُلب إلغاؤها، القيد بالسجل لكن غير مؤكَّد بـMONEYADO (وضع SQL) — "
                     f"راجع يدويًا ثم أكّد.", raw.message_key, forward_key=self._deal_key(deal))
-                log.warning("إلغاء %s: القيد غير مؤكَّد بـSQL → HELD + تصعيد", ref)
+                log.warning("إلغاء %s: القيد غير مؤكَّد بـSQL (sql_required) → HELD + تصعيد", ref)
                 return
-            # مؤكَّد ١٠٠٪ (دفتر + SQL) → الإلغاء الطبيعيّ + العكس (السلوك القائم)
+            # immediate (افتراضيّ) أو SQL مؤكَّد → العكس الفوريّ + 🚫 (القيد بالدفتر مضمون أعلاه).
             if not await self.db.deals.begin_cancelling(deal.deal_id):
                 await self.bus.reply_central(f"🔴 الحوالة {ref} مُلغاة مسبقًا.", raw.message_key, is_alert=True)
                 return
@@ -1343,6 +1353,16 @@ class Pipeline:
 
         # COMPLETED → قيد الفرق في MONEYADO ثم تسجيل السجلّ
         if deal.status == Status.COMPLETED:
+            # شرط دائم: قيد أصليّ بالدفتر؟ لا → 🔴 «قيد مفقود» (لا تعديل على فراغ) — نظير الإلغاء (§10).
+            entries = await self.db.ledger.entries_for_deal(deal.deal_id)
+            if not any(not e.is_reversal for e in entries):
+                await self.db.deals.set_status(
+                    deal.deal_id, Status.HELD, hold_reason="تعديل مطلوب — قيد مفقود بالسجل")
+                await self.bus.notify_admin(
+                    f"🔴 {ref} — طُلب تعديلها لكن القيد مفقود بالسجل — خطر، راجع يدويًا.",
+                    raw.message_key, forward_key=self._deal_key(deal))
+                log.error("تعديل %s: قيد مفقود بالسجل → HELD + تصعيد", ref)
+                return
             note = f"تعديل {ref}: {self._amt(current_net)} ← {self._amt(amount)}"
             jobs = build_amendment_jobs(deal, current_net, amount, new_commission, note, utcnow())
             if not jobs:

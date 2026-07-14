@@ -101,6 +101,11 @@ class AliasPushIn(BaseModel):
     alias: str = Field(..., min_length=1)
 
 
+class CancellationModeIn(BaseModel):
+    """وضع قرار الإلغاء/التعديل على COMPLETED (§10)."""
+    mode: str = Field(..., pattern="^(immediate|sql_required|manual)$")
+
+
 class RoomClassifyIn(BaseModel):
     """تصنيف غرفة مكتشَفة. 🔴 لا يغيّر حدود الكتابة (المركزية/المسؤول من env فقط)."""
     type: RoomType
@@ -359,6 +364,16 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         ctrl.auto_trust = not ctrl.auto_trust
         await db.control.set(ctrl, updated_by="dashboard")
         log.info("وضع التلقائي: auto_trust=%s", ctrl.auto_trust)
+        return ctrl.model_dump(mode="json")
+
+    @router.post("/control/cancellation_mode", dependencies=[manager])
+    async def set_cancellation_mode(body: CancellationModeIn) -> dict:
+        """وضع قرار الإلغاء/التعديل على COMPLETED (§10): immediate/sql_required/manual.
+        SQL يبقى للتدقيق الدوري بلا تأثير على القرار الفوريّ إلا في وضع sql_required."""
+        ctrl = await db.control.get()
+        ctrl.cancellation_mode = body.mode
+        await db.control.set(ctrl, updated_by="dashboard")
+        log.info("وضع الإلغاء: cancellation_mode=%s", ctrl.cancellation_mode)
         return ctrl.model_dump(mode="json")
 
     # ── إدارة الخزائن (§13) — إيقاف بلا حذف، تفعيل فوري ───────────────────────

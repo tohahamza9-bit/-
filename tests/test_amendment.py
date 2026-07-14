@@ -119,6 +119,22 @@ def test_amendment_ratio_and_floor():
     assert amendment_ratio(no_disc) == 0.0
 
 
+async def test_amend_completed_no_ledger_holds_red(db):
+    """تعديل على COMPLETED **بلا قيد بالدفتر** → 🔴 «قيد مفقود» + HELD (لا تعديل على فراغ)."""
+    await _enable_storage(db)
+    writer = _RecWriter()
+    pipe = _pipeline(db, writer)
+    # COMPLETED مُدرَجة يدويًّا بلا أي قيد دفتر (عكس _seed_completed)
+    await db.deals.upsert(Deal(
+        deal_id="d1", status=Status.COMPLETED, created_at=NOW, updated_at=NOW,
+        chat_jid=CENTRAL, sell_leg=_sell_leg(), source_message_keys=["orig"]))
+    await pipe._handle_amendment(_amend_raw("تعديل 9000"), 9000.0, "", NOW + timedelta(seconds=10))
+    d = await db.deals.get("d1")
+    assert d.status == Status.HELD, "بلا قيد → HELD"
+    assert not writer.jobs, "لا كتابة تعديل بلا قيد"
+    assert any("🔴" in t and "قيد مفقود" in t for t in await _texts(db))
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # تعديل عادي (بلا خصم) → شراء عكسي بالفرق + ✏️ + ✅
 # ═════════════════════════════════════════════════════════════════════════════

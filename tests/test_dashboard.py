@@ -237,6 +237,23 @@ async def test_auto_trust_toggle_endpoint(db):
         assert r.status_code == 401
 
 
+async def test_cancellation_mode_endpoint(db):
+    """نقطة cancellation_mode تضبط وضع الإلغاء (immediate/sql_required/manual، الافتراضي immediate)."""
+    pytest.importorskip("fastapi")
+    async with _client(db) as ac:
+        assert (await ac.get("/api/control")).json()["cancellation_mode"] == "immediate"  # الافتراضي
+        r = await ac.post("/api/control/cancellation_mode", json={"mode": "sql_required"})
+        assert r.status_code == 200 and r.json()["cancellation_mode"] == "sql_required"
+        r = await ac.post("/api/control/cancellation_mode", json={"mode": "manual"})
+        assert r.json()["cancellation_mode"] == "manual"
+        assert r.json()["storage_enabled"] is False                    # مستقلّ عن Kill Switch
+        bad = await ac.post("/api/control/cancellation_mode", json={"mode": "xxx"})
+        assert bad.status_code == 422                                  # قيمة غير صالحة تُرفَض
+    async with _anon_client(db) as ac:                                 # يتطلّب المصادقة
+        assert (await ac.post("/api/control/cancellation_mode",
+                              json={"mode": "manual"})).status_code == 401
+
+
 async def test_treasuries_expose_currency_for_country_column(db):
     """عمود «البلد» في اللوحة يُشتقّ من currency الخزينة (db.treasuries مصدر الحقيقة، عرض فقط).
 

@@ -84,7 +84,16 @@
     <div class="kill" style="margin-top:8px">
       <span id="autoTrustTxt" class="pill off">وضع التلقائي: …</span>
       <button id="autoTrustBtn" class="ghost">تبديل الوضع التلقائي</button>
-      <span class="muted">مُفعّل = يتخطّى مطابقة الغرف → بوابة الثقة مباشرة · الافتراضي: مُعطّل</span>
+      <span class="muted">مُفعّل = يتخطّى غرف الموردين فقط (الخزائن تُطابَق دائمًا) · الافتراضي: مُعطّل</span>
+    </div>
+    <div class="kill" style="margin-top:8px">
+      <span id="cancModeTxt" class="pill off">وضع الإلغاء: …</span>
+      <select id="cancModeSel">
+        <option value="immediate">فوريّ (immediate)</option>
+        <option value="sql_required">يشترط SQL (sql_required)</option>
+        <option value="manual">يدويّ (manual)</option>
+      </select>
+      <span class="muted">قرار الإلغاء/التعديل على المكتملة (قيد الدفتر شرطٌ دائم) · SQL للتدقيق الدوري فقط · الافتراضي: فوريّ</span>
     </div>
   </div>
 
@@ -174,9 +183,14 @@ async function loadControl(){
   $("dot").style.background=c.state==="running"?"var(--ok)":c.state==="error"?"#eab308":"var(--warn)";
   const st=$("storeTxt"); st.textContent="التخزين: "+(c.storage_enabled?"مُفعّل":"موقوف"); st.className="pill "+(c.storage_enabled?"on":"off");
   const at=$("autoTrustTxt"); at.textContent="وضع التلقائي: "+(c.auto_trust?"مُفعّل":"مُعطّل"); at.className="pill "+(c.auto_trust?"on":"off");
+  const CM_AR={immediate:"فوريّ",sql_required:"يشترط SQL",manual:"يدويّ"};
+  const cm=$("cancModeTxt"); const mode=c.cancellation_mode||"immediate";
+  cm.textContent="وضع الإلغاء: "+(CM_AR[mode]||mode); cm.className="pill "+(mode==="immediate"?"on":"off");
+  $("cancModeSel").value=mode;
 }
 $("toggleBtn").onclick=async()=>{ await api("/control/toggle","POST"); await loadControl(); loadLog(); };
 $("autoTrustBtn").onclick=async()=>{ await api("/control/auto_trust","POST"); await loadControl(); loadLog(); };
+$("cancModeSel").onchange=async(e)=>{ await api("/control/cancellation_mode","POST",{mode:e.target.value}); await loadControl(); loadLog(); };
 
 // ── المستخدمون ──
 async function loadUsers(){

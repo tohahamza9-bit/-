@@ -267,7 +267,11 @@ class UnknownTerm(BaseModel):
 class BotControl(BaseModel):
     """حالة التحكّم — Kill Switch (§13). الافتراضي عند التشغيل: إيقاف."""
     storage_enabled: bool = False               # False = يعبّئ ويتوقف عند «تخزين»
-    auto_trust: bool = False                     # True = «وضع تلقائي»: تخطّي مطابقة الغرف → بوابة الثقة مباشرة (§8.1)
+    auto_trust: bool = False                     # True = «وضع تلقائي»: تخطّي غرف الموردين فقط (§8.1)
+    # وضع قرار الإلغاء/التعديل على COMPLETED (§10): immediate = عكس فوريّ بشرط وجود قيد بالدفتر؛
+    #   sql_required = يشترط تأكيد MONEYADO/SQL قبل العكس؛ manual = لا عكس تلقائيّ (تصعيد يدويّ).
+    #   SQL يبقى للتدقيق الدوري (reconciliation) بلا تأثير على القرار الفوريّ إلا في وضع sql_required.
+    cancellation_mode: str = "immediate"         # immediate | sql_required | manual
     state: str = "stopped"                       # running | stopped | error
     updated_at: Optional[datetime] = None
     updated_by: Optional[str] = None

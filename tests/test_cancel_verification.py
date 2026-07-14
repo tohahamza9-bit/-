@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from core.constants import Currency, OperationType, Status, TreasuryType
-from core.models import Deal, ParsedLeg, TreasuryRef
+from core.models import BotControl, Deal, ParsedLeg, TreasuryRef
 
 from tests.test_integration import (
     ADMIN, PAST, FakeWriter, StubVerifier, _enable_storage, _make_pipeline, _raw,
@@ -74,7 +74,10 @@ async def test_completed_ledger_sql_confirmed_normal_cancel(db):
 
 # ── ٣) COMPLETED + دفتر + SQL معطّل → HELD + تنبيه 🟡 ────────────────────────
 async def test_completed_ledger_sql_disabled_holds_yellow(db):
+    # وضع sql_required: SQL معطّل → HELD 🟡 (السلوك القديم، اختياريّ الآن عبر cancellation_mode).
     await _enable_storage(db)
+    await db.control.set(BotControl(storage_enabled=True, cancellation_mode="sql_required",
+                                    state="running"), "test")
     writer = FakeWriter()
     pipe = _make_pipeline(db, writer, StubVerifier(enabled=False), rooms=False)
     await pipe.capture(_raw("m1", _A_TRANSFER))
@@ -89,8 +92,46 @@ async def test_completed_ledger_sql_disabled_holds_yellow(db):
     d2 = await db.deals.find_by_source_key("m1")
     assert d2.status == Status.HELD, "SQL معطّل → HELD لا CANCELLED"
     alerts = _admin_alerts(await db.outgoing.next_unsent(50))
-    assert any("🟡" in (o.get("text") or "") and "لم يُؤكَّد" in (o.get("text") or "") for o in alerts)
+    assert any("🟡" in (o.get("text") or "") and "غير مؤكَّد" in (o.get("text") or "") for o in alerts)
     assert [c for c in writer.calls if c[0] == "buy"] == reversal_before, "لا عكس بلا تأكيد"
+
+
+async def test_completed_immediate_mode_reverses_without_sql(db):
+    """الوضع الافتراضيّ (immediate): قيد بالدفتر → عكس فوريّ + 🚫 حتى لو SQL معطّل (لا شرط SQL)."""
+    await _enable_storage(db)                                # الوضع الافتراضيّ = immediate
+    writer = FakeWriter()
+    pipe = _make_pipeline(db, writer, StubVerifier(enabled=False), rooms=False)
+    await pipe.capture(_raw("m1", _A_TRANSFER))
+    now = PAST + timedelta(seconds=120)
+    await pipe.process_inbox(now)
+    await pipe.tick(now)
+    assert (await db.deals.find_by_source_key("m1")).status == Status.COMPLETED
+
+    await _cancel(pipe, now + timedelta(seconds=5))
+    d2 = await db.deals.find_by_source_key("m1")
+    assert d2.status == Status.CANCELLED, "immediate: عكس فوريّ بلا شرط SQL"
+    assert any(c[0] == "buy" for c in writer.calls), "قيد عكسيّ كُتب"
+
+
+async def test_completed_manual_mode_holds_no_reverse(db):
+    """الوضع manual: القيد بالدفتر موجود لكن لا عكس تلقائيّ → HELD 🟡 + تصعيد يدويّ."""
+    await _enable_storage(db)
+    await db.control.set(BotControl(storage_enabled=True, cancellation_mode="manual",
+                                    state="running"), "test")
+    writer = FakeWriter()
+    pipe = _make_pipeline(db, writer, StubVerifier(enabled=True), rooms=False)
+    await pipe.capture(_raw("m1", _A_TRANSFER))
+    now = PAST + timedelta(seconds=120)
+    await pipe.process_inbox(now)
+    await pipe.tick(now)
+    reversal_before = [c for c in writer.calls if c[0] == "buy"]
+
+    await _cancel(pipe, now + timedelta(seconds=5))
+    d2 = await db.deals.find_by_source_key("m1")
+    assert d2.status == Status.HELD, "manual → HELD (لا عكس تلقائيّ)"
+    assert [c for c in writer.calls if c[0] == "buy"] == reversal_before, "لا عكس في الوضع اليدويّ"
+    assert any("يدويّ" in (o.get("text") or "")
+               for o in _admin_alerts(await db.outgoing.next_unsent(50)))
 
 
 # ── ٤) COMPLETED + لا دفتر → HELD + تنبيه 🔴 ─────────────────────────────────
@@ -102,5 +143,5 @@ async def test_completed_no_ledger_holds_red(db):
     d = await db.deals.col.find_one({"deal_id": did})
     assert d["status"] == Status.HELD.value, "لا قيد → HELD (خطر عكس فراغ)"
     alerts = _admin_alerts(await db.outgoing.next_unsent(50))
-    assert any("🔴" in (o.get("text") or "") and "لا قيد بالسجل" in (o.get("text") or "") for o in alerts)
+    assert any("🔴" in (o.get("text") or "") and "قيد مفقود بالسجل" in (o.get("text") or "") for o in alerts)
     assert not any(c[0] == "buy" for c in writer.calls), "لا عكس فراغ"
