@@ -192,24 +192,51 @@ async function api(path, method="GET", body=null) {
   if (!r.ok) { let d=""; try{ d=(await r.json()).detail; }catch(e){} toast("خطأ "+r.status+(d?": "+d:"")); throw new Error(r.status); }
   return r.status === 204 ? null : r.json();
 }
-const csv = (s) => s.split(",").map(x=>x.trim()).filter(Boolean);
+const csv = (s) => s.split(/[,،]/).map(x=>x.trim()).filter(Boolean);   // فواصل لاتينيّة وعربيّة
+function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 // ── الخزائن ──
 const COUNTRY_BY_CURRENCY = { EGP: "🇪🇬 مصر", TND: "🇹🇳 تونس" };
 function countryCell(cur) { return COUNTRY_BY_CURRENCY[cur] || "—"; }
 async function loadTreasuries() {
-  const rows = await api("/treasuries");
-  $("t_body").innerHTML = rows.map(t => `<tr class="${t.active?'':'inactive'}">
+  const rows = await api("/treasuries"); window._trows = rows;
+  $("t_body").innerHTML = rows.map((t,i) => `<tr id="trow-t-${i}" class="${t.active?'':'inactive'}">
     <td>${t.name}</td><td>${t.code??'—'}</td>
     <td>${t.type==='sell_and_buy'?'بيع وشراء':'بيع فقط'}</td>
     <td>${t.currency??'—'}</td><td>${countryCell(t.currency)}</td>
     <td class="aliases">${(t.aliases||[]).join('، ')}</td>
     <td>${t.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
-    <td>${!canWrite() ? '' : (t.active
+    <td class="row" style="gap:6px">${!canWrite() ? '' : `<button class="ghost" onclick="editTreasury(${i})">تعديل</button>` + (t.active
       ? `<button class="ghost danger" onclick="disableTreasury('${encodeURIComponent(t.name)}')">إيقاف</button>`
       : `<button class="ghost" onclick="enableTreasury('${encodeURIComponent(t.name)}')">تفعيل</button>`)}</td>
   </tr>`).join("");
   applyAssetSearch();
+}
+// تعديل inline للخزينة (الاسم = المفتاح، يبقى ثابتًا؛ نعدّل الكود/النوع/العملة/الإملاءات)
+function editTreasury(i) {
+  const t = window._trows[i]; if (!t) return;
+  const row = $("trow-t-"+i); if (!row) return;
+  const typeOpt = [["sell_only","بيع فقط"],["sell_and_buy","بيع وشراء"]]
+    .map(([v,l])=>`<option value="${v}"${t.type===v?" selected":""}>${l}</option>`).join("");
+  const curOpt = [["","—"],["EGP","EGP"],["TND","TND"]]
+    .map(([v,l])=>`<option value="${v}"${(t.currency||"")===v?" selected":""}>${l}</option>`).join("");
+  row.innerHTML = `<td>${esc(t.name)}</td>
+    <td><input id="et_code" value="${esc(t.code||"")}" style="max-width:90px"></td>
+    <td><select id="et_type">${typeOpt}</select></td>
+    <td><select id="et_cur">${curOpt}</select></td>
+    <td>—</td>
+    <td><input id="et_alias" value="${esc((t.aliases||[]).join('، '))}" placeholder="إملاءات (بفواصل)"></td>
+    <td>${t.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
+    <td class="row" style="gap:6px">
+      <button class="ghost" onclick="saveTreasury(${i})">حفظ</button>
+      <button class="ghost" onclick="loadTreasuries()">إلغاء</button></td>`;
+}
+async function saveTreasury(i) {
+  const t = window._trows[i];
+  const body = { name: t.name, code: $("et_code").value.trim()||null, type: $("et_type").value,
+    currency: $("et_cur").value||null, aliases: csv($("et_alias").value) };
+  try { await api(`/treasuries/${encodeURIComponent(t.name)}`,"POST",body); } catch(e){ return; }
+  toast("عُدّلت الخزينة"); loadTreasuries();
 }
 async function addTreasury() {
   if (!$("t_name").value) return toast("الاسم مطلوب");
@@ -222,16 +249,34 @@ async function enableTreasury(n) { await api(`/treasuries/${n}/enable`,"POST"); 
 
 // ── الموردون ──
 async function loadSuppliers() {
-  const rows = await api("/suppliers");
-  $("s_body").innerHTML = rows.map(s => `<tr class="${s.active?'':'inactive'}">
+  const rows = await api("/suppliers"); window._srows = rows;
+  $("s_body").innerHTML = rows.map((s,i) => `<tr id="trow-s-${i}" class="${s.active?'':'inactive'}">
     <td>${s.name}</td><td>${s.code??'—'}</td>
     <td class="aliases">${(s.aliases||[]).join('، ')}</td>
     <td>${s.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
-    <td>${!canWrite() ? '' : (s.active
+    <td class="row" style="gap:6px">${!canWrite() ? '' : `<button class="ghost" onclick="editSupplier(${i})">تعديل</button>` + (s.active
       ? `<button class="ghost danger" onclick="disableSupplier('${encodeURIComponent(s.name)}')">إيقاف</button>`
       : `<button class="ghost" onclick="enableSupplier('${encodeURIComponent(s.name)}')">تفعيل</button>`)}</td>
   </tr>`).join("");
   applyAssetSearch();
+}
+// تعديل inline للمورد (الاسم = المفتاح ثابت؛ نعدّل الكود/الإملاءات)
+function editSupplier(i) {
+  const s = window._srows[i]; if (!s) return;
+  const row = $("trow-s-"+i); if (!row) return;
+  row.innerHTML = `<td>${esc(s.name)}</td>
+    <td><input id="es_code" value="${esc(s.code||"")}" style="max-width:90px"></td>
+    <td><input id="es_alias" value="${esc((s.aliases||[]).join('، '))}" placeholder="إملاءات (بفواصل)"></td>
+    <td>${s.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
+    <td class="row" style="gap:6px">
+      <button class="ghost" onclick="saveSupplier(${i})">حفظ</button>
+      <button class="ghost" onclick="loadSuppliers()">إلغاء</button></td>`;
+}
+async function saveSupplier(i) {
+  const s = window._srows[i];
+  const body = { name: s.name, code: $("es_code").value.trim()||null, aliases: csv($("es_alias").value) };
+  try { await api(`/suppliers/${encodeURIComponent(s.name)}`,"POST",body); } catch(e){ return; }
+  toast("عُدّل المورد"); loadSuppliers();
 }
 async function enableSupplier(n) { await api(`/suppliers/${n}/enable`,"POST"); loadSuppliers(); }
 async function addSupplier() {
@@ -243,16 +288,34 @@ async function disableSupplier(n) { await api(`/suppliers/${n}/disable`,"POST");
 
 // ── قنوات الدفع (م٣) ──
 async function loadChannels() {
-  const rows = await api("/payment-channels");
-  $("c_body").innerHTML = rows.map(c => `<tr class="${c.active?'':'inactive'}">
+  const rows = await api("/payment-channels"); window._crows = rows;
+  $("c_body").innerHTML = rows.map((c,i) => `<tr id="trow-c-${i}" class="${c.active?'':'inactive'}">
     <td>${c.name}</td><td>${c.code??'—'}</td>
     <td class="aliases">${(c.aliases||[]).join('، ')}</td>
     <td>${c.active?'<span class="pill on">فعّالة</span>':'<span class="pill off">موقوفة</span>'}</td>
-    <td>${!canWrite() ? '' : (c.active
+    <td class="row" style="gap:6px">${!canWrite() ? '' : `<button class="ghost" onclick="editChannel(${i})">تعديل</button>` + (c.active
       ? `<button class="ghost danger" onclick="disableChannel('${encodeURIComponent(c.name)}')">إيقاف</button>`
       : `<button class="ghost" onclick="enableChannel('${encodeURIComponent(c.name)}')">تفعيل</button>`)}</td>
   </tr>`).join("");
   applyAssetSearch();
+}
+// تعديل inline لقناة الدفع (الاسم = المفتاح ثابت؛ نعدّل الكود/الإملاءات)
+function editChannel(i) {
+  const c = window._crows[i]; if (!c) return;
+  const row = $("trow-c-"+i); if (!row) return;
+  row.innerHTML = `<td>${esc(c.name)}</td>
+    <td><input id="ec_code" value="${esc(c.code||"")}" style="max-width:90px"></td>
+    <td><input id="ec_alias" value="${esc((c.aliases||[]).join('، '))}" placeholder="إملاءات (بفواصل)"></td>
+    <td>${c.active?'<span class="pill on">فعّالة</span>':'<span class="pill off">موقوفة</span>'}</td>
+    <td class="row" style="gap:6px">
+      <button class="ghost" onclick="saveChannel(${i})">حفظ</button>
+      <button class="ghost" onclick="loadChannels()">إلغاء</button></td>`;
+}
+async function saveChannel(i) {
+  const c = window._crows[i];
+  const body = { name: c.name, code: $("ec_code").value.trim()||null, aliases: csv($("ec_alias").value) };
+  try { await api(`/payment-channels/${encodeURIComponent(c.name)}`,"POST",body); } catch(e){ return; }
+  toast("عُدّلت القناة"); loadChannels();
 }
 async function addChannel() {
   if (!$("c_name").value) return toast("الاسم مطلوب");

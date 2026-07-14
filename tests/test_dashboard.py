@@ -409,3 +409,110 @@ async def test_assign_unknown_term_requires_auth(db):
         r = await ac.post("/api/unknown-terms/خزينه ما/assign",
                           json={"type": "treasury", "target_code": "74"})   # بلا دخول
         assert r.status_code == 401
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# تعديل inline للسجلات الموجودة + تنبيه المالك + RBAC (م: تعديل البيانات + قنوات + موظف)
+# ─────────────────────────────────────────────────────────────────────────────
+def _admin_settings():
+    return _settings(admin_room_jid="admin@g.us")
+
+
+async def _alerts(db):
+    return [m for m in await db.outgoing.next_unsent(50) if m.get("is_alert")]
+
+
+async def test_edit_treasury_updates_aliases_currency_and_alerts(db):
+    pytest.importorskip("fastapi")
+    await db.treasuries.upsert(TreasuryRecord(name="بلاس فون", code="74", type=TreasuryType.SELL_ONLY))
+    async with _client(db, settings=_admin_settings()) as ac:
+        r = await ac.post("/api/treasuries/بلاس فون",
+                          json={"name": "بلاس فون", "code": "74", "type": "sell_only",
+                                "currency": "EGP", "aliases": ["بلاصو", "بلاس"]})
+        assert r.status_code == 200
+    doc = await db.treasuries.col.find_one({"name": "بلاس فون"})
+    assert doc["aliases"] == ["بلاصو", "بلاس"] and doc["currency"] == "EGP"
+    assert any("بلاس فون" in (m.get("text") or "") for m in await _alerts(db)), "تنبيه is_alert للمالك"
+
+
+async def test_edit_treasury_reviewer_forbidden(db):
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    await db.treasuries.upsert(TreasuryRecord(name="بلاس فون", code="74", type=TreasuryType.SELL_ONLY))
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        r = await ac.post("/api/treasuries/بلاس فون", json={"name": "بلاس فون", "aliases": ["x"]})
+        assert r.status_code == 403, "reviewer يرى لكن لا يعدّل"
+
+
+async def test_edit_treasury_code_conflict_409(db):
+    pytest.importorskip("fastapi")
+    await db.treasuries.upsert(TreasuryRecord(name="أ", code="10", type=TreasuryType.SELL_ONLY))
+    await db.treasuries.upsert(TreasuryRecord(name="ب", code="20", type=TreasuryType.SELL_ONLY))
+    async with _client(db) as ac:
+        r = await ac.post("/api/treasuries/ب", json={"name": "ب", "code": "10", "type": "sell_only"})
+        assert r.status_code == 409, "كود مستخدَم على اسم مختلف → 409"
+
+
+async def test_edit_supplier_updates_aliases_and_alerts(db):
+    pytest.importorskip("fastapi")
+    from core.models import SupplierRecord
+    await db.suppliers.upsert(SupplierRecord(name="مورد أ", code="S1"))
+    async with _client(db, settings=_admin_settings()) as ac:
+        r = await ac.post("/api/suppliers/مورد أ",
+                          json={"name": "مورد أ", "code": "S1", "aliases": ["م1", "م2"]})
+        assert r.status_code == 200
+    doc = await db.suppliers.col.find_one({"name": "مورد أ"})
+    assert doc["aliases"] == ["م1", "م2"]
+    assert await _alerts(db), "تنبيه المالك عند تعديل المورد"
+
+
+async def test_edit_channel_updates_and_reviewer_forbidden(db):
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    from core.models import PaymentChannelRecord
+    await db.payment_channels.upsert(PaymentChannelRecord(name="فودافون كاش", code="VC"))
+    async with _client(db, settings=_admin_settings()) as ac:
+        r = await ac.post("/api/payment-channels/فودافون كاش",
+                          json={"name": "فودافون كاش", "code": "VC", "aliases": ["فودا", "vc"]})
+        assert r.status_code == 200
+    doc = await db.payment_channels.col.find_one({"name": "فودافون كاش"})
+    assert doc["aliases"] == ["فودا", "vc"]
+    assert await _alerts(db), "تنبيه المالك عند تعديل القناة"
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        r = await ac.post("/api/payment-channels/فودافون كاش", json={"name": "فودافون كاش", "aliases": []})
+        assert r.status_code == 403
+
+
+async def test_edit_employee_name_only_preserves_number_and_alerts(db):
+    pytest.importorskip("fastapi")
+    await db.employees.upsert(EmployeeRecord(whatsapp_number="20100", name="اسم قديم"))
+    async with _client(db, settings=_admin_settings()) as ac:
+        r = await ac.post("/api/employees/20100", json={"whatsapp_number": "20100", "name": "اسم جديد"})
+        assert r.status_code == 200
+    doc = await db.employees.col.find_one({"whatsapp_number": "20100"})
+    assert doc["name"] == "اسم جديد" and doc["whatsapp_number"] == "20100", "الاسم يتغيّر والرقم ثابت"
+    assert any("اسم جديد" in (m.get("text") or "") for m in await _alerts(db))
+
+
+async def test_edit_employee_reviewer_forbidden_and_404(db):
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        r = await ac.post("/api/employees/20100", json={"whatsapp_number": "20100", "name": "x"})
+        assert r.status_code == 403
+    async with _client(db) as ac:
+        r = await ac.post("/api/employees/غير-موجود", json={"whatsapp_number": "غير-موجود", "name": "x"})
+        assert r.status_code == 404
+
+
+async def test_treasury_alias_edit_is_live_without_restart(db):
+    """م٢: تعديل إملاء خزينة يسري فورًا على القراءة التالية (all_active) — بلا cache/إعادة تشغيل."""
+    from core.parsing.resolve import resolve_treasury
+    await db.treasuries.upsert(TreasuryRecord(name="بلاس فون", code="74", type=TreasuryType.SELL_ONLY))
+    before = await db.treasuries.all_active()                 # نفس ما يقرؤه pipeline._ingest لكل رسالة
+    assert resolve_treasury("اورنج كاش", before) is None      # الإملاء غير معرّف بعد
+    await db.treasuries.upsert(TreasuryRecord(name="بلاس فون", code="74",
+                                              type=TreasuryType.SELL_ONLY, aliases=["اورنج كاش"]))
+    after = await db.treasuries.all_active()                  # القراءة الحيّة التالية — بلا إعادة تشغيل
+    t = resolve_treasury("اورنج كاش", after)
+    assert t is not None and t.name == "بلاس فون", "الإملاء الجديد يُطابَق فورًا على الرسالة التالية"

@@ -467,6 +467,19 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         await _notify_owner(_owner_text("قناة دفع", "إضافة/تعديل", rec.name, rec.code))
         return rec.model_dump(mode="json")
 
+    @router.put("/payment-channels/{name}", dependencies=[manager])
+    @router.post("/payment-channels/{name}", dependencies=[manager])
+    async def edit_channel(name: str, body: ChannelIn) -> dict:
+        """تعديل قناة دفع موجودة بالاسم (اسم/كود/إملاءات) — نفس نمط الخزائن/الموردين."""
+        data = body.model_dump()
+        data["name"] = name                              # الاسم من المسار هو المفتاح
+        rec = PaymentChannelRecord(**data)
+        await _check_code_conflict(db.payment_channels, rec.code, rec.name)   # م٣: منع كود مكرّر
+        await db.payment_channels.upsert(rec)
+        log.info("تعديل قناة دفع: %s", name)
+        await _notify_owner(_owner_text("قناة دفع", "تعديل", rec.name, rec.code))
+        return rec.model_dump(mode="json")
+
     @router.post("/payment-channels/{name}/disable", dependencies=[manager])
     async def disable_channel(name: str) -> dict:
         res = await db.payment_channels.col.update_one({"name": name}, {"$set": {"active": False}})
@@ -521,6 +534,21 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         rec = EmployeeRecord(**body.model_dump())
         await db.employees.upsert(rec)
         log.info("موظف معتمد محدّث: %s (%s)", rec.name, rec.whatsapp_number)
+        await _notify_owner(_owner_text("موظف", "إضافة/تعديل", rec.name, rec.whatsapp_number))
+        return rec.model_dump(mode="json")
+
+    @router.put("/employees/{number}", dependencies=[manager])
+    @router.post("/employees/{number}", dependencies=[manager])
+    async def edit_employee(number: str, body: EmployeeIn) -> dict:
+        """تعديل **اسم** موظف معتمد فقط — الرقم مفتاح ثابت هنا (تغيير الرقم = حذف ثم إضافة)."""
+        target = await db.employees.col.find_one({"whatsapp_number": number})
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"موظف غير موجود: {number}")
+        rec = EmployeeRecord(whatsapp_number=number, name=body.name,
+                             active=bool(target.get("active", True)))   # نُبقي حالة التفعيل
+        await db.employees.upsert(rec)
+        log.info("تعديل اسم موظف معتمد: %s (%s)", rec.name, number)
+        await _notify_owner(_owner_text("موظف", "تعديل", rec.name, number))
         return rec.model_dump(mode="json")
 
     @router.post("/employees/{number}/disable", dependencies=[manager])

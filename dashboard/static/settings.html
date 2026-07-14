@@ -211,12 +211,31 @@ async function enableUser(u){ try{ await api(`/users/${encodeURIComponent(u)}/en
 
 // ── الموظفون ──
 async function loadEmployees(){
-  const rows=await api("/employees");
-  $("e_body").innerHTML=rows.map(e=>`<tr class="${e.active?'':'inactive'}">
+  const rows=await api("/employees"); window._erows=rows;
+  $("e_body").innerHTML=rows.map((e,i)=>`<tr id="erow-${i}" class="${e.active?'':'inactive'}">
     <td>${esc(e.name)}</td><td>${esc(e.whatsapp_number)}</td>
     <td>${e.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
-    <td><button class="ghost danger" onclick="delEmployee('${encodeURIComponent(e.whatsapp_number)}')">حذف</button></td>
+    <td class="row" style="gap:6px">
+      <button class="ghost" onclick="editEmployee(${i})">تعديل</button>
+      <button class="ghost danger" onclick="delEmployee('${encodeURIComponent(e.whatsapp_number)}')">حذف</button></td>
   </tr>`).join("");
+}
+// تعديل inline لاسم الموظف فقط (الرقم = المفتاح ثابت؛ تغيير الرقم = حذف ثم إضافة)
+function editEmployee(i){
+  const e=window._erows[i]; if(!e) return;
+  const row=$("erow-"+i); if(!row) return;
+  row.innerHTML=`<td><input id="ee_name" value="${esc(e.name)}"></td>
+    <td>${esc(e.whatsapp_number)}</td>
+    <td>${e.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
+    <td class="row" style="gap:6px">
+      <button class="ghost" onclick="saveEmployee(${i})">حفظ</button>
+      <button class="ghost" onclick="loadEmployees()">إلغاء</button></td>`;
+}
+async function saveEmployee(i){
+  const e=window._erows[i]; const name=$("ee_name").value.trim();
+  if(!name) return toast("الاسم مطلوب");
+  try{ await api(`/employees/${encodeURIComponent(e.whatsapp_number)}`,"POST",{whatsapp_number:e.whatsapp_number,name}); }catch(err){ return; }
+  toast("عُدّل الموظف"); loadEmployees(); loadLog();
 }
 async function addEmployee(){
   if(!$("e_num").value||!$("e_name").value) return toast("الرقم والاسم مطلوبان");
