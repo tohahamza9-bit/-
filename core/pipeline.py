@@ -539,6 +539,11 @@ class Pipeline:
                 vals = "، ".join(str(d.get("extracted_value")) for d in neg)
                 await self.bus.notify_admin(
                     f"⚠️ {ref} — مبلغ سالب سُجّل كموجب (abs): {vals} — راجع", raw.message_key)
+            # مرحلة ب — أولويّة ٤: مبلغ موجود بلا عملة مؤكَّدة (لا صريحة/خزينة/هاتف) → تنبيه للمراجعة
+            if leg.amount is not None and leg.currency is None:
+                await self.bus.notify_admin(
+                    f"⚠️ {ref} — مبلغ {leg.amount:g} بلا عملة مؤكَّدة (تعذّر الاستنتاج) — راجع",
+                    raw.message_key)
         except Exception as exc:      # best-effort: لا يوقف المعالجة (T5 — نسجّل فقط)
             log.warning("تنبيه مرحلة أ فشل (%s) — تجاهل best-effort: %s", raw.message_key, exc)
 

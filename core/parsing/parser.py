@@ -996,6 +996,15 @@ def _is_egyptian_phone(phone: Optional[str]) -> bool:
     return bool(phone) and len(phone) == 11 and phone.startswith("01")
 
 
+def _is_tunisian_phone(phone: Optional[str]) -> bool:
+    """هاتف تونسيّ (8 خانات يبدأ 2/5/9، أو دوليّ يبدأ 216) — يُستنبَط منه TND عند غياب عملة
+    صريحة/خزينة (مرحلة ب، أولوية ٣). لا يلتبس بالمصريّ (01/20) ولا الليبيّ (218/09)."""
+    if not phone:
+        return False
+    d = re.sub(r"\D", "", phone)
+    return (len(d) == 8 and d[0] in "259") or d.startswith("216")
+
+
 def _first_bare_amount(text: str) -> Optional[float]:
     """أوّل سطر رقميّ مجرّد يُقرأ مبلغًا («2051»→2051)، مع تجاوز مجاري الهاتف (§3.5). للسياق الذي
     استُنبطت فيه العملة من الهاتف (بلا رمز عملة صريح)."""
@@ -1013,7 +1022,10 @@ def _build_leg(
     if not f:
         return None, 0.0
 
+    # العملة (§3.4) — أولويّة الحسم (مرحلة ب): ١ كلمة عملة صريحة تفوز دائمًا؛ ٢ استنتاج من
+    #   currency الخزينة (DB ديناميكيّ)؛ ٣ استنتاج من الهاتف (مصري→EGP/تونسي→TND)؛ ٤ غياب → None+تنبيه.
     currency: Optional[Currency] = f.get("currency")
+    currency_source: Optional[str] = "explicit" if currency is not None else None
 
     # الخزينة (§4) — من سطر A أو من عنوان SI. «صافي/خصم1%/بدون خصم» ليست خزينة وجهة بل
     # مؤشّر «المبلغ صافي/نوع الخصم» → تُتجاهَل عند البحث عن الخزينة (كأسماء المدن) فتبقى
@@ -1029,17 +1041,21 @@ def _build_leg(
             unresolved_treasury = tname.strip() or None
     tref: Optional[TreasuryRef] = None
     if trec is not None:
-        if currency is None:
+        if currency is None and trec.currency is not None:   # أولويّة ٢: استنتاج من الخزينة (مرحلة ب)
             currency = trec.currency
+            currency_source = "inferred_from_treasury"
         tref = TreasuryRef(
             code=trec.code, name=trec.name, type=trec.type,
             currency=trec.currency or currency,
         )
 
-    # 🔴 استنتاج EGP من الهاتف المصري (01… 11 خانة) عند غياب عملة صريحة (§3.4، قرار المستخدم):
-    #    حوالة بهاتف مصريّ بلا «ج.م» تُعامَل مصرية افتراضيًّا. (SI عملتها صريحة دائمًا فلا تتأثّر.)
-    if currency is None and not is_si and _is_egyptian_phone(f.get("phone")):
-        currency = Currency.EGP
+    # أولويّة ٣: استنتاج العملة من الهاتف عند غيابها صريحةً/من الخزينة — مصري→EGP، تونسي→TND
+    #    (§3.4 + مرحلة ب). (SI عملتها صريحة دائمًا فلا تتأثّر.)
+    if currency is None and not is_si:
+        if _is_egyptian_phone(f.get("phone")):
+            currency, currency_source = Currency.EGP, "inferred_from_phone"
+        elif _is_tunisian_phone(f.get("phone")):
+            currency, currency_source = Currency.TND, "inferred_from_phone"
 
     # نوع العملية (§5) — الأصل بيع؛ الكلمة الصريحة تحكم؛ ثم تمييز الطرف (§5.3)
     op, explicit = detect_explicit_operation(full_text)
@@ -1112,6 +1128,11 @@ def _build_leg(
             "extracted_value": f.get("phone"), "method": "phone_uncertain",
             "confidence": "MEDIUM",
         })
+    if currency_source == "inferred_from_treasury" and currency is not None:  # مرحلة ب: للمراجعة
+        deviation_log.append({
+            "field": "currency", "raw_value": None, "extracted_value": currency.value,
+            "method": "inferred_from_treasury", "confidence": "inferred_from_treasury",
+        })
 
     leg = ParsedLeg(
         operation=op,
@@ -1128,6 +1149,7 @@ def _build_leg(
         phone=f.get("phone"),
         phone_alt=f.get("phone_alt"),                 # فيكس ج: رقم ثانٍ عند وجود مرشّحَين
         phone_confidence=phone_conf,                  # مرحلة أ: high/international/uncertain
+        currency_confidence=currency_source,          # مرحلة ب: explicit/inferred_from_treasury/phone
         ambiguous_amount=f.get("ambiguous_amount"),   # فيكس د: أرقام مجرّدة متعدّدة → للتصعيد
         payment_method=f.get("payment"),
         recipient_name=f.get("recipient_name"),

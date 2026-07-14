@@ -104,6 +104,8 @@ class ParsedLeg(BaseModel):
     unresolved_treasury: Optional[str] = None  # اسم خزينة SI معنون لم يُحلّ → يُلتقط مجهولًا (db.unknown_terms)
     # ── مرحلة أ (لا خسارة صامتة + قيمة مالية أولوية) ──
     phone_confidence: Optional[str] = None     # high (مصري/تونسي/ليبي) / international (كود دولة) / uncertain
+    # ── مرحلة ب (استنتاج العملة من السياق) ──
+    currency_confidence: Optional[str] = None  # explicit / inferred_from_treasury / inferred_from_phone / None
     deviation_log: list[dict] = Field(default_factory=list)  # استخراجات بتخمين للمراجعة (لوحة الانتباه):
     #   [{field, raw_value, extracted_value, method, confidence}] — telemetry لا يغيّر منطق matching/writer
 
