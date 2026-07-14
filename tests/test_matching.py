@@ -17,6 +17,7 @@ from core.constants import (
     Mark,
     OperationType,
     REMINDER_INTERVAL_SECONDS,
+    ROOM_MATCH_MAX_SECONDS,
     RoomType,
     Status,
     TreasuryType,
@@ -309,7 +310,7 @@ async def test_treasury_no_room_alerts_once_then_escalates(db):
     assert deal.reminders_sent == 0 and not await _outgoing(db)
 
     # بعد النافذة → تنبيه اعتماد يدوي واحد (Reply في المركزية على رسالة الحوالة)
-    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=20))
+    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=ROOM_MATCH_MAX_SECONDS + 5))
     assert deal.reminders_sent == 1
     assert deal.status is Status.HELD
     out = await _outgoing(db)
@@ -319,7 +320,7 @@ async def test_treasury_no_room_alerts_once_then_escalates(db):
     assert not out[0].get("reaction")               # تنبيه نصّي لا تفاعل
 
     # قبل مرور 15 دقيقة → لا تصعيد ولا تكرار للتنبيه
-    t1 = T0 + timedelta(seconds=20)
+    t1 = T0 + timedelta(seconds=ROOM_MATCH_MAX_SECONDS + 5)
     deal = await svc.escalation_tick(deal, now=t1 + timedelta(seconds=REMINDER_INTERVAL_SECONDS - 5))
     assert deal.reminders_sent == 1 and deal.status is Status.HELD
     assert len(await _outgoing(db)) == 1            # لا تنبيه ثانٍ
@@ -341,7 +342,7 @@ async def test_treasury_no_room_confirm_via_reply_proceeds(db):
 
     deal = make_deal(make_leg())
     deal = await svc.match_in_rooms(deal, now=T0 + timedelta(seconds=12))
-    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=20))
+    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=ROOM_MATCH_MAX_SECONDS + 5))
     assert deal.status is Status.HELD                # معلّقة تنتظر «تم»
     # HELD ليست حالة نهائية تحجب «تم» — يمرّ التجاوز البشري ويُكمل الإدخال (Pipeline._handle_control).
 
@@ -368,7 +369,7 @@ async def test_sell_and_buy_treasury_no_manual_confirm_alert(db):
     leg = make_leg(treasury=TreasuryRef(
         code="85", name="خصم 1%", type=TreasuryType.SELL_AND_BUY, currency=Currency.EGP))
     deal = await svc.match_in_rooms(make_deal(leg), now=T0 + timedelta(seconds=12))
-    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=20))
+    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=ROOM_MATCH_MAX_SECONDS + 5))
     # MATCHED نهائية → لا تذكير/تصعيد، ولا رسالة «تم»
     assert deal.status is Status.MATCHED
     assert not [o for o in await _outgoing(db) if "تم" in (o.get("text") or "")]
@@ -432,7 +433,7 @@ async def test_two_legged_no_supplier_room_alerts_once_then_escalates(db):
     assert deal.supplier_no_room is True and deal.status is Status.MATCHING
 
     # بعد النافذة → تنبيه اعتماد يدوي واحد (Reply في المركزية على رسالة الحوالة)
-    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=20))
+    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=ROOM_MATCH_MAX_SECONDS + 5))
     assert deal.reminders_sent == 1 and deal.status is Status.HELD
     out = await _outgoing(db)
     assert len(out) == 1
@@ -441,7 +442,7 @@ async def test_two_legged_no_supplier_room_alerts_once_then_escalates(db):
     assert not out[0].get("reaction")                           # تنبيه نصّي لا تفاعل
 
     # بعد 15 دقيقة بلا «تم» → تصعيد لغرفة المسؤول
-    t1 = T0 + timedelta(seconds=20)
+    t1 = T0 + timedelta(seconds=ROOM_MATCH_MAX_SECONDS + 5)
     deal = await svc.escalation_tick(deal, now=t1 + timedelta(seconds=REMINDER_INTERVAL_SECONDS))
     assert deal.status is Status.ESCALATED
     out = await _outgoing(db)
@@ -613,14 +614,14 @@ async def test_escalation_reminders_then_admin(db):
     assert not await _outgoing(db)
 
     # بعد انقضاء النافذة → تذكير أول «غير موجودة» (Reply في المركزية)
-    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=20))
+    deal = await svc.escalation_tick(deal, now=T0 + timedelta(seconds=ROOM_MATCH_MAX_SECONDS + 5))
     assert deal.reminders_sent == 1
     assert deal.status is Status.HELD
     out = await _outgoing(db)
     assert len(out) == 1 and out[0]["chat_jid"] == CENTRAL and out[0]["reply_to_key"] == "msg-1"
 
     # قبل مرور 15 دقيقة → لا تذكير ثانٍ
-    t2 = T0 + timedelta(seconds=20)
+    t2 = T0 + timedelta(seconds=ROOM_MATCH_MAX_SECONDS + 5)
     deal = await svc.escalation_tick(deal, now=t2 + timedelta(seconds=REMINDER_INTERVAL_SECONDS - 5))
     assert deal.reminders_sent == 1
 

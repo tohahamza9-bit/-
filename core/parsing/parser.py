@@ -903,6 +903,7 @@ def parse_completion_fragment(
     last_name_idx = -1
     phone: Optional[str] = None
     name_tokens: list[str] = []
+    int_candidates: list[tuple[str, int]] = []   # أعداد صحيحة (لا عشرية) — مرشّحة سعرًا صحيحًا
     for i, tok in enumerate(tokens):
         ph = classify_phone(tok)
         if ph:                                   # هاتف مستلم (مصري/تونسي، يرفض الليبي)
@@ -914,7 +915,8 @@ def parse_completion_fragment(
                 code, code_idx = tok, i
             elif int(tok) < 100:                 # كودٌ مضبوط سلفًا + عدد صحيح <100 = سعر تونسي صحيح لا
                 prices.append(tok)               # كودٌ ثانٍ («986 سند التركي 35»→سعر 35، يُطبَّع 0.35 §3.6)
-        elif _NUMERIC_TOKEN_RE.match(tok):       # عدد آخر (مبلغ/رقم طويل) → يُتجاهَل
+        elif _NUMERIC_TOKEN_RE.match(tok):       # عدد صحيح آخر: مرشّح سعر صحيح («6»=6.00) أو مبلغ
+            int_candidates.append((tok, i))
             continue
         else:
             ntok = normalize_ar(tok)
@@ -931,6 +933,18 @@ def parse_completion_fragment(
             and len(code) == 2 and code_idx > last_name_idx >= 0):
         prices.append(code)
         code = None
+
+    # 🔴 سعر صحيح بلا فاصلة عشرية («6» = 6.00، م: A480) — يُقبَل حين **لا** سعر عشريّ، بشروط أمان:
+    #   • ضمن نطاق سعر معقول حسب العملة (جنيه 1-100، دينار 20-50) — يستبعد المبالغ (≥مئات) والهواتف؛
+    #   • ليس رمز الكود نفسه (idx≠code_idx)، ويقع **بعد** الاسم (كالسعر عادةً) لا قبله؛
+    #   • ضمن سطر يحمل كودًا أو اسمًا (زبون/مورد) لا رقمًا عابرًا وحده.
+    #   الهاتف مُستبعَد أصلًا (فرع classify_phone)، وكود المورّد يُلتقط بـ_CODE_RE (2-4 خانات) قبله.
+    if not prices and int_candidates and (code is not None or name_tokens):
+        lo, hi = (20, 50) if tnd else (1, 100)
+        for val, idx in int_candidates:
+            if idx != code_idx and lo <= int(val) <= hi and idx > last_name_idx:
+                prices.append(val)
+                break
 
     # السعر = أصغر رقم عشري (السعر لا المبلغ) — الفاصلة العربية «،» → عشرية (§3.6)
     price_raw = (

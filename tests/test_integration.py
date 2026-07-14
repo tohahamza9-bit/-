@@ -16,7 +16,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from core.bus import Bus
-from core.constants import Mark, OperationType, RoomType, Status, TreasuryType
+from core.constants import (
+    Mark, OperationType, REMINDER_INTERVAL_SECONDS, ROOM_MATCH_MAX_SECONDS,
+    RoomType, Status, TreasuryType,
+)
 from core.models import (
     BotControl, Deal, EmployeeRecord, ParsedLeg, RawMessage, Room, TreasuryRecord, WriteResult,
 )
@@ -994,18 +997,20 @@ async def test_reminders_then_escalation(db):
     d = await db.deals.find_by_source_key("nf1")
     assert d.status == Status.MATCHING and writer.calls == []  # لم تُكتب (لم تتطابق §8.1)
 
-    # بعد نافذة المطابقة (>15s) → تذكير أول «غير موجودة» في المركزية
-    await pipe.tick(t0 + timedelta(seconds=20))
+    # بعد نافذة المطابقة (> ROOM_MATCH_MAX_SECONDS) → تذكير أول «غير موجودة» في المركزية
+    t1 = t0 + timedelta(seconds=ROOM_MATCH_MAX_SECONDS + 5)
+    await pipe.tick(t1)
     d = await db.deals.find_by_source_key("nf1")
     assert d.reminders_sent == 1 and d.status == Status.HELD
 
-    # بعد 16 دقيقة → تذكير ثانٍ
-    await pipe.tick(t0 + timedelta(seconds=20, minutes=16))
+    # بعد فترة التذكير → تذكير ثانٍ
+    t2 = t1 + timedelta(seconds=REMINDER_INTERVAL_SECONDS + 5)
+    await pipe.tick(t2)
     d = await db.deals.find_by_source_key("nf1")
     assert d.reminders_sent == 2
 
-    # بعد 16 دقيقة أخرى → تصعيد لغرفة المسؤول + إغلاق
-    await pipe.tick(t0 + timedelta(seconds=20, minutes=32))
+    # بعد فترة تذكير أخرى → تصعيد لغرفة المسؤول + إغلاق
+    await pipe.tick(t2 + timedelta(seconds=REMINDER_INTERVAL_SECONDS + 5))
     d = await db.deals.find_by_source_key("nf1")
     assert d.status == Status.ESCALATED
 

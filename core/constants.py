@@ -180,7 +180,9 @@ INCOMPLETE_DATA_ESCALATE_SECONDS = 15 * 60  # §7.3 حوالة A ناقصة بل
 SECOND_MESSAGE_LINK_SECONDS = 120   # §7.3 نافذة ربط رد الخزينة/المورد بحوالة معلّقة (دقيقتان)
 PENDING_REPLY_MAX_SECONDS = 90      # §7.3 احتفاظ برد خزينة/مورد وصل قبل حوالته (رد معلّق)
 ROOM_MATCH_MIN_SECONDS = 10         # §8.1 نافذة المطابقة
-ROOM_MATCH_MAX_SECONDS = 15
+# نافذة ظهور الصفقة في الغرف قبل تنبيه «غير موجودة» (escalation_tick). رُفِعت 15s→300s (٥ دقائق)
+# لإعطاء الرسالة الثانية (خزينة/مورد) وقتًا كافيًا للوصول والربط قبل التصعيد — تقليل تنبيهات كاذبة.
+ROOM_MATCH_MAX_SECONDS = 300
 ROOM_MATCH_WINDOW_SECONDS = 3600    # §8.1 نافذة البحث في رسائل الغرف حول وقت الحوالة (±ساعة)
 REMINDER_INTERVAL_SECONDS = 15 * 60  # §8.1 تذكير كل 15 دقيقة
 ACTIVE_WINDOW_DAYS = 15             # §12 الحوالات النشطة القابلة للتعديل
