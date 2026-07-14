@@ -10,9 +10,10 @@
   EXPORT_SEQ   — كود تسلسليّ من التصدير (A1–A9) لا رقم إشاريّ حقيقيّ → الحالة كلها غير موثوقة.
   CHANNEL_DATA — «channel» في الملف = اسم خزينة/«صافي»/«كاش»؛ المحلّل يعطي القناة الصحيحة (فودافون/None).
   AMOUNT_DATA  — «amount/currency» في الملف None/مبتور خطأً؛ المحلّل يستخرج القيمة الصحيحة.
-  BURAQ        — «البراق» مبذورة مورِّدًا (SEED_SUPPLIERS)؛ الملف يسمّيها خزينة → المحلّل يشتقّ
-                 خزينة «فودافون بالخصم». تعارض تصنيف (config) يُعرَض للمالك، لا خطأ محلّل.
-  FIFO_EDGE    — رسالة ثانية «كود اسم سعر + خزينة» لم تُدمَج (حافة نادرة؛ shape_04 يعمل ٥/٦).
+  BURAQ        — known_bad (قرار المالك ٢٠٢٦): «البراق» مورِّد صحيح في المحلّل (SEED_SUPPLIERS)
+                 والملف غلط إذ يسمّيها خزينة → المحلّل يشتقّ خزينة «فودافون بالخصم». لا تعديل للمحلّل.
+  FIFO_EDGE    — known_bad (قرار المالك ٢٠٢٦): رسالة ثانية بصيغة «كود اسم سعر» + سطر خزينة مستقلّ
+                 لم تُدمَج (حافة نادرة؛ shape_04 يعمل ٥/٦). يُنتظَر مثال إنتاج حقيقيّ قبل الإصلاح.
   NET_EDIT     — «amount_net=None» في الملف بينما رسالة٢ صافٍ/تعديل تحمل صافيًا فعليًّا.
   TRAILING     — رسالة مفردة بذيل شبيه بالمورّد التقطه المحلّل؛ الملف تركه None (سلوك مبرَّر).
   PREFIX_EDIT  — رسالة٢ نسخة معدّلة («تم تعديل») بادئتها حرف عربيّ زائد — أثر تصدير في الدمج.
@@ -50,14 +51,14 @@ KNOWN_DIVERGENCES: dict[str, set[str]] = {
     "misspelled_channel#3": {"amount_gross", "currency", "channel"},   # «20000ج»→EGP؛ الملف None/خزينة
     "amount_midsentence#2": {"amount_gross"},              # «6،070»→6070 (فاصلة آلاف)؛ الملف 70
     "rate_stuck_to_name#0": {"amount_net", "currency"},    # «ج٠م»→EGP وصافٍ؛ الملف None
-    # BURAQ (تعارض تصنيف — يُعرَض للمالك)
+    # BURAQ (known_bad: «البراق» مورّد صحيح؛ الملف يسمّيها خزينة خطأً — قرار المالك)
     "shape_05_msg2_treasury_only#0": {"treasury"},
     "shape_06_msg2_two_rates#1": {"treasury"},
     "shape_06_msg2_two_rates#2": {"treasury"},
     "shape_06_msg2_two_rates#3": {"amount_gross", "treasury"},   # amount: «49,915»→49915 صحيح
     "comma_thousands#2": {"amount_gross", "treasury"},
     "arabic_comma_rate#2": {"treasury"},
-    # FIFO_EDGE (رسالة ثانية لم تُدمَج — حافة نادرة)
+    # FIFO_EDGE (known_bad: رسالة ثانية لم تُدمَج — حافة نادرة؛ ننتظر مثال إنتاج قبل الإصلاح)
     "shape_04_msg2_rate_only#2": {"supplier_code", "supplier_name", "rate"},
     "amount_midsentence#1": {"supplier_code", "supplier_name", "rate"},
     "shape_06_msg2_two_rates#4": {"supplier_code", "supplier_name", "rate", "treasury"},
