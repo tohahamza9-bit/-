@@ -191,8 +191,8 @@ async def test_cancel_discount_positive_commission(db):
 
     job = writer.jobs[0]
     assert job.operation == OperationType.BUY
-    assert job.leg.amount == 1584.0            # الصافي (NET) — الشراء العكسيّ ينفَّذ بالمخصوم الفعليّ
-    assert job.leg.commission == 16.0          # الخصم موجب (توثيقيّ، لا يغيّر المخصوم)
+    assert job.leg.amount == 1600.0            # GROSS (قبل الخصم) — MONEYADO يطرح العمولة → NET=1584
+    assert job.leg.commission == 16.0          # الخصم موجب — يُطرَح فعليًّا (لا توثيقيّ)
 
 
 async def test_cancel_si_discount_positive_commission(db):
@@ -212,8 +212,8 @@ async def test_cancel_si_discount_positive_commission(db):
 
     job = writer.jobs[0]
     assert job.operation == OperationType.BUY
-    assert job.leg.amount == 5010.0            # الصافي (NET) — كصيغة A بالضبط
-    assert job.leg.commission == 50.0          # موجبة توثيقيّة — كصيغة A بالضبط
+    assert job.leg.amount == 5060.0            # GROSS (قبل الخصم) — كصيغة A بالضبط، NET=5010
+    assert job.leg.commission == 50.0          # موجبة تُطرَح فعليًّا — كصيغة A بالضبط
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -66,24 +66,36 @@ def build_cancellation_jobs(deal: Deal, now: datetime, ref: str,
 
     - بيع فقط → شراء عكسيّ: نفس الكود/المبلغ/السعر/الخزينة، ملاحظات «إلغاء {ref}».
     - بيع + خصم → شراء بالمبلغ **قبل الخصم** (leg.amount) والخصم **موجب** (abs) بلا سالب.
-    - بيع + شراء → شراء (ببيانات البيع) order=0 ثم بيع (ببيانات الشراء) order=1.
-    يعكس الصافي/العمولة **الحاليّين** (المحفوظين حيّاً في أطراف الصفقة بعد أي تعديلات §3).
+    - بيع + شراء → شراء (ببيانات البيع) order=0 ثم بيع (ببيانات الشراء) order=1 — كلاهما NET بلا عمولة.
+    خصمٌ ⇒ الكمية = GROSS (الحاليّ بعد أي تعديل §3) + العمولة abs موجبة؛ MONEYADO يطرحها → NET.
     note: ملاحظة مخصّصة (تذكر التعديل السابق §6) — الافتراض «إلغاء {ref}».
     كلّها is_reversal=True (لا تُحسب «نُزّلت» في الحارس §9) بمحاولة واحدة (كالقيود العكسية)."""
     note = note or f"إلغاء {ref}"
     jobs: list[WriteJob] = []
     order = 0
     if deal.sell_leg is not None:
-        disc = deal.sell_leg.commission
-        # 🔴 الشراء العكسيّ ينفَّذ فعليًّا بالمبلغ **الصافي (NET)** — لا الإجمالي (GROSS): الشراء
-        #    بـ NET يعادل تمامًا المخصوم الأصليّ من البيع (أثر صافٍ = صفر). العمولة **توثيقيّة فقط**
-        #    (موجبة، لا تغيّر المخصوم في شاشة الشراء — قرار صاحب العمل). بلا خصم: NET=GROSS فلا فرق.
-        net = deal.sell_leg.amount_after_discount
-        rev = deal.sell_leg.model_copy(update={
+        slg = deal.sell_leg
+        disc = slg.commission
+        rev_note = note
+        if disc:
+            # 🟢 خصم (بيع فقط، A أو SI): خانة الكمية = **GROSS = leg.amount** (المبلغ قبل الخصم —
+            #    ثابت قبل/بعد أي تعديل §6.2: التعديل يحدّث leg.amount إلى GROSS الجديد)، والعمولة =
+            #    abs موجبة تُطرَح فعليًّا → MONEYADO يحسب الصافي (GROSS − commission = NET). تأكيد
+            #    محاسبيّ مباشر من MONEYADO — العمولة ليست توثيقيّة (إصلاح باغ GROSS/NET).
+            amount, commission = slg.amount, abs(disc)
+            if deal.amendments:                           # حالة ٢: توثيق التحوّل في الملاحظات (§6)
+                g0 = deal.amendments[0].get("old_net")    # GROSS الأصليّ (leg.amount قبل أوّل تعديل)
+                rev_note = (f"إلغاء {ref} — بعد تعديل من {g0:g} إلى {slg.amount:g}"
+                            if g0 is not None else note)
+        else:
+            # بلا خصم (بيع عاديّ، أو طرف البيع في صفقة طرفين = NET بلا عمولة) — بلا تغيير.
+            net = slg.amount_after_discount
+            amount, commission = (net if net is not None else slg.amount), slg.commission
+        rev = slg.model_copy(update={
             "operation": OperationType.BUY,
-            "recipient_name": note,                       # خانة الملاحظات (§11.1-12)
-            "amount": net if net is not None else deal.sell_leg.amount,   # الصافي (NET)
-            "commission": abs(disc) if disc else deal.sell_leg.commission,  # موجبة (توثيقيّة)
+            "recipient_name": rev_note,                   # خانة الملاحظات (§11.1-12)
+            "amount": amount,
+            "commission": commission,
             "commission_rate": 0.0,
             "amount_after_discount": None,
         })

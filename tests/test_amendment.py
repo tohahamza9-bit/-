@@ -159,7 +159,8 @@ async def test_amend_discount_floor_commission(db):
 
     job = writer.jobs[0]
     assert job.operation == OperationType.BUY
-    assert job.leg.amount == 3030.0                          # فرق المبلغ 10100−7070
+    # الكمية = فرق GROSS = 10100−7070 = 3030 (leg.amount = GROSS)؛ MONEYADO يطرح العمولة → NET-diff=2999
+    assert job.leg.amount == 3030.0
     # 🔴 خانة العمولة بشاشة الشراء = فرق العمولة **موجب دائمًا** (101 − FLOOR(7070×1%)=70) = 31
     assert job.leg.commission == 31.0
     d = await db.deals.get("d1")
@@ -290,7 +291,7 @@ async def test_cancel_after_amendment_reverses_current(db):
                 reply_to_key="orig", received_at=NOW + timedelta(seconds=20))
     await pipe._handle_cancellation(cancel, NOW + timedelta(seconds=20))
 
-    # قيد التعديل (2930) ثم قيد الإلغاء يعكس الصافي الحاليّ (7070) والعمولة الحاليّة (70)
+    # قيد التعديل = فرق GROSS (10000−7070=2930)؛ ثم الإلغاء يعكس GROSS الحاليّ = leg.amount = 7070
     assert writer.jobs[0].leg.amount == 2930.0
     assert writer.jobs[1].leg.amount == 7070.0 and writer.jobs[1].leg.commission == 70.0
     assert (await db.deals.get("d1")).status == Status.CANCELLED
