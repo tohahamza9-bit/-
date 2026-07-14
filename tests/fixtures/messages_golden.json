@@ -1,0 +1,1544 @@
+{
+  "meta": {
+    "source": "WhatsApp export — مكر مكر مكررررر صرف قبض",
+    "period": "2026-06-14 → 2026-07-06",
+    "total_messages": 21743,
+    "a_transfers": 8558,
+    "WARNING": "حقول expected مستخرَجة آلياً — لازم مراجعة بشري قبل اعتمادها كـ golden tests"
+  },
+  "shapes": [
+    {
+      "id": "shape_01_single_all_fields",
+      "name": "رسالة واحدة تحمل كل الحقول",
+      "occurrences": 556,
+      "cases": [
+        {
+          "messages": [
+            "A50\nسلم اماني \n0914208728\n900 د ت \nجربه"
+          ],
+          "expected": {
+            "code": "A50",
+            "recipient": "0914208728",
+            "amount_gross": 900,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": null,
+            "supplier_name": null,
+            "rate": null,
+            "treasury": null
+          }
+        },
+        {
+          "messages": [
+            "A54\n+218 91-0969696 \nحماده \nالقيمة 3000 دت \nالحمامات"
+          ],
+          "expected": {
+            "code": "A54",
+            "recipient": "218910969696",
+            "amount_gross": 3000,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": null,
+            "supplier_name": null,
+            "rate": null,
+            "treasury": null
+          }
+        },
+        {
+          "messages": [
+            "A70\n1010 بريد تونسي\n0021696528991\n\n429 احمد ابوريص33.5 لم يتم إدراج الصورة"
+          ],
+          "expected": {
+            "code": "A70",
+            "recipient": "0021696528991",
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": null,
+            "supplier_name": null,
+            "rate": null,
+            "treasury": null
+          }
+        },
+        {
+          "messages": [
+            "A74 \nمحمود الحوتة\n\n+218 91‑3035690\n\n1440د.ت \n\nجربة 🇹🇳"
+          ],
+          "expected": {
+            "code": "A74",
+            "recipient": "218913035690",
+            "amount_gross": 1440,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": null,
+            "supplier_name": null,
+            "rate": null,
+            "treasury": null
+          }
+        },
+        {
+          "messages": [
+            "A77\nهادى \n+216 94 385 651\nصفاقس \n230 تونسي\nتبع مرعى\n\n279 زبال 36.25"
+          ],
+          "expected": {
+            "code": "A77",
+            "recipient": "21694385651",
+            "amount_gross": 230,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "279",
+            "supplier_name": "زبال",
+            "rate": 36.25,
+            "treasury": null
+          }
+        },
+        {
+          "messages": [
+            "A81\nارجو تسليم \nعبد الفتاح \n+21698692625\nالقيمة 500 تونسي بنقردان\n\n286 اشرف محفوظ35"
+          ],
+          "expected": {
+            "code": "A81",
+            "recipient": "21698692625",
+            "amount_gross": 500,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": null,
+            "supplier_name": null,
+            "rate": null,
+            "treasury": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "shape_02_msg2_rate_treasury",
+      "name": "رسالة٢ سعر+خزينة بلا كود A",
+      "occurrences": 3044,
+      "cases": [
+        {
+          "messages": [
+            "A1\nانستا باي\n\n01055200815\n\n59800 ج.م <تم تعديل هذه الرسالة>",
+            "677محمد زريق  6.16\nالبراق 6.19"
+          ],
+          "expected": {
+            "code": "A1",
+            "recipient": "01055200815",
+            "amount_gross": 59800,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "انستا باي",
+            "supplier_code": "677",
+            "supplier_name": "محمد زريق",
+            "rate": 6.16,
+            "treasury": "البراق"
+          }
+        },
+        {
+          "messages": [
+            "A2\n01035480853\n4333 ج.م \nفودافون",
+            "258 احمد ابو سالم 6.22\nبلاس"
+          ],
+          "expected": {
+            "code": "A2",
+            "recipient": "01035480853",
+            "amount_gross": 4333,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "258",
+            "supplier_name": "احمد ابو سالم",
+            "rate": 6.22,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "messages": [
+            "A3\n01062480582\n1857 ج.م \nفودافون",
+            "258 احمد ابو سالم 6.22\nبلاس"
+          ],
+          "expected": {
+            "code": "A3",
+            "recipient": "01062480582",
+            "amount_gross": 1857,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "258",
+            "supplier_name": "احمد ابو سالم",
+            "rate": 6.22,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "messages": [
+            "A7\n01114568817\n\n3320 مصري \nفودافون",
+            "701 فواد الغزاوي 6.22\nبلاس"
+          ],
+          "expected": {
+            "code": "A7",
+            "recipient": "01114568817",
+            "amount_gross": 3320,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "701",
+            "supplier_name": "فواد الغزاوي",
+            "rate": 6.22,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "messages": [
+            "A14\n01015163487\n\n9075  ج م\n\nكاش",
+            "1201 الهادي الخبولي 6.22\nبلاس"
+          ],
+          "expected": {
+            "code": "A14",
+            "recipient": "01015163487",
+            "amount_gross": 9075,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "بلاس",
+            "supplier_code": "1201",
+            "supplier_name": "الهادي الخبولي",
+            "rate": 6.22,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "messages": [
+            "A15\nارجو تسليم \n٠١٠٠٨٢٣٥٠٤٦\n1550 ج م\nفودافوان كاش",
+            "644 شركة الياقوته 6.22\nبلاس"
+          ],
+          "expected": {
+            "code": "A15",
+            "recipient": "01008235046",
+            "amount_gross": 1550,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "بلاس",
+            "supplier_code": "644",
+            "supplier_name": "شركة الياقوته",
+            "rate": 6.22,
+            "treasury": "بلاس"
+          }
+        }
+      ]
+    },
+    {
+      "id": "shape_03_full_repeat_net",
+      "name": "رسالة٢ تكرار كامل بمبلغ الصافي + خزينة",
+      "occurrences": 2061,
+      "cases": [
+        {
+          "messages": [
+            "A6\nسلم الي \n\n01061959095\n1240ج م\nفودافون\n\n\n444 الاصابهي 6.28",
+            "A6\nسلم الي \n\n01061959095\n1.228 ج  م\nفودافون\n\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A6",
+            "recipient": "01061959095",
+            "amount_gross": 1240,
+            "amount_net": 1228,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "444",
+            "supplier_name": "الاصابهي",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        },
+        {
+          "messages": [
+            "A8\n01060324987\nفودافون \nالقيمه 1550 مصري\n\n168 محمد البوتشه 6.28",
+            "A8\n01060324987\nفودافون \nالقيمه 1.535 مصري\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A8",
+            "recipient": "01060324987",
+            "amount_gross": 1550,
+            "amount_net": 1535,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "168",
+            "supplier_name": "محمد البوتشه",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        },
+        {
+          "messages": [
+            "A9\n+20 11 04841983\n\n 3000 جنيه مصري \n\nفودافون\n\n535 مروان الدروقي 6.28",
+            "A9\n+20 11 04841983\n\n 2.970 جنيه مصري \n\nفودافون\n\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A9",
+            "recipient": "201104841983",
+            "amount_gross": 3000,
+            "amount_net": 2970,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "535",
+            "supplier_name": "مروان الدروقي",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        },
+        {
+          "messages": [
+            "A10\n01556115186\n3110 ج م \nفودافون\n\n1023 محمد التريكي 6.28",
+            "A10\n01556115186\n3.079 ج م \nفودافون\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A10",
+            "recipient": "01556115186",
+            "amount_gross": 3110,
+            "amount_net": 3079,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "1023",
+            "supplier_name": "محمد التريكي",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        },
+        {
+          "messages": [
+            "A20\n00201033084109\n\nفودافون\n\n1200جنيه مصري\n\n535 مروان الدروقي 6.28",
+            "A20\n00201033084109\n\nفودافون\n\n1.188  مصري\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A20",
+            "recipient": "00201033084109",
+            "amount_gross": 1200,
+            "amount_net": 1188,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "535",
+            "supplier_name": "مروان الدروقي",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        },
+        {
+          "messages": [
+            "A25\n01002763499\n2883 ج. م \nفودافون\n\n755 مهند بندلسي 6.28",
+            "A25\n01002763499\n2.855 ج. م \nفودافون\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A25",
+            "recipient": "01002763499",
+            "amount_gross": 2883,
+            "amount_net": 2855,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "755",
+            "supplier_name": "مهند بندلسي",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        }
+      ]
+    },
+    {
+      "id": "shape_04_msg2_rate_only",
+      "name": "رسالة٢ سعر فقط بلا خزينة",
+      "occurrences": 964,
+      "cases": [
+        {
+          "messages": [
+            "A17\nالعاصمة \nلمياء \n21690005505\nالقيمة 295د.ت",
+            "1225 محل السهم 36.25\nوليد"
+          ],
+          "expected": {
+            "code": "A17",
+            "recipient": "21690005505",
+            "amount_gross": 295,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "1225",
+            "supplier_name": "محل السهم",
+            "rate": 36.25,
+            "treasury": "وليد"
+          }
+        },
+        {
+          "messages": [
+            "A38\n+218 91‑1246962\n1500د.ت\nطاهر الجازيري \nتونس العاصمة",
+            "677 محمد زريق 36.25\nوليد"
+          ],
+          "expected": {
+            "code": "A38",
+            "recipient": "218911246962",
+            "amount_gross": 1500,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "677",
+            "supplier_name": "محمد زريق",
+            "rate": 36.25,
+            "treasury": "وليد"
+          }
+        },
+        {
+          "messages": [
+            "A52\nالرجاء تسليم مبلغ 470 دينار تونسي باليد\n\nسوسة \n\nعبير +216 24 933 442",
+            "395 احمد البرقي 36.25\nعصا م"
+          ],
+          "expected": {
+            "code": "A52",
+            "recipient": "21624933442",
+            "amount_gross": 470,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "395",
+            "supplier_name": "احمد البرقي",
+            "rate": 36.25,
+            "treasury": null
+          }
+        },
+        {
+          "messages": [
+            "A83\nالاسم {احمد علي الزروق\nالهاتف 218914668959+\n3005 د ت\nجرجيس",
+            "1058 سفيان القريو 34.5\nالنور 35.75"
+          ],
+          "expected": {
+            "code": "A83",
+            "recipient": "218914668959",
+            "amount_gross": 3005,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": null,
+            "supplier_name": null,
+            "rate": null,
+            "treasury": null
+          }
+        },
+        {
+          "messages": [
+            "A109 \n0911573130\nوتس\nمروان عقوب \nالقيمه 5000تونسي",
+            "601 محمد شلوي 36.25 \nوليد <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A109",
+            "recipient": "0911573130",
+            "amount_gross": 5000,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "601",
+            "supplier_name": "محمد شلوي",
+            "rate": 36.25,
+            "treasury": "وليد"
+          }
+        },
+        {
+          "messages": [
+            "A110\nسلم إلي \nسيرين التركي \n21694219381\n\nالقيمه / 360 د.ت \n\nالعاصمه",
+            "527 معاد النعمي 36.25\nرحيم"
+          ],
+          "expected": {
+            "code": "A110",
+            "recipient": "21694219381",
+            "amount_gross": 360,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "527",
+            "supplier_name": "معاد النعمي",
+            "rate": 36.25,
+            "treasury": "رحيم"
+          }
+        }
+      ]
+    },
+    {
+      "id": "shape_05_msg2_treasury_only",
+      "name": "رسالة٢ خزينة فقط (كلمة واحدة)",
+      "occurrences": 509,
+      "cases": [
+        {
+          "messages": [
+            "A62\nارجو تحويل \n18120 جنيه مصرى \nانستا باى \nبدون خصم عموله \n01146145246\n\n\n821 علي رجيعه 6.08",
+            "شركة البراق 6،10"
+          ],
+          "expected": {
+            "code": "A62",
+            "recipient": "01146145246",
+            "amount_gross": 18120,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "انستا باي",
+            "supplier_code": "821",
+            "supplier_name": "علي رجيعه",
+            "rate": 6.08,
+            "treasury": "البراق"
+          }
+        },
+        {
+          "messages": [
+            "A84\n01024125369\n\nارجو تحويل فودافون كاش \n\n800 جنيه مصري \n\nبدون عمولة\n\n1157 معتز الفوني 6.12",
+            "بلس"
+          ],
+          "expected": {
+            "code": "A84",
+            "recipient": "01024125369",
+            "amount_gross": 800,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون كاش",
+            "supplier_code": "1157",
+            "supplier_name": "معتز الفوني",
+            "rate": 6.12,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "messages": [
+            "A101\n01069694541\nفودافون كاش \n2.157ج.م\nبدون خصم\n\n559 سراج مصراتي 6،13",
+            "بلس"
+          ],
+          "expected": {
+            "code": "A101",
+            "recipient": "01069694541",
+            "amount_gross": 2157,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون كاش",
+            "supplier_code": "559",
+            "supplier_name": "سراج مصراتي",
+            "rate": 6.13,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "messages": [
+            "A102\n01016206148\n1098 مصري \nبيدون خصم \nفودافون\n\n750 طمزيني 6،13",
+            "بلس"
+          ],
+          "expected": {
+            "code": "A102",
+            "recipient": "01016206148",
+            "amount_gross": 1098,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "750",
+            "supplier_name": "طمزيني",
+            "rate": 6.13,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "messages": [
+            "A106\nأرجو تحويل \n31,460جنيه\n01044595325\nفودافون\n\n             بدون خصم\n\n\n770 يوسف غزاله 6.13",
+            "بلس"
+          ],
+          "expected": {
+            "code": "A106",
+            "recipient": "01044595325",
+            "amount_gross": 31460,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "770",
+            "supplier_name": "يوسف غزاله",
+            "rate": 6.13,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "messages": [
+            "A129\nارجو تحويل \nفودافون \n01030028652\nالقيمة 6360 جنيه مصري \nصافي بدون خصم\n\n990 سالم الكيلاني 6،13",
+            "بلس"
+          ],
+          "expected": {
+            "code": "A129",
+            "recipient": "01030028652",
+            "amount_gross": 6360,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "صافي",
+            "supplier_code": "990",
+            "supplier_name": "سالم الكيلاني",
+            "rate": 6.13,
+            "treasury": "بلس"
+          }
+        }
+      ]
+    },
+    {
+      "id": "shape_06_msg2_two_rates",
+      "name": "رسالة٢ فيها سعرين (مورد + خزينة)",
+      "occurrences": 1519,
+      "cases": [
+        {
+          "messages": [
+            "A1\nانستا باي\n\n01055200815\n\n59800 ج.م <تم تعديل هذه الرسالة>",
+            "677محمد زريق  6.16\nالبراق 6.19"
+          ],
+          "expected": {
+            "code": "A1",
+            "recipient": "01055200815",
+            "amount_gross": 59800,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "انستا باي",
+            "supplier_code": "677",
+            "supplier_name": "محمد زريق",
+            "rate": 6.16,
+            "treasury": "البراق"
+          }
+        },
+        {
+          "messages": [
+            "A39\nمحمد عبدالمنعم عبدالحميد محمد بلبع\n01090011860\nانستاباي\n66670ج م",
+            "720 مالك الشيخ 6.14\nالبراق 6.15"
+          ],
+          "expected": {
+            "code": "A39",
+            "recipient": "01090011860",
+            "amount_gross": 66670,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "انستا باي",
+            "supplier_code": "720",
+            "supplier_name": "مالك الشيخ",
+            "rate": 6.14,
+            "treasury": "البراق"
+          }
+        },
+        {
+          "messages": [
+            "A42\nانستا باي ()\n23000 جنيه مصري \n100051661383\n Aked Amal\nCIB",
+            "826 شركة ارسال 6.14\nالبراق 6.15"
+          ],
+          "expected": {
+            "code": "A42",
+            "recipient": "100051661383",
+            "amount_gross": 23000,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "انستا باي",
+            "supplier_code": "826",
+            "supplier_name": "شركة ارسال",
+            "rate": 6.14,
+            "treasury": "البراق"
+          }
+        },
+        {
+          "messages": [
+            "A79\n01276720726\nباسم محمد عوض\n 49,915 حنيه مصري \n\nانستاباي",
+            "826 شركة ارسال 6.08\nالبراق 6.11"
+          ],
+          "expected": {
+            "code": "A79",
+            "recipient": "01276720726",
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "انستا باي",
+            "supplier_code": "826",
+            "supplier_name": "شركة ارسال",
+            "rate": 6.08,
+            "treasury": "البراق"
+          }
+        },
+        {
+          "messages": [
+            "A90 \n01017812133\n\n3060 ج م \n\nفودافون كاش",
+            "مصعب كافو 6.12 \nطه 6.16"
+          ],
+          "expected": {
+            "code": "A90",
+            "recipient": "01017812133",
+            "amount_gross": 3060,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون كاش",
+            "supplier_code": "12",
+            "supplier_name": "طه",
+            "rate": 6.16,
+            "treasury": "طه"
+          }
+        },
+        {
+          "messages": [
+            "A91 \n01002441736\nفودافون كاش \n1.000ج.م",
+            "559 سراج مصراتي 6.12 \nطه 6.16"
+          ],
+          "expected": {
+            "code": "A91",
+            "recipient": "01002441736",
+            "amount_gross": 1000,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون كاش",
+            "supplier_code": "559",
+            "supplier_name": "سراج مصراتي",
+            "rate": 6.12,
+            "treasury": "طه"
+          }
+        }
+      ]
+    }
+  ],
+  "edge_cases": [
+    {
+      "id": "arabic_comma_rate",
+      "name": "السعر بفاصلة عربية 6،18",
+      "occurrences": 639,
+      "cases": [
+        {
+          "message": "A55\n600ج م\nدون خصم\n01150588894\n\n720 مالك الشيخ 6،12",
+          "transfer_messages": [
+            "A55\n600ج م\nدون خصم\n01150588894\n\n720 مالك الشيخ 6،12",
+            "بلس"
+          ],
+          "expected": {
+            "code": "A55",
+            "recipient": "01150588894",
+            "amount_gross": 600,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": null,
+            "supplier_code": "720",
+            "supplier_name": "مالك الشيخ",
+            "rate": 6.12,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "message": "A57\n01278682897\n1850ج م\nفودافون كاش\n\n548 شهوب بهاء 6،18",
+          "transfer_messages": [
+            "A57\n01278682897\n1850ج م\nفودافون كاش\n\n548 شهوب بهاء 6،18",
+            "A57\n01278682897\n1.832م\nفودافون كاش\n\nبلس <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A57",
+            "recipient": "01278682897",
+            "amount_gross": 1850,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون كاش",
+            "supplier_code": "548",
+            "supplier_name": "شهوب بهاء",
+            "rate": 6.18,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "message": "شركة البراق 6،10",
+          "transfer_messages": [
+            "A62\nارجو تحويل \n18120 جنيه مصرى \nانستا باى \nبدون خصم عموله \n01146145246\n\n\n821 علي رجيعه 6.08",
+            "شركة البراق 6،10"
+          ],
+          "expected": {
+            "code": "A62",
+            "recipient": "01146145246",
+            "amount_gross": 18120,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "انستا باي",
+            "supplier_code": "821",
+            "supplier_name": "علي رجيعه",
+            "rate": 6.08,
+            "treasury": "البراق"
+          }
+        },
+        {
+          "message": "A64\n01050771133\nالقيمه 5000ج.م \nفدفون ،،،،،كامله\n\n67 حسين بوعجيله 6،12",
+          "transfer_messages": [
+            "A64\n01050771133\nالقيمه 5000ج.م \nفدفون ،،،،،كامله\n\n67 حسين بوعجيله 6،12",
+            "بلس"
+          ],
+          "expected": {
+            "code": "A64",
+            "recipient": "01050771133",
+            "amount_gross": 5000,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": null,
+            "supplier_code": "67",
+            "supplier_name": "حسين بوعجيله",
+            "rate": 6.12,
+            "treasury": "بلس"
+          }
+        }
+      ]
+    },
+    {
+      "id": "arabic_indic_digits",
+      "name": "أرقام عربية-هندية",
+      "occurrences": 80,
+      "cases": [
+        {
+          "message": "A15\nارجو تسليم \n٠١٠٠٨٢٣٥٠٤٦\n1550 ج م\nفودافوان كاش",
+          "transfer_messages": [
+            "A15\nارجو تسليم \n٠١٠٠٨٢٣٥٠٤٦\n1550 ج م\nفودافوان كاش",
+            "644 شركة الياقوته 6.22\nبلاس"
+          ],
+          "expected": {
+            "code": "A15",
+            "recipient": "01008235046",
+            "amount_gross": 1550,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "بلاس",
+            "supplier_code": "644",
+            "supplier_name": "شركة الياقوته",
+            "rate": 6.22,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "message": "A377\nتحولها علي رقم فودافون\n٠١١١٩٢١٨٠٣٧ هدا الرقم\nمبلغ12300مصري\n\n825 عبد العاطي هروس 6.19",
+          "transfer_messages": [
+            "A377\nتحولها علي رقم فودافون\n٠١١١٩٢١٨٠٣٧ هدا الرقم\nمبلغ12300مصري\n\n825 عبد العاطي هروس 6.19",
+            "A377\nتحولها علي رقم فودافون\n٠١١١٩٢١٨٠٣٧ هدا الرقم\n12.177\nبلس <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A377",
+            "recipient": "01119218037",
+            "amount_gross": 12300,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "825",
+            "supplier_name": "عبد العاطي هروس",
+            "rate": 6.19,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "message": "A622 \n٠١٠٩٧٨٩٥٤٤٧\n الرقم دا فدفون كاش حول عليه \n8000 جنيه مصري\n\n\n771 محسن طرابلسي 5.96",
+          "transfer_messages": [
+            "A622 \n٠١٠٩٧٨٩٥٤٤٧\n الرقم دا فدفون كاش حول عليه \n8000 جنيه مصري\n\n\n771 محسن طرابلسي 5.96",
+            "بلاس"
+          ],
+          "expected": {
+            "code": "A622",
+            "recipient": "01097895447",
+            "amount_gross": 8000,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "بلاس",
+            "supplier_code": "771",
+            "supplier_name": "محسن طرابلسي",
+            "rate": 5.96,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "message": "A734 \n٠١١١٢٢٢٨٨٠١\nمينا \nفودافون\n2050 ج.م",
+          "transfer_messages": [
+            "A734 \n٠١١١٢٢٢٨٨٠١\nمينا \nفودافون\n2050 ج.م",
+            "ا485 شرع الله 5.96 \nطه 6.01 <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A734",
+            "recipient": "01112228801",
+            "amount_gross": 2050,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "485",
+            "supplier_name": "شرع الله",
+            "rate": 5.96,
+            "treasury": "طه"
+          }
+        }
+      ]
+    },
+    {
+      "id": "dot_thousands",
+      "name": "النقطة فاصل آلاف (6.200)",
+      "occurrences": 3017,
+      "cases": [
+        {
+          "message": "A4\nالمرسل : أحمد الخير\nالمستلم : 01026719710\n6.200 جنيه مصري \nفودافون كاش\n\n\n769 عبد القادر حبيب 6.28",
+          "transfer_messages": [
+            "A4\nالمرسل : أحمد الخير\nالمستلم : 01026719710\n6.200 جنيه مصري \nفودافون كاش\n\n\n769 عبد القادر حبيب 6.28",
+            "A4\nالمرسل : أحمد الخير\nالمستلم : 01026719710\n6.138 جنيه مصري \nفودافون كاش\n\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A4",
+            "recipient": "01026719710",
+            "amount_gross": 6200,
+            "amount_net": 6138,
+            "currency": "ج.م",
+            "channel": "فودافون كاش",
+            "supplier_code": "769",
+            "supplier_name": "عبد القادر حبيب",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        },
+        {
+          "message": "A5\n المرسل : محمد الدمياطي \nالمستلم : 01040436004\n3.100 جنيه مصري \nفودافون كاش\n\n769 عبد ااقادر حبيب 6.28",
+          "transfer_messages": [
+            "A5\n المرسل : محمد الدمياطي \nالمستلم : 01040436004\n3.100 جنيه مصري \nفودافون كاش\n\n769 عبد ااقادر حبيب 6.28",
+            "A5\n المرسل : محمد الدمياطي \nالمستلم : 01040436004\n3.069 جنيه مصري \nفودافون كاش\n\nبلاس"
+          ],
+          "expected": {
+            "code": "A5",
+            "recipient": "01040436004",
+            "amount_gross": 3100,
+            "amount_net": 3069,
+            "currency": "ج.م",
+            "channel": "فودافون كاش",
+            "supplier_code": "769",
+            "supplier_name": "عبد ااقادر حبيب",
+            "rate": 6.28,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "message": "A6\nسلم الي \n\n01061959095\n1.228 ج  م\nفودافون\n\n\nبلاس فون",
+          "transfer_messages": [
+            "A6\nسلم الي \n\n01061959095\n1240ج م\nفودافون\n\n\n444 الاصابهي 6.28",
+            "A6\nسلم الي \n\n01061959095\n1.228 ج  م\nفودافون\n\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A6",
+            "recipient": "01061959095",
+            "amount_gross": 1240,
+            "amount_net": 1228,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "444",
+            "supplier_name": "الاصابهي",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        },
+        {
+          "message": "A8\n01060324987\nفودافون \nالقيمه 1.535 مصري\n\nبلاس فون",
+          "transfer_messages": [
+            "A8\n01060324987\nفودافون \nالقيمه 1550 مصري\n\n168 محمد البوتشه 6.28",
+            "A8\n01060324987\nفودافون \nالقيمه 1.535 مصري\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A8",
+            "recipient": "01060324987",
+            "amount_gross": 1550,
+            "amount_net": 1535,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "168",
+            "supplier_name": "محمد البوتشه",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        }
+      ]
+    },
+    {
+      "id": "comma_thousands",
+      "name": "الفاصلة فاصل آلاف (15,660)",
+      "occurrences": 542,
+      "cases": [
+        {
+          "message": "A40\n01125165242\n3,000 ج.مصري \nصافي",
+          "transfer_messages": [
+            "A40\n01125165242\n3,000 ج.مصري \nصافي",
+            "900 الدالي 6.18\nبلاس"
+          ],
+          "expected": {
+            "code": "A40",
+            "recipient": "01125165242",
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "صافي",
+            "supplier_code": "900",
+            "supplier_name": "الدالي",
+            "rate": 6.18,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "message": "A59\nالرقم :01055972797\nالقيمة:12,200ج٠م\nفودافون كاش.\n\n612 شركة الراىد6.18",
+          "transfer_messages": [
+            "A59\nالرقم :01055972797\nالقيمة:12,200ج٠م\nفودافون كاش.\n\n612 شركة الراىد6.18",
+            "A59\nالرقم :01055972797\nالقيمة:12.078\nفودافون كاش.\n\nبلس <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A59",
+            "recipient": "01055972797",
+            "amount_gross": 12200,
+            "amount_net": null,
+            "currency": null,
+            "channel": "فودافون كاش",
+            "supplier_code": "612",
+            "supplier_name": "شركة الراىد",
+            "rate": 6.18,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "message": "A79\n01276720726\nباسم محمد عوض\n 49,915 حنيه مصري \n\nانستاباي",
+          "transfer_messages": [
+            "A79\n01276720726\nباسم محمد عوض\n 49,915 حنيه مصري \n\nانستاباي",
+            "826 شركة ارسال 6.08\nالبراق 6.11"
+          ],
+          "expected": {
+            "code": "A79",
+            "recipient": "01276720726",
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "انستا باي",
+            "supplier_code": "826",
+            "supplier_name": "شركة ارسال",
+            "rate": 6.08,
+            "treasury": "البراق"
+          }
+        },
+        {
+          "message": "A87\nفودافون كاش \n01003448367\nمبلغ 18,060 ج م",
+          "transfer_messages": [
+            "A87\nفودافون كاش \n01003448367\nمبلغ 18,060 ج م",
+            "390 العربي 6.12\nبلاس"
+          ],
+          "expected": {
+            "code": "A87",
+            "recipient": "01003448367",
+            "amount_gross": 18060,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون كاش",
+            "supplier_code": "390",
+            "supplier_name": "العربي",
+            "rate": 6.12,
+            "treasury": "بلاس"
+          }
+        }
+      ]
+    },
+    {
+      "id": "misspelled_channel",
+      "name": "أخطاء إملائية في القناة",
+      "occurrences": 916,
+      "cases": [
+        {
+          "message": "A12\n1650جني مصري\n01069908435\nفودفوان\n\n1141 ابو نواس 6.28",
+          "transfer_messages": [
+            "A12\n1650جني مصري\n01069908435\nفودفوان\n\n1141 ابو نواس 6.28",
+            "A12\n1.634 مصري\n01069908435\nفودفوان\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A12",
+            "recipient": "01069908435",
+            "amount_gross": 1650,
+            "amount_net": 1634,
+            "currency": "ج.م",
+            "channel": "بلاس",
+            "supplier_code": "1141",
+            "supplier_name": "ابو نواس",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        },
+        {
+          "message": "A15\nارجو تسليم \n٠١٠٠٨٢٣٥٠٤٦\n1550 ج م\nفودافوان كاش",
+          "transfer_messages": [
+            "A15\nارجو تسليم \n٠١٠٠٨٢٣٥٠٤٦\n1550 ج م\nفودافوان كاش",
+            "644 شركة الياقوته 6.22\nبلاس"
+          ],
+          "expected": {
+            "code": "A15",
+            "recipient": "01008235046",
+            "amount_gross": 1550,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "بلاس",
+            "supplier_code": "644",
+            "supplier_name": "شركة الياقوته",
+            "rate": 6.22,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "message": "A33\n01004472658\n8230جني مصري \nفودا فون\n\n1141 ابو نواس 6.28",
+          "transfer_messages": [
+            "A33\n01004472658\n8230جني مصري \nفودا فون\n\n1141 ابو نواس 6.28",
+            "A33\n01004472658\n8.148 مصري \nفودا فون\n\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A33",
+            "recipient": "01004472658",
+            "amount_gross": 8230,
+            "amount_net": 8148,
+            "currency": "ج.م",
+            "channel": "بلاس",
+            "supplier_code": "1141",
+            "supplier_name": "ابو نواس",
+            "rate": 6.28,
+            "treasury": "بلاس فون"
+          }
+        },
+        {
+          "message": "A35\n01017806428\n\n20000ج\nفدفون",
+          "transfer_messages": [
+            "A35\n01017806428\n\n20000ج\nفدفون",
+            "739 ابو عجيله ضو 6.22\nبلاس فون"
+          ],
+          "expected": {
+            "code": "A35",
+            "recipient": "01017806428",
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": null,
+            "channel": "بلاس",
+            "supplier_code": "739",
+            "supplier_name": "ابو عجيله ضو",
+            "rate": 6.22,
+            "treasury": "بلاس فون"
+          }
+        }
+      ]
+    },
+    {
+      "id": "prefixed_code",
+      "name": "حرف زائد قبل الكود (اA5124)",
+      "occurrences": 6,
+      "cases": [
+        {
+          "message": "اA3002 \nفودافون\n01032344779\nمبلغ 2040  مصرى\n\n \nطه 6.07 <تم تعديل هذه الرسالة>",
+          "transfer_messages": [
+            "A3002 \nفودافون\n01032344779\nمبلغ 2060 مصرى\n\n \n\n715 طارق القن 6.11",
+            "اA3002 \nفودافون\n01032344779\nمبلغ 2040  مصرى\n\n \nطه 6.07 <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A3002",
+            "recipient": "01032344779",
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": null,
+            "channel": "فودافون",
+            "supplier_code": "715",
+            "supplier_name": "طارق القن",
+            "rate": 6.11,
+            "treasury": "طه"
+          }
+        },
+        {
+          "message": "اA3109 \nفودافون \n01003320297\nمبلغ 10.301 مصرى\n\n\nطه 6.07 <تم تعديل هذه الرسالة>",
+          "transfer_messages": [
+            "A3109 \nفودافون \n01003320297\nمبلغ 10405 مصرى\n\n\n715 طارق القن 6.11",
+            "اA3109 \nفودافون \n01003320297\nمبلغ 10.301 مصرى\n\n\nطه 6.07 <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A3109",
+            "recipient": "01003320297",
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": null,
+            "channel": "فودافون",
+            "supplier_code": "715",
+            "supplier_name": "طارق القن",
+            "rate": 6.11,
+            "treasury": "طه"
+          }
+        },
+        {
+          "message": "اA1606 \n01004602179\nفودفون\n1.188 ج م  \n\n\nطه 5.92 <تم تعديل هذه الرسالة>",
+          "transfer_messages": [
+            "A1606 \n01004602179\nفودفون\n1200دم \n\n\n589 السهم 5.94",
+            "اA1606 \n01004602179\nفودفون\n1.188 ج م  \n\n\nطه 5.92 <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A1606",
+            "recipient": "01004602179",
+            "amount_gross": 1188,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": null,
+            "supplier_code": "589",
+            "supplier_name": "السهم",
+            "rate": 5.94,
+            "treasury": "طه"
+          }
+        },
+        {
+          "message": "اA1683 \n01068630136\n17.078 مصري \n\nفود فو\n\n\nطه 5.85 <تم تعديل هذه الرسالة>",
+          "transfer_messages": [
+            "A1683 \n01068630136\n17250 مصري \n\nفود فو\n\n\n187 فكهاني 5.89",
+            "اA1683 \n01068630136\n17.078 مصري \n\nفود فو\n\n\nطه 5.85 <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A1683",
+            "recipient": "01068630136",
+            "amount_gross": 17250,
+            "amount_net": 17078,
+            "currency": "ج.م",
+            "channel": null,
+            "supplier_code": "187",
+            "supplier_name": "فكهاني",
+            "rate": 5.89,
+            "treasury": "طه"
+          }
+        }
+      ]
+    },
+    {
+      "id": "amount_midsentence",
+      "name": "المبلغ وسط الجملة",
+      "occurrences": 530,
+      "cases": [
+        {
+          "message": "A15\nارجو تسليم \n٠١٠٠٨٢٣٥٠٤٦\n1550 ج م\nفودافوان كاش",
+          "transfer_messages": [
+            "A15\nارجو تسليم \n٠١٠٠٨٢٣٥٠٤٦\n1550 ج م\nفودافوان كاش",
+            "644 شركة الياقوته 6.22\nبلاس"
+          ],
+          "expected": {
+            "code": "A15",
+            "recipient": "01008235046",
+            "amount_gross": 1550,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "بلاس",
+            "supplier_code": "644",
+            "supplier_name": "شركة الياقوته",
+            "rate": 6.22,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "message": "A52\nالرجاء تسليم مبلغ 470 دينار تونسي باليد\n\nسوسة \n\nعبير +216 24 933 442",
+          "transfer_messages": [
+            "A52\nالرجاء تسليم مبلغ 470 دينار تونسي باليد\n\nسوسة \n\nعبير +216 24 933 442",
+            "395 احمد البرقي 36.25\nعصا م"
+          ],
+          "expected": {
+            "code": "A52",
+            "recipient": "21624933442",
+            "amount_gross": 470,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "395",
+            "supplier_name": "احمد البرقي",
+            "rate": 36.25,
+            "treasury": null
+          }
+        },
+        {
+          "message": "A56\n01123325384\nتسليم 6،070 ج.م\nفودافون",
+          "transfer_messages": [
+            "A56\n01123325384\nتسليم 6،070 ج.م\nفودافون",
+            "393 تنيمه 6.18\nبلاس"
+          ],
+          "expected": {
+            "code": "A56",
+            "recipient": "01123325384",
+            "amount_gross": 70,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "393",
+            "supplier_name": "تنيمه",
+            "rate": 6.18,
+            "treasury": "بلاس"
+          }
+        },
+        {
+          "message": "A61\nالرجاء تسليم 5110 جنيه مصري\nالى +20 109 606 3070 انستا باي بدون عمولة\n\n\n\n144 احمد الزيو 6.08",
+          "transfer_messages": [
+            "A61\nالرجاء تسليم 5110 جنيه مصري\nالى +20 109 606 3070 انستا باي بدون عمولة\n\n\n\n144 احمد الزيو 6.08",
+            "شركة البراق 6.10"
+          ],
+          "expected": {
+            "code": "A61",
+            "recipient": "201096063070",
+            "amount_gross": 5110,
+            "amount_net": null,
+            "currency": "ج.م",
+            "channel": "انستا باي",
+            "supplier_code": "144",
+            "supplier_name": "احمد الزيو",
+            "rate": 6.08,
+            "treasury": "البراق"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rate_stuck_to_name",
+      "name": "السعر ملاصق للاسم بلا مسافة",
+      "occurrences": 281,
+      "cases": [
+        {
+          "message": "A59\nالرقم :01055972797\nالقيمة:12,200ج٠م\nفودافون كاش.\n\n612 شركة الراىد6.18",
+          "transfer_messages": [
+            "A59\nالرقم :01055972797\nالقيمة:12,200ج٠م\nفودافون كاش.\n\n612 شركة الراىد6.18",
+            "A59\nالرقم :01055972797\nالقيمة:12.078\nفودافون كاش.\n\nبلس <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A59",
+            "recipient": "01055972797",
+            "amount_gross": 12200,
+            "amount_net": null,
+            "currency": null,
+            "channel": "فودافون كاش",
+            "supplier_code": "612",
+            "supplier_name": "شركة الراىد",
+            "rate": 6.18,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "message": "A68\nفودافون \nالقيمة 6130 ج.م\nالرقم \n01094285817\n\n462 محمد زليطني6.18",
+          "transfer_messages": [
+            "A68\nفودافون \nالقيمة 6130 ج.م\nالرقم \n01094285817\n\n462 محمد زليطني6.18",
+            "A68\nفودافون \nالقيمة6069 ج.م\nالرقم \n01094285817\n\nبلس <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A68",
+            "recipient": "01094285817",
+            "amount_gross": 6130,
+            "amount_net": 6069,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "462",
+            "supplier_name": "محمد زليطني",
+            "rate": 6.18,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "message": "A73\n+20 101 380 3408\n101260 مصري\nفودافون\n\n650 عبدو طبيب6،18",
+          "transfer_messages": [
+            "A73\n+20 101 380 3408\n101260 مصري\nفودافون\n\n650 عبدو طبيب6،18",
+            "A73\n+20 101 380 3408\n100.248مصري\nفودافون\n\nبلس <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A73",
+            "recipient": "201013803408",
+            "amount_gross": 101260,
+            "amount_net": 100248,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "650",
+            "supplier_name": "عبدو طبيب",
+            "rate": 6.18,
+            "treasury": "بلس"
+          }
+        },
+        {
+          "message": "A76\nسلم الى \nحواله فودافون \nالقيمه :: 8530 ج م \nهاتف :: 01029159014\n\n444 الاصابعي6.18",
+          "transfer_messages": [
+            "A76\nسلم الى \nحواله فودافون \nالقيمه :: 8530 ج م \nهاتف :: 01029159014\n\n444 الاصابعي6.18",
+            "A76\nسلم الى \nحواله فودافون \nالقيمه ::8.445 ج م \nهاتف :: 01029159014\n\nبلس <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A76",
+            "recipient": "01029159014",
+            "amount_gross": 8530,
+            "amount_net": 8445,
+            "currency": "ج.م",
+            "channel": "فودافون",
+            "supplier_code": "444",
+            "supplier_name": "الاصابعي",
+            "rate": 6.18,
+            "treasury": "بلس"
+          }
+        }
+      ]
+    },
+    {
+      "id": "bare_amount_no_currency",
+      "name": "رقم بلا كلمة عملة",
+      "occurrences": 24,
+      "cases": [
+        {
+          "message": "A16\nأنس\n52408356\nصفاقس\n350",
+          "transfer_messages": [
+            "A16\nأنس\n52408356\nصفاقس\n350",
+            "1141 ابو نواس 36.25\nمحمود"
+          ],
+          "expected": {
+            "code": "A16",
+            "recipient": null,
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": null,
+            "channel": null,
+            "supplier_code": "1141",
+            "supplier_name": "ابو نواس",
+            "rate": 36.25,
+            "treasury": null
+          }
+        },
+        {
+          "message": "A 772 \n\n01126442554\n2890",
+          "transfer_messages": [
+            "A 772 \n\n01126442554\n2890",
+            "مهند شتيوي 6.01\n\n\n760 طه 6.01 <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A772",
+            "recipient": "01126442554",
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": null,
+            "channel": null,
+            "supplier_code": "2890",
+            "supplier_name": "مهند شتيوي",
+            "rate": 6.01,
+            "treasury": "طه"
+          }
+        },
+        {
+          "message": "A823\nسوسة\n58269369\n250",
+          "transfer_messages": [
+            "A823\nسوسة\n58269369\n250",
+            "159 فارس الغزاوي 35.75 \nعصام"
+          ],
+          "expected": {
+            "code": "A823",
+            "recipient": null,
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": null,
+            "channel": null,
+            "supplier_code": "159",
+            "supplier_name": "فارس الغزاوي",
+            "rate": 35.75,
+            "treasury": null
+          }
+        },
+        {
+          "message": "A1386\n\nN0081\n01009695526\n4000",
+          "transfer_messages": [
+            "A1386\n\nN0081\n01009695526\n4000",
+            "1277شركة القن 5.94\n\nابويوسف <تم تعديل هذه الرسالة>"
+          ],
+          "expected": {
+            "code": "A1386",
+            "recipient": "01009695526",
+            "amount_gross": null,
+            "amount_net": null,
+            "currency": null,
+            "channel": null,
+            "supplier_code": "1277",
+            "supplier_name": "شركة القن",
+            "rate": 5.94,
+            "treasury": "ابويوسف"
+          }
+        }
+      ]
+    },
+    {
+      "id": "tunisian",
+      "name": "حوالة تونسية",
+      "occurrences": 1080,
+      "cases": [
+        {
+          "message": "A17\nالعاصمة \nلمياء \n21690005505\nالقيمة 295د.ت",
+          "transfer_messages": [
+            "A17\nالعاصمة \nلمياء \n21690005505\nالقيمة 295د.ت",
+            "1225 محل السهم 36.25\nوليد"
+          ],
+          "expected": {
+            "code": "A17",
+            "recipient": "21690005505",
+            "amount_gross": 295,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "1225",
+            "supplier_name": "محل السهم",
+            "rate": 36.25,
+            "treasury": "وليد"
+          }
+        },
+        {
+          "message": "A28\nسلم الي أسامة\n091-3722215\nفي تونس العاصمة 🇹🇳\nالقيمه:: 15750 تونسي",
+          "transfer_messages": [
+            "A28\nسلم الي أسامة\n091-3722215\nفي تونس العاصمة 🇹🇳\nالقيمه:: 15750 تونسي",
+            "20 الصفراء 36.25\nرحيم"
+          ],
+          "expected": {
+            "code": "A28",
+            "recipient": "0913722215",
+            "amount_gross": 15750,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "20",
+            "supplier_name": "الصفراء",
+            "rate": 36.25,
+            "treasury": "رحيم"
+          }
+        },
+        {
+          "message": "A38\n+218 91‑1246962\n1500د.ت\nطاهر الجازيري \nتونس العاصمة",
+          "transfer_messages": [
+            "A38\n+218 91‑1246962\n1500د.ت\nطاهر الجازيري \nتونس العاصمة",
+            "677 محمد زريق 36.25\nوليد"
+          ],
+          "expected": {
+            "code": "A38",
+            "recipient": "218911246962",
+            "amount_gross": 1500,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": "677",
+            "supplier_name": "محمد زريق",
+            "rate": 36.25,
+            "treasury": "وليد"
+          }
+        },
+        {
+          "message": "A50\nسلم اماني \n0914208728\n900 د ت \nجربه",
+          "transfer_messages": [
+            "A50\nسلم اماني \n0914208728\n900 د ت \nجربه"
+          ],
+          "expected": {
+            "code": "A50",
+            "recipient": "0914208728",
+            "amount_gross": 900,
+            "amount_net": null,
+            "currency": "د.ت",
+            "channel": null,
+            "supplier_code": null,
+            "supplier_name": null,
+            "rate": null,
+            "treasury": null
+          }
+        }
+      ]
+    }
+  ],
+  "treasury_aliases": [
+    "بلاس فون",
+    "بلاس",
+    "بلس",
+    "ابو يوسف",
+    "ابويوسف",
+    "ابو بوسف",
+    "البراق",
+    "جمال",
+    "طه",
+    "بلاي",
+    "وليد",
+    "رحيم",
+    "شهبندر",
+    "طلال",
+    "مومن",
+    "عمر"
+  ]
+}

@@ -45,6 +45,18 @@ log = get_logger(__name__)
 
 # ── أنماط ────────────────────────────────────────────────────────────────────
 _REFERENCE_RE = re.compile(r"^[A-Za-z]{1,4}\d{2,}$")
+# 🔴 حرف عربيّ زائد ملتصق قبل الرقم الإشاري («اA3002»/«اA1606» — زلّة لوحة مفاتيح شائعة، م: بلاغ
+#    prefixed_code): يُجرَّد فيُطابَق الرمز اللاتينيّ+الأرقام. بلا هذا يسقط المرجع فتُصنَّف الرسالة
+#    noise («تبدو حوالة فشل استخراجها») ظلمًا. لا يمسّ الرموز السليمة (المطابقة المباشرة أولًا).
+_REFERENCE_AR_PREFIX_RE = re.compile(r"^[ء-ي]+([A-Za-z]{1,4}\d{2,})$")
+
+
+def _match_reference(tok: str) -> Optional[str]:
+    """يُطابِق الرقم الإشاري، متسامحًا مع حرف عربيّ زائد سابق («اA3002»→«A3002»). None عند الفشل."""
+    if _REFERENCE_RE.match(tok):
+        return tok
+    m = _REFERENCE_AR_PREFIX_RE.match(tok)
+    return m.group(1) if m else None
 # رمز رقمي (سعر): يقبل الفاصلة اللاتينية «.» «,» والعربية «،» (مثل 5،84)
 _NUMERIC_TOKEN_RE = re.compile(r"^\d+(?:[.,،]\d+)?$")
 _ARABIC_RE = re.compile(r"[ء-ي]")
@@ -124,7 +136,7 @@ _SI_LABELS = [
 def _has_reference(text: str) -> bool:
     """§0: هل يحمل النصّ رقمًا إشاريًا (Axxxx/SIxxxx) كرمز مستقلّ؟ — مرساة معاملة قاطعة."""
     return any(
-        _REFERENCE_RE.match(tok)
+        _match_reference(tok)
         for tok in re.split(r"[\s/]+", (text or "").strip())
         if tok
     )
@@ -446,9 +458,11 @@ def _fish_a_anchors(text: str, f: dict) -> None:
 
     المبلغ+العملة الملتصقة («541ج») تبقى على تصنيف المقاطع (§3.5). كلّ ما لا يُطابِق يُتجاهَل."""
     for tok in re.split(r"[\s/]+", text.strip()):
-        if tok and "reference" not in f and _REFERENCE_RE.match(tok):
-            f["reference"] = tok
-            break
+        if tok and "reference" not in f:
+            ref = _match_reference(tok)
+            if ref:
+                f["reference"] = ref
+                break
     if "phone" not in f:
         # 🔴 (فيكس ج) كل مرشّحي الهاتف بلا اعتماد على الموضع (extract_phone_candidates يعزل الهاتف
         #    عن المبلغ داخليًّا). مرشّح واحد → يُؤخَذ. رقمان بالضبط → يُحفَظ كلاهما (phone + phone_alt).
@@ -561,9 +575,10 @@ def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_he
             f.setdefault("recipient_name", val.strip())
             return
 
-    # 1) الرقم الإشاري (A6xxx/A5xxx/SIxxxx)
-    if _REFERENCE_RE.match(seg.replace(" ", "")):
-        f.setdefault("reference", seg.replace(" ", ""))
+    # 1) الرقم الإشاري (A6xxx/A5xxx/SIxxxx) — متسامح مع حرف عربيّ زائد سابق («اA3002»)
+    _ref = _match_reference(seg.replace(" ", ""))
+    if _ref:
+        f.setdefault("reference", _ref)
         return
 
     # 2) مؤشّر الخصم (بدون خصم / صافي / خصم 1%) — ملاحظة لا خزينة وجهة (§3.2 §6.1) → notes.
