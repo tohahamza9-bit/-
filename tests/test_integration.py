@@ -694,22 +694,21 @@ async def test_reference_less_second_ambiguous_escalates(db):
     assert any(o["chat_jid"] == ADMIN and "تعذّر الربط" in (o.get("text") or "") for o in outs)
 
 
-async def test_auto_trust_still_matches_treasury_not_bypassed(db):
-    """الخيار الجزئيّ (X542): auto_trust يتخطّى الموردين **فقط** — الخزائن تبقى مطابَقة دائمًا.
-    خزينة مُصنّفة بلا رسالة مطابِقة → **لا تُكتب** (تنتظر مطابقة الخزينة) رغم auto_trust."""
+async def test_auto_trust_skips_room_matching_and_completes(db):
+    """وضع التلقائي (auto_trust): غرف مُصنّفة بلا رسالة غرفة → تُتخطّى المطابقة وتكتمل عبر بوابة الثقة."""
     await db.control.set(BotControl(storage_enabled=True, auto_trust=True, state="running"), "test")
     writer = FakeWriter()
     pipe = _make_pipeline(db, writer, StubVerifier())                  # غرف مُصنّفة (rooms=True)
     await db.rooms.upsert(Room(jid=TREAS_ROOM, type=RoomType.TREASURY, treasury_code="74", active=True))
-    # حوالة المركزية فقط — بلا أي رسالة في غرفة الخزينة/الزبون (لن تتطابق)
+    # حوالة المركزية فقط — بلا أي رسالة في غرفة الخزينة/الزبون (لن تتطابق عادةً)
     text = "1208 فداء شاكونه 5.84\nبلاس\nA5169\n010954227116\n1600 ج م\nفودافون\nبدون خصم"
     await pipe.capture(_raw("m1", text, jid=CENTRAL))
     now = PAST + timedelta(seconds=120)
     await pipe.process_inbox(now)
     await pipe.tick(now)
-    # 🔴 الخزينة لم تُطابَق → لا كتابة رغم auto_trust (الخزائن لا تُتخطّى)
-    assert not await db.deals.by_status(Status.COMPLETED), "الخزينة تُطابَق دائمًا حتى مع auto_trust"
-    assert writer.calls == []
+    completed = await db.deals.by_status(Status.COMPLETED)
+    assert len(completed) == 1, "auto_trust يكمل بلا مطابقة غرف"
+    assert writer.calls == [("sell", 0, True)]
 
 
 async def test_without_auto_trust_waits_for_room_match(db):
