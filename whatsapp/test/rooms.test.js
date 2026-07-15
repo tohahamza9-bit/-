@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isGroupJid, buildScopeMap, inScopeFrom, CAPTURE_TYPES } from '../src/capture.js';
+import { isGroupJid, buildScopeMap, inScopeFrom, NO_CAPTURE_TYPES } from '../src/capture.js';
 
 const CENTRAL = '120363000000000001@g.us';
 const CUSTOMER = '120363000000000003@g.us';
@@ -20,10 +20,11 @@ test('isGroupJid: مجموعة @g.us صحيحة، رسالة فردية لا', (
   assert.equal(isGroupJid(undefined), false);
 });
 
-// ── أنواع الالتقاط المسموحة (§2.2) ────────────────────────────────────────────
-test('CAPTURE_TYPES: المصنّفة الأربع فقط', () => {
-  for (const t of ['central', 'admin', 'customer', 'treasury']) assert.ok(CAPTURE_TYPES.has(t));
-  for (const t of ['ignore', 'unclassified']) assert.ok(!CAPTURE_TYPES.has(t));
+// ── أنواع لا تُلتقَط (الالتقاط الشامل عدا ignore) ──────────────────────────────
+test('NO_CAPTURE_TYPES: ignore فقط لا يُلتقَط', () => {
+  assert.ok(NO_CAPTURE_TYPES.has('ignore'));
+  for (const t of ['central', 'admin', 'customer', 'treasury', 'supplier', 'unclassified'])
+    assert.ok(!NO_CAPTURE_TYPES.has(t));   // كلها تُلتقَط الآن
 });
 
 // ── بناء خريطة النطاق من صفوف rooms ──────────────────────────────────────────
@@ -38,17 +39,18 @@ test('buildScopeMap: يتخطّى الصفوف بلا jid ويحترم active ا
   assert.equal(m.get(CUSTOMER).active, true);
 });
 
-// ── قرار الالتقاط ─────────────────────────────────────────────────────────────
-test('inScopeFrom: يلتقط المصنّفة النشطة فقط', () => {
+// ── قرار الالتقاط (شامل عدا ignore/الموقوفة/الفرديّة) ──────────────────────────
+test('inScopeFrom: يلتقط كل النشطة عدا ignore والموقوفة', () => {
   const m = buildScopeMap([
     { jid: CENTRAL, type: 'central', active: true },
     { jid: CUSTOMER, type: 'customer', active: false },      // موقوفة → خارج النطاق
     { jid: 'ig@g.us', type: 'ignore', active: true },        // مُتجاهَلة → خارج النطاق
-    { jid: 'un@g.us', type: 'unclassified', active: true },  // غير مصنّفة → خارج النطاق
+    { jid: 'un@g.us', type: 'unclassified', active: true },  // غير مصنّفة نشطة → تُلتقَط الآن
   ]);
   assert.equal(inScopeFrom(m, CENTRAL), true);
-  assert.equal(inScopeFrom(m, CUSTOMER), false);       // نوع مسموح لكن موقوفة
-  assert.equal(inScopeFrom(m, 'ig@g.us'), false);
-  assert.equal(inScopeFrom(m, 'un@g.us'), false);      // 🔴 غير مصنّفة = لا التقاط نص (§شرط 3)
-  assert.equal(inScopeFrom(m, 'unknown@g.us'), false); // مجهولة تمامًا
+  assert.equal(inScopeFrom(m, CUSTOMER), false);       // موقوفة (active=false)
+  assert.equal(inScopeFrom(m, 'ig@g.us'), false);      // متجاهَلة صراحةً
+  assert.equal(inScopeFrom(m, 'un@g.us'), true);       // 🆕 غير مصنّفة نشطة = تُلتقَط
+  assert.equal(inScopeFrom(m, 'unknown@g.us'), true);  // 🆕 مجهولة نشطة = تُلتقَط (ثم تُكتشَف)
+  assert.equal(inScopeFrom(m, DM), false);             // رسالة فرديّة ليست غرفًا
 });

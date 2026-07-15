@@ -4,16 +4,18 @@
  * - messages.update  → تعديلات لاحقة (تحديث النص + edited_at خلال المهلة §7.2).
  *
  * تصنيف الغرف مصدره مجموعة `rooms` في MongoDB (لا env) — hot-reload بلا إعادة تشغيل:
- *   • غرفة مصنّفة نشطة (central/admin/customer/treasury) → التقاط كامل (نص + خام).
- *   • غرفة مجهولة (@g.us) → اكتشاف metadata فقط (jid + اسم) كـ unclassified — بلا نص (§شرط 3).
- *   • ignore/unclassified/غير المجموعات → تجاهل.
+ *   • كل غرفة مجموعة (@g.us) نشطة و type ≠ ignore → التقاط كامل (نص + خام).
+ *   • غرفة مجهولة (@g.us) → تُكتشَف metadata (jid + اسم) كـ unclassified **وتُلتقَط** (تُصنَّف لاحقًا من الداشبورد).
+ *   • type=ignore أو غرفة موقوفة (active=false) أو الرسائل الفردية → تجاهل (بلا نص).
+ * ملاحظة: الالتقاط الشامل لا يمسّ منطق Python — الرسائل غير المركزية مصدر مطابقة صامت (matching محصور
+ *   بالنوع)، وتُعلَّم مُعالَجة فورًا. «غير مصنّفة = زبائن» قرار Python منفصل (لا يخصّ هذا الملف).
  * الالتقاط منفصل عن المعالجة (النواة تعالج). T5: كل خطأ يُسجَّل، لا رفض صامت.
  */
 import { buildRawDoc, detectEdit, extractText } from './messages.js';
 import { encodeKey } from './keys.js';
 
-// أنواع الغرف التي نلتقط منها نصّ الرسائل (§2.2). ما عداها → لا نص.
-export const CAPTURE_TYPES = new Set(['central', 'admin', 'customer', 'treasury']);
+// أنواع الغرف التي **لا** نلتقط نصوصها (تبقى مُتجاهَلة §13). ما عداها من غرف المجموعات النشطة يُلتقَط.
+export const NO_CAPTURE_TYPES = new Set(['ignore']);
 
 /** الغرف مجموعات واتساب (@g.us). الرسائل الفردية (@s.whatsapp.net) ليست غرفًا. */
 export function isGroupJid(jid) {
@@ -29,10 +31,13 @@ export function buildScopeMap(rows) {
   return m;
 }
 
-/** هل الغرفة ضمن نطاق الالتقاط الكامل؟ (مصنّفة + نشطة + نوعها ضمن CAPTURE_TYPES). */
+/** هل نلتقط نصّ هذه الغرفة؟ كل مجموعة (@g.us) نشطة و type ≠ ignore. المجهولة (ليست في الخريطة) تُلتقَط
+ *  أيضًا (جديدة نشطة) ثم تُكتشَف/تُصنَّف من الداشبورد. الرسائل الفردية/الموقوفة/المتجاهَلة → لا. */
 export function inScopeFrom(scopeMap, jid) {
+  if (!isGroupJid(jid)) return false;
   const r = scopeMap.get(jid);
-  return !!r && r.active && CAPTURE_TYPES.has(r.type);
+  if (!r) return true;                               // مجهولة/جديدة نشطة → تُلتقَط
+  return r.active && !NO_CAPTURE_TYPES.has(r.type);  // نشطة وغير متجاهَلة
 }
 
 /**
@@ -132,11 +137,11 @@ export function makeCapture({ raw, rooms, logger, getBotJid, resolveRoomName = n
       try {
         if (!msg || !msg.key || !msg.message) continue;
         const jid = msg.key.remoteJid;
-        if (!inScope(jid)) {
-          // خارج نطاق الالتقاط: نكتشف المجموعات المجهولة (metadata فقط)، ونتجاهل ما عداها.
-          if (isGroupJid(jid)) await discover(jid);
-          continue;
-        }
+        if (!isGroupJid(jid)) continue;              // رسائل فرديّة (@s.whatsapp.net) — ليست غرفًا
+        // اكتشاف الغرف المجهولة (تسجيل metadata كـ unclassified للتصنيف من الداشبورد §شرط 3)
+        if (!scope.has(jid)) await discover(jid);
+        // خارج نطاق الالتقاط (موقوفة active=false أو type=ignore صراحةً) → لا نصّ
+        if (!inScope(jid)) continue;
         const edit = detectEdit(msg.message);
         if (edit) {
           await applyEdit(edit);
