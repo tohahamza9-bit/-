@@ -272,7 +272,12 @@ async function loadSuppliers() {
   const rows = await api("/suppliers"); window._srows = rows;
   $("s_body").innerHTML = rows.map((s,i) => `<tr id="trow-s-${i}" class="${s.active?'':'inactive'}">
     <td>${s.name}</td><td>${s.code??'—'}</td>
-    <td class="aliases">${(s.aliases||[]).join('، ')}</td>
+    <td class="aliases">
+      <div class="chips" id="al-s-${i}">${(s.aliases||[]).map(a=>`<span class="chip">${esc(a)}</span>`).join('')}</div>
+      ${!canWrite() ? '' : `<div class="row aliaspush">
+        <input id="pa-s-${i}" placeholder="إملاء بديل" onkeydown="if(event.key==='Enter'){event.preventDefault();pushSupplierAlias(${i});}">
+        <button class="ghost" onclick="pushSupplierAlias(${i})">＋ إضافة</button></div>`}
+    </td>
     <td>${s.active?'<span class="pill on">فعّال</span>':'<span class="pill off">موقوف</span>'}</td>
     <td class="row" style="gap:6px">${!canWrite() ? '' : `<button class="ghost" onclick="editSupplier(${i})">تعديل</button>` + (s.active
       ? `<button class="ghost danger" onclick="disableSupplier('${encodeURIComponent(s.name)}')">إيقاف</button>`
@@ -305,13 +310,27 @@ async function addSupplier() {
   ["s_name","s_code","s_alias"].forEach(i=>$(i).value=""); loadSuppliers();
 }
 async function disableSupplier(n) { await api(`/suppliers/${n}/disable`,"POST"); loadSuppliers(); }
+// إضافة إملاء بديل واحد (push) لمكدّس aliases المورد مباشرةً (تعميم زر «＋» من الخزائن)
+async function pushSupplierAlias(i) {
+  const s = window._srows[i]; if (!s) return;
+  const inp = $("pa-s-"+i); const alias = (inp && inp.value || "").trim();
+  if (!alias) { toast("اكتب إملاءً بديلاً"); if (inp) inp.focus(); return; }
+  try { await api(`/suppliers/${encodeURIComponent(s.name)}/aliases`,"POST",{ alias }); }
+  catch (e) { return; }
+  toast("أُضيف الإملاء ✓"); loadSuppliers();
+}
 
 // ── قنوات الدفع (م٣) ──
 async function loadChannels() {
   const rows = await api("/payment-channels"); window._crows = rows;
   $("c_body").innerHTML = rows.map((c,i) => `<tr id="trow-c-${i}" class="${c.active?'':'inactive'}">
     <td>${c.name}</td><td>${c.code??'—'}</td>
-    <td class="aliases">${(c.aliases||[]).join('، ')}</td>
+    <td class="aliases">
+      <div class="chips" id="al-c-${i}">${(c.aliases||[]).map(a=>`<span class="chip">${esc(a)}</span>`).join('')}</div>
+      ${!canWrite() ? '' : `<div class="row aliaspush">
+        <input id="pa-c-${i}" placeholder="إملاء بديل" onkeydown="if(event.key==='Enter'){event.preventDefault();pushChannelAlias(${i});}">
+        <button class="ghost" onclick="pushChannelAlias(${i})">＋ إضافة</button></div>`}
+    </td>
     <td>${c.active?'<span class="pill on">فعّالة</span>':'<span class="pill off">موقوفة</span>'}</td>
     <td class="row" style="gap:6px">${!canWrite() ? '' : `<button class="ghost" onclick="editChannel(${i})">تعديل</button>` + (c.active
       ? `<button class="ghost danger" onclick="disableChannel('${encodeURIComponent(c.name)}')">إيقاف</button>`
@@ -344,6 +363,15 @@ async function addChannel() {
 }
 async function disableChannel(n) { await api(`/payment-channels/${n}/disable`,"POST"); loadChannels(); }
 async function enableChannel(n) { await api(`/payment-channels/${n}/enable`,"POST"); loadChannels(); }
+// إضافة إملاء بديل واحد (push) لمكدّس aliases القناة مباشرةً (تعميم زر «＋» م٣)
+async function pushChannelAlias(i) {
+  const c = window._crows[i]; if (!c) return;
+  const inp = $("pa-c-"+i); const alias = (inp && inp.value || "").trim();
+  if (!alias) { toast("اكتب إملاءً بديلاً"); if (inp) inp.focus(); return; }
+  try { await api(`/payment-channels/${encodeURIComponent(c.name)}/aliases`,"POST",{ alias }); }
+  catch (e) { return; }
+  toast("أُضيف الإملاء ✓"); loadChannels();
+}
 
 // ── بحث فوري (م٣) — واجهة فقط ──
 function applyAssetSearch() {

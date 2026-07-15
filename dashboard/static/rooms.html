@@ -88,6 +88,21 @@
       <option value="ignore">متجاهَلة</option>
     </select>
   </div>
+  <!-- استيراد الغرف (بديل كتابة JID يدويًّا) — مدير فقط -->
+  <div id="importPanel" style="display:none; background:var(--card); border:1px solid var(--line);
+       border-radius:12px; padding:12px 14px; margin-bottom:14px">
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+      <button id="importMsgsBtn" onclick="importFromMessages()">⬇ استيراد كل الجروبات الحالية</button>
+      <button class="ghost" onclick="toggleJidsBox()">＋ استيراد JIDs (لصق)</button>
+      <span class="muted">تُضاف كغرف «غير مصنّفة» تنتظر التصنيف — بلا مساس بتصنيف موجود.</span>
+    </div>
+    <div id="jidsBox" style="display:none; margin-top:10px">
+      <textarea id="jidsInput" rows="4" placeholder="ألصق JIDs (كل واحد بسطر أو مفصولة بفواصل)…"
+                style="width:100%; font-family:inherit; font-size:14px; padding:9px 12px; border-radius:9px;
+                       border:1px solid var(--line); background:var(--bg); color:var(--txt); resize:vertical"></textarea>
+      <div style="margin-top:8px"><button onclick="importJids()">استيراد</button></div>
+    </div>
+  </div>
   <div id="list"></div>
   <div id="empty" style="display:none">لا غرف مطابِقة.</div>
 </div>
@@ -233,6 +248,27 @@ async function load() {
   } catch (e) { /* toast عُرض بالفعل */ }
 }
 
+// ── استيراد الغرف (مدير فقط؛ الـ backend يرفض غيره بـ403) ──
+function toggleJidsBox() { const b=$("jidsBox"); b.style.display = b.style.display==="none" ? "block" : "none"; }
+async function importFromMessages() {
+  const btn=$("importMsgsBtn"); btn.disabled=true;
+  try {
+    const r = await api("/rooms/import-from-messages","POST");
+    toast(`استُوردت ${r.added} غرفة جديدة (فُحص ${r.scanned})`);
+    await load();
+  } catch (e) { /* toast عُرض */ } finally { btn.disabled=false; }
+}
+async function importJids() {
+  const jids = ($("jidsInput").value||"").split(/[\s,،]+/).map(s=>s.trim()).filter(Boolean);
+  if (!jids.length) { toast("ألصق JIDs أولاً"); return; }
+  try {
+    const r = await api("/rooms/import","POST",{ jids });
+    toast(`أُضيفت ${r.added} غرفة (${r.existing} موجودة)`);
+    $("jidsInput").value=""; $("jidsBox").style.display="none";
+    await load();
+  } catch (e) { /* toast عُرض */ }
+}
+
 const ROLE_AR = { manager:"مدير", reviewer:"مراجع", data_entry:"مُدخل بيانات" };
 $("logoutBtn").onclick = async () => {
   try { await fetch("/api/auth/logout", { method:"POST", credentials:"same-origin" }); } catch(e) {}
@@ -255,6 +291,7 @@ async function boot() {
 
   if (ROLE === "data_entry") { document.body.classList.add("no-access"); return; }
 
+  if (ROLE === "manager") $("importPanel").style.display = "block";  // الاستيراد للمدير فقط
   load();
   setInterval(load, 30000);   // اكتشاف الغرف الجديدة دوريًا
 }
