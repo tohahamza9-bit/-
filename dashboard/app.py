@@ -31,6 +31,7 @@ from core.models import (
     BotControl,
     DetectionConfig,
     EmployeeRecord,
+    FxRatesConfig,
     OutgoingMessage,
     PaymentChannelRecord,
     Room,
@@ -120,6 +121,11 @@ class RoomPatchIn(BaseModel):
     type: Optional[RoomType] = None
     active: Optional[bool] = None
     treasury_code: Optional[str] = None
+
+
+class RoomsImportIn(BaseModel):
+    """استيراد غرف بلصق قائمة JIDs — كلٌّ يُسجَّل «غير مصنّفة» ينتظر التصنيف (§2.2)."""
+    jids: list[str] = Field(default_factory=list)
 
 
 class LoginIn(BaseModel):
@@ -487,6 +493,21 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         await _notify_owner(_owner_text("مورد", "تفعيل", name))
         return {"name": name, "active": True}
 
+    @router.post("/suppliers/{name}/aliases", dependencies=[manager])
+    async def push_supplier_alias(name: str, body: AliasPushIn) -> dict:
+        """يُلحِق إملاءً بديلاً واحدًا (push) لمكدّس aliases المورد — بلا تكرار، حيّ فورًا (§5.4).
+
+        تعميم زر «＋» من الخزائن (025d3ef): بديلٌ سريع للتعديل inline الكامل."""
+        alias = body.alias.strip()
+        if not alias:
+            raise HTTPException(status_code=400, detail="إملاء فارغ")
+        if not await db.suppliers.add_alias(name, alias):
+            raise HTTPException(status_code=404, detail=f"مورد غير موجود: {name}")
+        doc = await db.suppliers.col.find_one({"name": name})
+        log.info("push إملاء «%s» للمورد %s", alias, name)
+        await _notify_owner(_owner_text("مورد", f"إضافة إملاء «{alias}»", name))
+        return {"name": name, "aliases": list(doc.get("aliases") or [])}
+
     # ── إدارة قنوات الدفع (لوحة V2 م٣) — إدارة قائمة فقط؛ لا ربط بالكتابة بعد ──────
     @router.get("/payment-channels", dependencies=[reader])
     async def list_channels() -> list[dict]:
@@ -532,6 +553,19 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         log.info("تفعيل قناة دفع: %s", name)
         await _notify_owner(_owner_text("قناة دفع", "تفعيل", name))
         return {"name": name, "active": True}
+
+    @router.post("/payment-channels/{name}/aliases", dependencies=[manager])
+    async def push_channel_alias(name: str, body: AliasPushIn) -> dict:
+        """يُلحِق إملاءً بديلاً واحدًا (push) لمكدّس aliases القناة — بلا تكرار (تعميم زر «＋» م٣)."""
+        alias = body.alias.strip()
+        if not alias:
+            raise HTTPException(status_code=400, detail="إملاء فارغ")
+        if not await db.payment_channels.add_alias(name, alias):
+            raise HTTPException(status_code=404, detail=f"قناة غير موجودة: {name}")
+        doc = await db.payment_channels.col.find_one({"name": name})
+        log.info("push إملاء «%s» للقناة %s", alias, name)
+        await _notify_owner(_owner_text("قناة دفع", f"إضافة إملاء «{alias}»", name))
+        return {"name": name, "aliases": list(doc.get("aliases") or [])}
 
     # ── الكلمات المجهولة (§4.5 §5.4) — خزائن/موردون تعذّر حلّهم → إسناد يدويّ كـ alias ─────
     @router.get("/unknown-terms", dependencies=[reader])
@@ -671,6 +705,42 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         log.info("إيقاف غرفة (بلا حذف): %s", jid)
         return {"jid": jid, "active": False}
 
+    # ── استيراد الغرف (بديل كتابة JID يدويًّا) — تُسجَّل «غير مصنّفة» تنتظر التصنيف ──────
+    # 🔴 discover = metadata فقط (setOnInsert): لا يمسّ تصنيفًا/اسمًا موجودًا، لا نصّ رسالة،
+    #    ولا حدود الكتابة (المركزية/المسؤول من env). صفر مساس بالمطابقة/الالتقاط.
+    @router.post("/rooms/import", dependencies=[manager])
+    async def import_rooms(body: RoomsImportIn) -> dict:
+        """استيراد غرف بلصق قائمة JIDs — كلٌّ يُسجَّل «غير مصنّفة» (discover) إن لم يوجد سابقًا.
+
+        لا يمسّ تصنيف/اسم غرفة موجودة (setOnInsert). يُرجِع عدّاد المُضاف/الموجود."""
+        existing = set(await db.rooms.col.distinct("jid"))
+        seen: set[str] = set()
+        added = 0
+        for raw in body.jids:
+            jid = (raw or "").strip()
+            if not jid or jid in seen:
+                continue
+            seen.add(jid)
+            if jid not in existing:
+                await db.rooms.discover(jid)
+                added += 1
+        log.info("استيراد غرف (لصق JIDs): مُضاف=%d، موجود=%d", added, len(seen) - added)
+        return {"added": added, "existing": len(seen) - added, "total": len(seen)}
+
+    @router.post("/rooms/import-from-messages", dependencies=[manager])
+    async def import_rooms_from_messages() -> dict:
+        """استيراد كل الغرف التي وصلت منها رسالة (chat_jid المميّزة في raw_messages) — تُسجَّل
+        «غير مصنّفة» إن لم توجد (discover). قراءة raw_messages فقط؛ لا يمسّ الالتقاط/المعالجة."""
+        existing = set(await db.rooms.col.distinct("jid"))
+        jids = await db.raw.distinct_chat_jids()
+        added = 0
+        for jid in jids:
+            if jid and jid not in existing:
+                await db.rooms.discover(jid)
+                added += 1
+        log.info("استيراد الغرف من الرسائل: فُحص=%d، مُضاف=%d", len(jids), added)
+        return {"added": added, "scanned": len(jids), "total_rooms": len(existing) + added}
+
     # ── لوحة V2 (م١): سجل الحوالات + قائمة الانتباه — قراءة فقط لدورة الحياة ────
     # 🔴 لا كتابة على deals/pipeline. «صعّد» يُنتج لطابور outgoing فقط (لا مسار Node مباشر).
     @router.get("/transfers", dependencies=[reader])
@@ -748,6 +818,19 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         """تحديث حدود قواعد التصعيد (المدير يرسل الإعداد كاملًا). لا يمسّ منطق الكشف نفسه."""
         await db.detection.set(body)
         log.info("تحديث حدود كشف الاحتيال (م٢) عبر اللوحة")
+        return body.model_dump(mode="json")
+
+    # ── إعداد نظام الأسعار (FX_RATES_SPEC §12) — عرض للقارئ، تعديل للمدير فقط ─────
+    @router.get("/settings/fx-rates", dependencies=[reader])
+    async def get_fx_rates() -> dict:
+        """إعداد الأسعار الحاليّ (قيم §12 القابلة للتعديل). fx_rates_enabled=False افتراضيًّا."""
+        return (await db.fx_config.get()).model_dump(mode="json")
+
+    @router.put("/settings/fx-rates", dependencies=[manager])
+    async def put_fx_rates(body: FxRatesConfig) -> dict:
+        """تحديث إعداد الأسعار (المدير يرسل الإعداد كاملًا). سباكة إعداد فقط — لا منطق تسعير بعد."""
+        await db.fx_config.set(body)
+        log.info("تحديث إعداد نظام الأسعار (FX §12) عبر اللوحة")
         return body.model_dump(mode="json")
 
     @router.post("/attention/{deal_id}/escalate")

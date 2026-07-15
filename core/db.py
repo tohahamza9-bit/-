@@ -31,6 +31,7 @@ from .models import (
     DetectionConfig,
     Deal,
     EmployeeRecord,
+    FxRatesConfig,
     LedgerEntry,
     OutgoingMessage,
     ParsedLeg,
@@ -111,6 +112,12 @@ class RawMessageRepo(_Repo):
         عند تساوي `received_at` (دقّة الثانية) → ترتيب **حتميّ** فلا تُسجَّل رسالة قبل أختها عشوائيًّا."""
         cur = self.col.find({"processed": False}).sort([("received_at", 1), ("_id", 1)]).limit(limit)
         return [RawMessage(**d) async for d in cur]
+
+    async def distinct_chat_jids(self) -> list[str]:
+        """كل معرّفات الغرف (chat_jid) المميّزة التي وصلت منها رسالة — لاستيراد الغرف في اللوحة.
+        قراءة فقط؛ لا يمسّ الالتقاط/المعالجة/المطابقة."""
+        jids = await self.col.distinct("chat_jid")
+        return [j for j in jids if j]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -398,6 +405,13 @@ class SupplierListRepo(_Repo):
     async def upsert(self, rec: SupplierRecord) -> None:
         await self.col.update_one({"name": rec.name}, {"$set": self._dump(rec)}, upsert=True)
 
+    async def add_alias(self, name: str, alias: str) -> bool:
+        """يُلحِق إملاءً بديلاً (push) لمكدّس aliases المورد بلا تكرار ($addToSet). حيّ فورًا
+        (all_active يقرؤه لكل رسالة بلا إعادة تشغيل §5.4). يُرجِع False إن لم يُوجد المورد بالاسم.
+        نفس نمط TreasuryListRepo.add_alias (025d3ef)."""
+        res = await self.col.update_one({"name": name}, {"$addToSet": {"aliases": alias}})
+        return res.matched_count > 0
+
     async def seed_if_missing(self, seed: list[dict]) -> None:
         """يُدرِج الموردين الافتراضيين الناقصين فقط ($setOnInsert) — لا يمسّ الموجود/تعديلات
         Dashboard، فيعمل على قاعدة مأهولة (بخلاف seed_if_empty §5.4)."""
@@ -415,6 +429,12 @@ class PaymentChannelListRepo(_Repo):
 
     async def upsert(self, rec: PaymentChannelRecord) -> None:
         await self.col.update_one({"name": rec.name}, {"$set": self._dump(rec)}, upsert=True)
+
+    async def add_alias(self, name: str, alias: str) -> bool:
+        """يُلحِق إملاءً بديلاً (push) لمكدّس aliases القناة بلا تكرار ($addToSet). يُرجِع False إن
+        لم توجد القناة بالاسم. نفس نمط TreasuryListRepo.add_alias (025d3ef)."""
+        res = await self.col.update_one({"name": name}, {"$addToSet": {"aliases": alias}})
+        return res.matched_count > 0
 
     async def all_active(self) -> list[PaymentChannelRecord]:
         cur = self.col.find({"active": True})
@@ -910,6 +930,27 @@ class DashboardConfigRepo(_Repo):
         await self.col.update_one({"_key": self._KEY}, {"$set": payload}, upsert=True)
 
 
+class FxRatesConfigRepo(_Repo):
+    """إعداد نظام الأسعار (FX_RATES_SPEC §12) — مستند مفرد قابل للتعديل. نمط DashboardConfigRepo
+    نفسه، في مجموعة dashboard_config ذاتها لكن بمفتاح مستقلّ (_key='fx_rates') فلا تصادم مع
+    'detection'. غيابه ⇒ الافتراضات الموثّقة (fx_rates_enabled=False)."""
+
+    _KEY = "fx_rates"
+
+    async def get(self) -> FxRatesConfig:
+        doc = await self.col.find_one({"_key": self._KEY})
+        if not doc:
+            return FxRatesConfig()
+        doc.pop("_key", None)
+        doc.pop("_id", None)
+        return FxRatesConfig(**doc)
+
+    async def set(self, cfg: FxRatesConfig) -> None:
+        payload = self._dump(cfg)
+        payload["_key"] = self._KEY
+        await self.col.update_one({"_key": self._KEY}, {"$set": payload}, upsert=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # الواجهة الجامعة
 # ─────────────────────────────────────────────────────────────────────────────
@@ -948,6 +989,8 @@ class Database:
         self.reviews = DashboardReviewRepo(self.mdb, "dashboard_reviews", "deal_id")
         # لوحة V2 (م٢): إعداد كشف الاحتيال — مستند مفرد قابل للتعديل
         self.detection = DashboardConfigRepo(self.mdb, "dashboard_config", "_key")
+        # نظام الأسعار (FX_RATES_SPEC §12): إعداد مفرد مستقلّ (_key='fx_rates') — نفس المجموعة
+        self.fx_config = FxRatesConfigRepo(self.mdb, "dashboard_config", "_key")
         log.info("اتصال MongoDB: %s / %s", self._uri, self._db_name)
 
     async def ensure_indexes(self) -> None:

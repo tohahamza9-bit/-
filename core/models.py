@@ -345,6 +345,38 @@ class DetectionConfig(BaseModel):
     new_entity_lookback_hours: int = 48          # أقدم من هذا الحدّ = ليس جديدًا
 
 
+class FxRatesConfig(BaseModel):
+    """إعداد نظام الأسعار (docs/FX_RATES_SPEC.md §12) — **مستند مفرد قابل للتعديل من الداشبورد**،
+    منفصل عن DetectionConfig (كشف الاحتيال). كل قيمة هنا (لا ثوابت مبعثرة بالكود §شرط ٤).
+
+    الخطوة ١ (سباكة إعداد فقط): لا منطق تسعير/GROSS/NET/sanity هنا — تأتي في خطوات لاحقة.
+    fx_rates_enabled=False افتراضيًّا ⇒ المرحلة ١ (سعر الموظف كما اليوم) حتى أول قراءة (§2)."""
+    fx_rates_enabled: bool = False               # المرحلة ١ حتى أول قراءة ناجحة (§13)
+    # مصادر الأسعار — غرف يختارها المالك من الداشبورد (لا نوع RoomType جديد §2)
+    egp_room_jid: str = ""                        # JID غرفة أسعار مصر
+    tnd_room_jid: str = ""                        # JID غرفة أسعار تونس
+    large_amount_room_jid: str = ""              # JID غرفة القيم الكبيرة — إشعار الأسعار الجديدة (§11)
+    #   TODO(خطوة ٥): مزامنة هذه القيمة إلى Settings.large_amount_room_jid (القائمة البيضاء) عند الحفظ.
+    # الحدود المطلقة — خارجها HELD فورًا (§6)
+    rate_min_egp: float = 5.50
+    rate_max_egp: float = 8.00
+    rate_min_tnd: float = 0.28
+    rate_max_tnd: float = 0.45
+    # الخصم (مصر فقط §7)
+    discount_tolerance_min: float = 0.008        # 0.8% — أدنى فرق يُعتبَر خصم 1%
+    discount_tolerance_max: float = 0.012        # 1.2% — أعلى فرق يُعتبَر خصم 1%
+    discount_error_margin: float = 0.002         # 0.2% — خارجه لا يُسجَّل
+    # شرائح المبلغ — شريحة واحدة لكل دولة (تحت/فوق) §3 ط٤
+    amount_tier_threshold_egp: float = 500000.0
+    amount_tier_threshold_tnd: float = 200.0
+    # عتبات التنبيه (§9)
+    loss_alert_threshold: float = 200000.0                    # خسارة + مبلغ فوقه ⇒ 🔴
+    price_change_notification_threshold: float = 200000.0     # تغيّر سعر + مبلغ فوقه ⇒ ⚠️ + إشعار
+    # فترة التكيّف + الحدّ الديناميكيّ (§6)
+    price_change_adaptation_deals: int = 10      # عدد الحوالات التي يُقبَل فيها السعران بعد التغيير
+    dynamic_deviation_lookback_deals: int = 50   # آخر حوالات الخزينة لحساب الانحراف المعياريّ
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 7) وجهة الإرسال — قاعدة الإخراج الصارمة (§2.2)
 # ─────────────────────────────────────────────────────────────────────────────

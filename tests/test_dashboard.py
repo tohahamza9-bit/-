@@ -485,6 +485,111 @@ async def test_push_treasury_alias_reviewer_forbidden(db):
         assert r.status_code == 403, "reviewer يرى لكن لا يضيف إملاءً"
 
 
+# ── تعميم زر «＋» للإملاءات: الموردون + قنوات الدفع (نفس نمط الخزائن 025d3ef) ──────
+async def test_push_supplier_alias_appends_and_dedupes(db):
+    """زر «＋» للمورد (push): يُلحِق إملاءً واحدًا بـ$addToSet — بلا تكرار + تشذيب + تنبيه المالك."""
+    pytest.importorskip("fastapi")
+    from core.models import SupplierRecord
+    await db.suppliers.upsert(SupplierRecord(name="البراق", code="1280", aliases=["براق"]))
+    async with _client(db, settings=_admin_settings()) as ac:
+        r = await ac.post("/api/suppliers/البراق/aliases", json={"alias": "الابراق"})
+        assert r.status_code == 200 and r.json()["aliases"] == ["براق", "الابراق"]
+        r2 = await ac.post("/api/suppliers/البراق/aliases", json={"alias": "الابراق"})  # مكرّر
+        assert r2.json()["aliases"] == ["براق", "الابراق"], "لا تكرار ($addToSet)"
+        r3 = await ac.post("/api/suppliers/البراق/aliases", json={"alias": "  البرق  "})  # يُشذّب
+        assert r3.json()["aliases"] == ["براق", "الابراق", "البرق"]
+    doc = await db.suppliers.col.find_one({"name": "البراق"})
+    assert doc["aliases"] == ["براق", "الابراق", "البرق"]
+    assert any("البراق" in (m.get("text") or "") for m in await _alerts(db)), "تنبيه للمالك"
+
+
+async def test_push_supplier_alias_unknown_404_and_reviewer_403(db):
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    from core.models import SupplierRecord
+    async with _client(db) as ac:
+        assert (await ac.post("/api/suppliers/لا-يوجد/aliases", json={"alias": "x"})).status_code == 404
+    await db.suppliers.upsert(SupplierRecord(name="البراق", code="1280"))
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        r = await ac.post("/api/suppliers/البراق/aliases", json={"alias": "x"})
+        assert r.status_code == 403, "reviewer يرى لكن لا يضيف إملاءً"
+
+
+async def test_push_channel_alias_appends_and_dedupes(db):
+    """زر «＋» لقناة الدفع (push): $addToSet بلا تكرار + تشذيب + تنبيه المالك."""
+    pytest.importorskip("fastapi")
+    from core.models import PaymentChannelRecord
+    await db.payment_channels.upsert(PaymentChannelRecord(name="فودافون", code="17", aliases=["فودا"]))
+    async with _client(db, settings=_admin_settings()) as ac:
+        r = await ac.post("/api/payment-channels/فودافون/aliases", json={"alias": "فودافوان"})
+        assert r.status_code == 200 and r.json()["aliases"] == ["فودا", "فودافوان"]
+        r2 = await ac.post("/api/payment-channels/فودافون/aliases", json={"alias": "فودافوان"})
+        assert r2.json()["aliases"] == ["فودا", "فودافوان"], "لا تكرار ($addToSet)"
+    doc = await db.payment_channels.col.find_one({"name": "فودافون"})
+    assert doc["aliases"] == ["فودا", "فودافوان"]
+    assert any("فودافون" in (m.get("text") or "") for m in await _alerts(db)), "تنبيه للمالك"
+
+
+async def test_push_channel_alias_unknown_404_and_reviewer_403(db):
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    from core.models import PaymentChannelRecord
+    async with _client(db) as ac:
+        assert (await ac.post("/api/payment-channels/لا-توجد/aliases", json={"alias": "x"})).status_code == 404
+    await db.payment_channels.upsert(PaymentChannelRecord(name="فودافون", code="17"))
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        r = await ac.post("/api/payment-channels/فودافون/aliases", json={"alias": "x"})
+        assert r.status_code == 403
+
+
+# ── استيراد الغرف (لصق JIDs + من الرسائل) — تُسجَّل «غير مصنّفة» بلا مساس بموجود ──────
+async def test_import_rooms_from_jids(db):
+    """لصق قائمة JIDs → غرف «غير مصنّفة» جديدة؛ تشذيب/إسقاط الفراغ والمكرّر؛ لا يمسّ تصنيفًا موجودًا."""
+    pytest.importorskip("fastapi")
+    from core.constants import RoomType
+    from core.models import Room
+    # غرفة مصنّفة مسبقًا — يجب ألّا يتغيّر تصنيفها بالاستيراد
+    await db.rooms.upsert(Room(jid="known@g.us", name="مركزية", type=RoomType.CENTRAL))
+    async with _client(db) as ac:
+        r = await ac.post("/api/rooms/import",
+                          json={"jids": ["a@g.us", " b@g.us ", "a@g.us", "", "known@g.us"]})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["added"] == 2, "a وb جديدتان فقط (المكرّر/الفارغ/الموجود لا تُحتسب)"
+    a = await db.rooms.get("a@g.us")
+    assert a is not None and a.type is RoomType.UNCLASSIFIED and a.active is True
+    assert (await db.rooms.get("b@g.us")) is not None
+    # الغرفة المعروفة بقيت مركزية (setOnInsert لا يمسّها)
+    assert (await db.rooms.get("known@g.us")).type is RoomType.CENTRAL
+
+
+async def test_import_rooms_from_messages(db):
+    """استيراد كل chat_jid المميّزة من raw_messages → غرف «غير مصنّفة» (بلا تكرار الموجود)."""
+    pytest.importorskip("fastapi")
+    from core.constants import RoomType
+    from core.db import utcnow
+    from core.models import RawMessage, Room
+    await db.rooms.upsert(Room(jid="g1@g.us", name="زبون", type=RoomType.CUSTOMER))  # موجودة
+    for i, jid in enumerate(["g1@g.us", "g2@g.us", "g2@g.us", "g3@g.us"]):
+        await db.raw.insert(RawMessage(message_key=f"k{i}", chat_jid=jid, text="x", received_at=utcnow()))
+    async with _client(db) as ac:
+        r = await ac.post("/api/rooms/import-from-messages")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["added"] == 2, "g2 وg3 جديدتان (g1 موجودة)"
+        assert body["scanned"] == 3, "ثلاث chat_jid مميّزة"
+    assert (await db.rooms.get("g2@g.us")).type is RoomType.UNCLASSIFIED
+    assert (await db.rooms.get("g1@g.us")).type is RoomType.CUSTOMER  # لم تُمَسّ
+
+
+async def test_import_rooms_reviewer_forbidden(db):
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        assert (await ac.post("/api/rooms/import", json={"jids": ["x@g.us"]})).status_code == 403
+        assert (await ac.post("/api/rooms/import-from-messages")).status_code == 403
+
+
 async def test_edit_treasury_reviewer_forbidden(db):
     pytest.importorskip("fastapi")
     from core.constants import Role
@@ -566,3 +671,57 @@ async def test_treasury_alias_edit_is_live_without_restart(db):
     after = await db.treasuries.all_active()                  # القراءة الحيّة التالية — بلا إعادة تشغيل
     t = resolve_treasury("اورنج كاش", after)
     assert t is not None and t.name == "بلاس فون", "الإملاء الجديد يُطابَق فورًا على الرسالة التالية"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# نظام الأسعار — الخطوة ١: FxRatesConfig (إعداد + مستودع + GET/PUT) — FX_RATES_SPEC §12
+# ─────────────────────────────────────────────────────────────────────────────
+async def test_fx_config_default_disabled(db):
+    """غياب المستند ⇒ الافتراضات الموثّقة: fx_rates_enabled=False + قيم §12."""
+    cfg = await db.fx_config.get()
+    assert cfg.fx_rates_enabled is False, "المرحلة ١ افتراضيًّا (§2)"
+    assert cfg.rate_min_egp == 5.50 and cfg.rate_max_egp == 8.00
+    assert cfg.rate_min_tnd == 0.28 and cfg.rate_max_tnd == 0.45
+    assert cfg.amount_tier_threshold_egp == 500000.0 and cfg.amount_tier_threshold_tnd == 200.0
+    assert cfg.price_change_adaptation_deals == 10 and cfg.dynamic_deviation_lookback_deals == 50
+
+
+async def test_fx_config_set_get_roundtrip(db):
+    """set→get يحفظ القيم المعدّلة (upsert مستند مفرد)."""
+    from core.models import FxRatesConfig
+    await db.fx_config.set(FxRatesConfig(fx_rates_enabled=True, egp_room_jid="eg@g.us",
+                                         tnd_room_jid="tn@g.us", rate_max_egp=7.75))
+    cfg = await db.fx_config.get()
+    assert cfg.fx_rates_enabled is True
+    assert cfg.egp_room_jid == "eg@g.us" and cfg.tnd_room_jid == "tn@g.us"
+    assert cfg.rate_max_egp == 7.75
+
+
+async def test_fx_config_independent_from_detection(db):
+    """fx_config وdetection مستندان مستقلّان في dashboard_config (مفتاحان مختلفان) — لا تصادم."""
+    from core.models import DetectionConfig, FxRatesConfig
+    await db.fx_config.set(FxRatesConfig(fx_rates_enabled=True))
+    await db.detection.set(DetectionConfig(structuring_count_threshold=99))
+    assert (await db.fx_config.get()).fx_rates_enabled is True           # لم يُدهَس
+    assert (await db.detection.get()).structuring_count_threshold == 99  # ولا العكس
+    assert await db.fx_config.col.count_documents({}) == 2, "مستندان بمفتاحين مختلفين"
+
+
+async def test_fx_rates_endpoints_rbac(db):
+    """GET للقارئ، PUT للمدير؛ PUT للمراجع 403؛ GET بلا دخول 401 (§14.3)."""
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    from core.models import FxRatesConfig
+    async with _anon_client(db) as ac:
+        assert (await ac.get("/api/settings/fx-rates")).status_code == 401
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        assert (await ac.get("/api/settings/fx-rates")).status_code == 200        # قراءة متاحة
+        body = FxRatesConfig(fx_rates_enabled=True).model_dump(mode="json")
+        assert (await ac.put("/api/settings/fx-rates", json=body)).status_code == 403  # لا يعدّل
+    async with _client(db) as ac:
+        r = await ac.get("/api/settings/fx-rates")
+        assert r.status_code == 200 and r.json()["fx_rates_enabled"] is False
+        body = FxRatesConfig(fx_rates_enabled=True, tnd_room_jid="tn@g.us").model_dump(mode="json")
+        r2 = await ac.put("/api/settings/fx-rates", json=body)
+        assert r2.status_code == 200 and r2.json()["fx_rates_enabled"] is True
+        assert (await ac.get("/api/settings/fx-rates")).json()["tnd_room_jid"] == "tn@g.us"
