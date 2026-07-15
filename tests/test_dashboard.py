@@ -761,3 +761,15 @@ async def test_deal_margin_in_timeline(db):
     async with _client(db) as ac:
         r = await ac.get("/api/transfers/DMARGIN")
         assert r.status_code == 200 and r.json()["deal"]["deal_margin"] == 0.05
+
+
+def test_production_app_serves_fx_and_entity_pages():
+    """🔴 الإنتاج يُشغّل core.app:get_app (لا dashboard.app). لا بدّ أن مسارَي الصفحتين مسجّلان
+    في core.app نفسه — تفادي تكرار خطأ «الصفحة 404 في الإنتاج رغم نجاح اختبارات dashboard.app»."""
+    pytest.importorskip("fastapi")
+    from core.app import create_app
+    from core.config import Settings
+    app = create_app(db=None, settings=Settings(_env_file=None), run_worker=False)
+    paths = {r.path for r in app.routes}
+    assert "/fx-rates" in paths, "core.app يجب أن يقدّم /fx-rates (الإنتاج = core.app لا dashboard.app)"
+    assert "/entity-aliases" in paths, "core.app يجب أن يقدّم /entity-aliases"

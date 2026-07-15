@@ -286,6 +286,18 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         html = ROOT / "dashboard" / "static" / "settings.html"
         return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
 
+    @app.get("/fx-rates")
+    async def fx_rates_page():  # noqa: ANN201
+        """صفحة إدارة الأسعار (FX_RATES_SPEC §15) — البوّابة/الصلاحيات تُفرَض في الـAPI."""
+        html = ROOT / "dashboard" / "static" / "fx_rates.html"
+        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+
+    @app.get("/entity-aliases")
+    async def entity_aliases_page():  # noqa: ANN201
+        """صفحة إدارة الكيانات الموحّدة (FX_RATES_SPEC §4)."""
+        html = ROOT / "dashboard" / "static" / "entity_aliases.html"
+        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+
     return app
 
 
