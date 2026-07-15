@@ -1210,7 +1210,8 @@ async def test_price_room_message_ingested_not_a_deal(db):
     await pipe.capture(_raw("px1", "فودافون 6.10\nانستا 6.12", jid=PRICE_EG, sender=EMP))
     deals = await pipe.process_inbox(PAST + timedelta(seconds=30))
     cur = await db.fx_rates.current(Currency.EGP)
-    assert cur is not None and cur.rates["vodafone"]["net"] == 6.10 and cur.rates["insta"]["net"] == 6.12
+    # قالب فارغ ⇒ fallback بمفاتيح عربية معياريّة (فودافون/انستا)
+    assert cur is not None and cur.rates["فودافون"]["net"] == 6.10 and cur.rates["انستا"]["net"] == 6.12
     assert deals == [], "لا صفقة من رسالة أسعار"
     assert await db.deals.col.count_documents({}) == 0, "لا حوالة تُنشأ"
     assert (await db.raw.get("px1")).processed is True, "الرسالة عُلّمت معالَجة"

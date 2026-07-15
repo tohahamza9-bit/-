@@ -73,31 +73,54 @@ async def test_currencies_independent(db):
 EGP_TEMPLATE = "فودافون = vodafone\nانستا, انستاباي = insta\nبنك = bank\nبريد = post"
 
 
-def test_parse_template_egp_net_and_gross():
-    text = "فودافون: 6.10 / صافي 6.15\nانستا 6.12\nبنك 6.08"
-    rates = parse_price_message(text, EGP_TEMPLATE, Currency.EGP)
-    assert rates["vodafone"] == {"gross": 6.10, "net": 6.15}   # «صافي» ⇒ الثاني net، الأول gross
-    assert rates["insta"] == {"net": 6.12}
-    assert rates["bank"] == {"net": 6.08}
+# ── الصيغة الحقيقية من غرفة الأسعار (fallback بمفاتيح عربية) ──────────────────
+def _p(text, cur):
+    return parse_price_message(text, "", cur)
 
 
-def test_parse_fallback_when_template_empty():
-    text = "فودافون 6.10\nانستاباي 6.12"
-    rates = parse_price_message(text, "", Currency.EGP)      # قالب فارغ ⇒ fallback §3
-    assert rates["vodafone"] == {"net": 6.10}
-    assert rates["insta"] == {"net": 6.12}
+def test_parse_egp_real_format_discount_vs_net():
+    """«خصم»/«%»⇒gross · «صافي»/«بدون خصم»⇒net · بلا كلمة⇒net. متغيّرات الاسم «فودا فون»/«فود فون»."""
+    assert _p("فودا فون  6.10 خصم 1%", Currency.EGP) == {"فودافون": {"gross": 6.10}}
+    assert _p("فود فون.  6.04 صافي", Currency.EGP) == {"فودافون": {"net": 6.04}}
+    assert _p("انستاباي :6.01  خصم  1٪", Currency.EGP) == {"انستا": {"gross": 6.01}}
+    assert _p("انستا  : 5.95    بدون خصم", Currency.EGP) == {"انستا": {"net": 5.95}}
+    assert _p("بريد: 5.97", Currency.EGP) == {"بريد": {"net": 5.97}}
 
 
-def test_parse_tnd_net_only():
-    text = "العاصمة 0.34\nجربة 0.33"
-    rates = parse_price_message(text, "", Currency.TND)
-    assert rates["capital"] == {"net": 0.34} and rates["djerba"] == {"net": 0.33}
-    assert "gross" not in rates["capital"], "تونس net فقط (§7 لا خصم)"
+def test_parse_egp_amount_tiers():
+    """«تحت/فوق N [ألف]» ⇒ شريحة؛ مصر N<1000 بالآلاف. الشريحتان تتعايشان لنفس القناة (لا دهس)."""
+    assert _p("بنك :  5.97 تحت 500 الف", Currency.EGP) == {
+        "بنك_تحت_500000": {"net": 5.97, "tier": "تحت_500000"}}
+    assert _p("*بنك :  6.00   قيم فوق 500", Currency.EGP) == {
+        "بنك_فوق_500000": {"net": 6.00, "tier": "فوق_500000"}}
+    both = _p("بنك :  5.97 تحت 500 الف\n*بنك :  6.00   قيم فوق 500", Currency.EGP)
+    assert set(both) == {"بنك_تحت_500000", "بنك_فوق_500000"}
+
+
+def test_parse_tnd_cities_and_double_dot_number():
+    """تونس: مدن مفتوحة بمفاتيح عربية + صيغة X.XX.CC («0.34.50»→0.345) + سطر شريحة عامّ."""
+    assert _p("العاصمة / 0.35.00", Currency.TND) == {"العاصمة": {"net": 0.35}}
+    assert _p("جربة: 0.34.50", Currency.TND) == {"جربة": {"net": 0.345}}
+    assert _p("بن قردان: 0.34.00", Currency.TND) == {"بن_قردان": {"net": 0.34}}
+    assert _p("تحت 200 تونسي 0.32.00", Currency.TND) == {"تحت_200": {"net": 0.32, "tier": "تحت_200"}}
+    assert "gross" not in _p("العاصمة / 0.35.00", Currency.TND)["العاصمة"]  # تونس net فقط (§7)
+
+
+def test_parse_ignores_lines_without_numbers():
+    rates = _p("الدوام حتى الخامسة مساءً\nتنبيه: راجع قبل الإرسال\nبريد: 5.97", Currency.EGP)
+    assert rates == {"بريد": {"net": 5.97}}
 
 
 def test_parse_arabic_digits_and_comma():
     rates = parse_price_message("فودافون ٦،١٠", "", Currency.EGP)   # أرقام عربية + فاصلة عربية
-    assert rates["vodafone"] == {"net": 6.10}
+    assert rates["فودافون"] == {"net": 6.10}
+
+
+def test_parse_template_overrides_fallback_keys():
+    """القالب يحدّد المفاتيح (هنا إنجليزية) ويتجاوز مفاتيح fallback العربيّة."""
+    rates = parse_price_message("فودافون 6.10\nانستا 6.12",
+                                "فودافون = vodafone\nانستا = insta", Currency.EGP)
+    assert rates == {"vodafone": {"net": 6.10}, "insta": {"net": 6.12}}
 
 
 # ── البوّابة + الابتلاع (دالّة نقيّة، لا pipeline) ────────────────────────────

@@ -10,6 +10,7 @@ docs/FX_RATES_SPEC.md — الخطوة ٢ (بوّابة + تحليل + تسجي�
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from .constants import Currency
@@ -18,23 +19,23 @@ from .models import FxRateSnapshot, FxRatesConfig, RawMessage
 log = logging.getLogger(__name__)
 
 
-# ── محلّل افتراضيّ (fallback) — قوائم كلمات §3 حين لا قالب من الداشبورد ───────────
-# كل عنصر: (الكلمات المفتاحية، المفتاح). المطابقة بالاحتواء (substring) على سطر الرسالة.
+# ── محلّل افتراضيّ (fallback) — قنوات مصر بمفاتيح عربية معياريّة حين لا قالب من الداشبورد ───
+# كل عنصر: (كلمات مفتاحية، المفتاح المعياريّ العربيّ). المطابقة بالاحتواء بعد إزالة المسافات/النقاط
+# («فود فون»→«فودفون» يطابق «فود»). تونس: المدن مفتوحة — تُستخرَج تسمياتها العربية مباشرةً (لا قائمة).
 FALLBACK_EGP: list[tuple[list[str], str]] = [
-    (["فودافون", "فودا", "vodafone"], "vodafone"),
-    (["انستا", "انستاباي", "instapay", "insta"], "insta"),
-    (["بنك", "bank"], "bank"),
-    (["بريد", "post"], "post"),
-]
-FALLBACK_TND: list[tuple[list[str], str]] = [
-    (["العاصمة", "العاصمه", "تونس العاصمة", "capital"], "capital"),
-    (["جربة", "جربه", "djerba"], "djerba"),
-    (["سوسة", "سوسه", "sousse"], "sousse"),
-    (["صفاقس", "sfax"], "sfax"),
+    (["فود", "vodafone"], "فودافون"),      # فودافون/فودا فون/فود فون
+    (["انستا", "insta"], "انستا"),          # انستا/انستاباي
+    (["بنك", "bank"], "بنك"),
+    (["بريد", "post"], "بريد"),
 ]
 
 # تطبيع الأرقام العربية/الشرقية → ASCII (محليّ ومستقلّ — لا يمسّ core.parsing.normalize)
 _AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+# رقم عشريّ (قد يحوي فاصلتين كصيغة تونس X.XX.CC): تُدمَج الكسور بعد أوّل فاصل.
+_NUM_RE = re.compile(r"\d+(?:[.,،]\d+)*")
+# شريحة مبلغ: «تحت/فوق N [ألف]». «ألف» تُوسِّع ×1000؛ ومصر بلا «ألف» (N<1000) تُعتبَر بالآلاف (الحدّ الألفيّ).
+_TIER_RE = re.compile(r"(تحت|فوق)\s*(\d+)\s*(الاف|آلاف|[أاآ]لاف|[أاآ]لف|الف)?")
 
 
 def _to_currency(currency) -> Currency:
@@ -44,30 +45,33 @@ def _to_currency(currency) -> Currency:
     return Currency(str(currency).upper())
 
 
+def _compact(s: str) -> str:
+    """للمطابقة المرنة للأسماء: إزالة المسافات والنقاط والفواصل الشائعة («فود فون»→«فودفون»)."""
+    return re.sub(r"[\s.:/*،]", "", s or "")
+
+
+def _normalize_number(tok: str) -> Optional[float]:
+    """رقم من نصّ. صيغة تونس X.XX.CC (فاصلتان) → دمج الكسور بعد أوّل فاصل («0.34.50»→0.345،
+    «0.35.00»→0.35). رقم بفاصل واحد أو بلا فاصل → عاديّ."""
+    parts = [p for p in tok.replace("،", ".").replace(",", ".").split(".") if p != ""]
+    if not parts:
+        return None
+    text = parts[0] if len(parts) == 1 else parts[0] + "." + "".join(parts[1:])
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def _extract_numbers(line: str) -> list[float]:
-    """أرقام عشرية من سطر — يطبّع الأرقام العربية ويعامل «،»/«,» كفاصل عشريّ (الأسعار صغيرة)."""
+    """كل الأرقام العشرية في سطر (بعد تطبيع الأرقام العربية ودمج صيغة X.XX.CC)."""
     norm = line.translate(_AR_DIGITS)
     out: list[float] = []
-    token = ""
-    for ch in norm:
-        if ch.isdigit():
-            token += ch
-        elif ch in ".,،" and token and token[-1].isdigit():
-            token += "."          # فاصل عشريّ موحّد
-        else:
-            if token:
-                out.append(token); token = ""
-    if token:
-        out.append(token)
-    vals: list[float] = []
-    for t in out:
-        t = t.strip(".")
-        if t:
-            try:
-                vals.append(float(t))
-            except ValueError:
-                pass
-    return vals
+    for tok in _NUM_RE.findall(norm):
+        v = _normalize_number(tok)
+        if v is not None:
+            out.append(v)
+    return out
 
 
 def _parse_template(template: str) -> list[tuple[list[str], str]]:
@@ -86,41 +90,85 @@ def _parse_template(template: str) -> list[tuple[list[str], str]]:
     return entries
 
 
-def parse_price_message(text: str, template: str, currency) -> dict:
-    """يستخرج حمولة الأسعار من رسالة أسعار حسب قالب المالك (أو fallback إن فرغ القالب).
+def _extract_tier(norm: str, cur: Currency) -> tuple[Optional[str], str]:
+    """يستخرج شريحة «تحت/فوق N» ويُرجِع (وسمها، السطر بعد حذف عبارتها). مصر: N<1000 تُعتبَر بالآلاف."""
+    m = _TIER_RE.search(norm)
+    if not m:
+        return None, norm
+    direction, n, alf = m.group(1), int(m.group(2)), m.group(3)
+    if alf or (cur is Currency.EGP and n < 1000):
+        n *= 1000
+    tier = f"{direction}_{n}"
+    return tier, norm[:m.start()] + " " + norm[m.end():]
 
-    الخرج: مصر {key: {"net": x, "gross": y?}} · تونس {city_key: {"net": x}} (§7 لا خصم بتونس).
-    net/gross (مصر): «صافي» ⇒ net · «خصم/قبل» ⇒ gross. سطر بلا كلمة نوع ⇒ net افتراضًا.
-    كل سطر يُطابِق مفتاحًا واحدًا على الأكثر (أوّل تطابق بترتيب القالب)."""
+
+def _kind(norm: str, cur: Currency) -> str:
+    """net أم gross؟ تونس: net دائمًا (§7). مصر: «بدون خصم»/«صافي»→net؛ «خصم»/«%»/«٪»→gross؛ وإلا net."""
+    if cur is not Currency.EGP:
+        return "net"
+    if "بدون خصم" in norm or "بدون عمولة" in norm or "بدون عموله" in norm or "صافي" in norm:
+        return "net"
+    if "خصم" in norm or "%" in norm or "٪" in norm:
+        return "gross"
+    return "net"
+
+
+def _generic_city_key(norm: str) -> Optional[str]:
+    """تونس: اسم المدينة = النصّ قبل أوّل رقم (مدن مفتوحة، مفاتيح عربية). المسافات → «_»."""
+    m = re.search(r"\d", norm)
+    label = re.sub(r"\s+", "_", (norm[:m.start()] if m else norm).strip(" :/*-\t.،").strip())
+    return label or None
+
+
+def _resolve_key(norm: str, entries: list, cur: Currency, tier: Optional[str]) -> Optional[str]:
+    """مفتاح القناة/المدينة: القالب أولًا، ثم fallback (مصر: قنوات؛ تونس: مدينة عربية عامّة).
+    سطر شريحة تونسيّ بلا مدينة → None (المُنادي يجعل المفتاح = الشريحة نفسها)."""
+    compact = _compact(norm)
+    for kws, key in entries:                               # القالب لكلا العملتين
+        if any(_compact(kw) in compact for kw in kws if kw):
+            return key
+    if cur is Currency.EGP:
+        for kws, key in FALLBACK_EGP:
+            if any(_compact(kw) in compact for kw in kws if kw):
+                return key
+        return None
+    if tier is not None:                                   # تونس: سطر شريحة عامّ
+        return None
+    return _generic_city_key(norm)                         # تونس: مدينة عربية
+
+
+def parse_price_message(text: str, template: str, currency) -> dict:
+    """يستخرج حمولة الأسعار من رسالة أسعار حسب قالب المالك (أو fallback افتراضيّ إن فرغ القالب).
+
+    الخرج: {key: {"net"|"gross": rate, "tier"?: str}}.
+      • القناة/المدينة → المفتاح (مصر: فودافون/انستا/بنك/بريد · تونس: اسم المدينة العربيّ).
+      • «خصم»/«%»/«٪» ⇒ gross · «صافي»/«بدون خصم» ⇒ net · وإلا net. تونس net دائمًا (§7).
+      • «تحت/فوق N» ⇒ شريحة؛ مع قناة ⇒ المفتاح «{key}_{tier}» (فلا تُدهَس شريحة أخرى لنفس القناة).
+      • صيغة تونس X.XX.CC (فاصلتان) ⇒ تُدمَج («0.34.50»→0.345، «0.35.00»→0.35).
+      • سطر بلا رقم (شرط/تنبيه/دوام) ⇒ يُتجاهَل.
+    القالب أولًا (كلمة=مفتاح)؛ إن فرغ ⇒ المحلّل الافتراضيّ. كل سطر يُطابِق مفتاحًا واحدًا على الأكثر."""
     cur = _to_currency(currency)
-    entries = _parse_template(template) or (FALLBACK_EGP if cur is Currency.EGP else FALLBACK_TND)
+    entries = _parse_template(template)
     rates: dict = {}
     for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line:
+        norm = raw.translate(_AR_DIGITS).strip()
+        if not norm:
             continue
-        matched_key = None
-        for kws, key in entries:
-            if any(kw and kw in line for kw in kws):
-                matched_key = key
-                break
-        if matched_key is None:
-            continue
-        nums = _extract_numbers(line)
+        tier, norm_wo = _extract_tier(norm, cur)
+        nums = _extract_numbers(norm_wo)
         if not nums:
-            continue
-        if cur is Currency.EGP:
-            if "صافي" in line:
-                entry = {"gross": nums[0], "net": nums[-1]} if len(nums) >= 2 else {"net": nums[0]}
-            elif "خصم" in line or "قبل" in line:
-                entry = {"gross": nums[0]}
-                if len(nums) >= 2:
-                    entry["net"] = nums[-1]
-            else:
-                entry = {"net": nums[0]}
-        else:                                  # تونس: net فقط (§7)
-            entry = {"net": nums[0]}
-        rates[matched_key] = entry
+            continue                                       # لا رقم → تجاهل (شرط/تنبيه)
+        key = _resolve_key(norm, entries, cur, tier)
+        if key is None:
+            if tier is None:
+                continue                                   # لا قناة/مدينة ولا شريحة
+            dict_key = tier                                # سطر شريحة عامّ (تونس)
+        else:
+            dict_key = f"{key}_{tier}" if tier is not None else key
+        entry: dict = {_kind(norm, cur): nums[0]}
+        if tier is not None:
+            entry["tier"] = tier
+        rates[dict_key] = {**rates.get(dict_key, {}), **entry}
     return rates
 
 
