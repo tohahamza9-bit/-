@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # ── الغرف (ملحق ب-4) — معرّفات JID ──
     central_room_jid: str = Field(default="")   # المركزية — القراءة + Reply
     admin_room_jid: str = Field(default="")     # غرفة المسؤول — التصعيد
+    large_amount_room_jid: str = Field(default="")  # FX §11 — غرفة القيم الكبيرة (إشعار الأسعار الجديدة). فارغ = بلا توسعة
     # غرف الزبائن/الخزائن: قوائم JID (قراءة صامتة §2.2)
     customer_room_jids: str = Field(default="")  # مفصولة بفواصل
     treasury_room_jids: str = Field(default="")
@@ -74,8 +75,8 @@ class Settings(BaseSettings):
 
     @property
     def allowed_output_jids(self) -> set[str]:
-        """قائمة بيضاء صارمة (§2.2): المركزية + المسؤول فقط."""
-        return {j for j in {self.central_room_jid, self.admin_room_jid} if j}
+        """قائمة بيضاء صارمة (§2.2): المركزية + المسؤول (+ غرفة القيم الكبيرة FX §11 إن ضُبطت)."""
+        return {j for j in {self.central_room_jid, self.admin_room_jid, self.large_amount_room_jid} if j}
 
     @property
     def customer_rooms(self) -> list[str]:
