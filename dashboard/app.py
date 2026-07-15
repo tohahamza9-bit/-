@@ -24,13 +24,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from core.config import Settings, get_settings
-from core.constants import Currency, Role, RoomType, TreasuryType
+from core.constants import Currency, EntityType, Role, RoomType, TreasuryType
 from core.db import Database, utcnow
 from core.logging_setup import get_logger
 from core.models import (
     BotControl,
     DetectionConfig,
     EmployeeRecord,
+    EntityAlias,
     FxRatesConfig,
     OutgoingMessage,
     PaymentChannelRecord,
@@ -133,6 +134,21 @@ class FxTestParseIn(BaseModel):
     text: str = Field(..., min_length=1)
     currency: str = Field(..., pattern="^(EGP|TND)$")
     template: Optional[str] = None                # غياب ⇒ قالب الإعداد المحفوظ (أو fallback إن فرغ)
+
+
+class EntityAliasIn(BaseModel):
+    """كيان موحّد (FX_RATES_SPEC §4) — إضافة/تعديل (upsert على alias+entity_type)."""
+    alias: str = Field(..., min_length=1)
+    entity_type: EntityType
+    canonical_name: str = Field(..., min_length=1)
+    confidence: str = Field("high", pattern="^(high|medium|low)$")
+    active: bool = True
+
+
+class EntityAliasKeyIn(BaseModel):
+    """مفتاح كيان (alias, entity_type) — للإيقاف/التفعيل."""
+    alias: str = Field(..., min_length=1)
+    entity_type: EntityType
 
 
 class LoginIn(BaseModel):
@@ -853,6 +869,37 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
             template = cfg.egp_price_template if body.currency == "EGP" else cfg.tnd_price_template
         rates = parse_price_message(body.text, template, body.currency)
         return {"currency": body.currency, "rates": rates}
+
+    # ── الكيانات الموحّدة (FX_RATES_SPEC §4) — عرض للقارئ، تعديل للمدير. مستقلّة عن إملاءات
+    #    الخزائن/الموردين تمامًا (لا تلمسها). نمط الخزائن/الموردين + تنبيه المالك + audit.
+    @router.get("/entity-aliases", dependencies=[reader])
+    async def list_entity_aliases() -> list[dict]:
+        return [_clean(d) async for d in db.entity_aliases.col.find({})]
+
+    @router.post("/entity-aliases", dependencies=[manager], status_code=status.HTTP_201_CREATED)
+    async def add_entity_alias(body: EntityAliasIn) -> dict:
+        """إضافة/تعديل كيان (upsert على alias+entity_type). لا يمسّ إملاءات الخزائن/الموردين."""
+        rec = EntityAlias(**body.model_dump())
+        await db.entity_aliases.upsert(rec)
+        log.info("كيان محدّث: «%s» (%s) → %s", rec.alias, rec.entity_type.value, rec.canonical_name)
+        await _notify_owner(_owner_text("كيان", "إضافة/تعديل", rec.alias, rec.entity_type.value))
+        return rec.model_dump(mode="json")
+
+    @router.post("/entity-aliases/disable", dependencies=[manager])
+    async def disable_entity_alias(body: EntityAliasKeyIn) -> dict:
+        """إيقاف كيان (active=false) — بلا حذف (§13)."""
+        if not await db.entity_aliases.set_active(body.alias, body.entity_type.value, False):
+            raise HTTPException(status_code=404, detail=f"كيان غير موجود: {body.alias}")
+        await _notify_owner(_owner_text("كيان", "إيقاف", body.alias, body.entity_type.value))
+        return {"alias": body.alias, "entity_type": body.entity_type.value, "active": False}
+
+    @router.post("/entity-aliases/enable", dependencies=[manager])
+    async def enable_entity_alias(body: EntityAliasKeyIn) -> dict:
+        """تفعيل كيان موقوف (active=true) — تناظر مع الخزائن (§13)."""
+        if not await db.entity_aliases.set_active(body.alias, body.entity_type.value, True):
+            raise HTTPException(status_code=404, detail=f"كيان غير موجود: {body.alias}")
+        await _notify_owner(_owner_text("كيان", "تفعيل", body.alias, body.entity_type.value))
+        return {"alias": body.alias, "entity_type": body.entity_type.value, "active": True}
 
     @router.post("/attention/{deal_id}/escalate")
     async def escalate_transfer(deal_id: str,

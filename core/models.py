@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .constants import (
     Currency,
+    EntityType,
     Mark,
     OperationType,
     Role,
@@ -244,6 +245,17 @@ class PaymentChannelRecord(BaseModel):
     name: str
     aliases: list[str] = Field(default_factory=list)
     active: bool = True
+
+
+class EntityAlias(BaseModel):
+    """كيان موحّد (FX_RATES_SPEC §4) — يربط نصًّا (خطأ إملائيّ/اختصار/حيّ) باسم معياريّ لغرض
+    التسعير الجغرافيّ/القنويّ. **مستقلّ تمامًا** عن إملاءات الخزائن/الموردين القائمة (لا يستبدلها).
+    المفتاح المنطقيّ (alias, entity_type). confidence يحكم الغموض (§4: low ⇒ لا تخمين)."""
+    alias: str                                   # النصّ كما يرد
+    entity_type: EntityType
+    canonical_name: str                          # الاسم المعياريّ الذي يُحلّ إليه
+    confidence: str = "high"                      # high | medium | low
+    active: bool = True                          # إيقاف بلا حذف (§13)
 
 
 class EmployeeRecord(BaseModel):

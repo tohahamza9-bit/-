@@ -110,6 +110,31 @@ SEED_PAYMENT_CHANNELS: list[dict] = [
 ]
 
 
+# ── نظام الكيانات الموحّد (FX_RATES_SPEC §4) — طبقة تسعير جغرافيّة/قنويّة مستقلّة تمامًا
+#    عن إملاءات الخزائن/الموردين القائمة (لا تستبدلها ولا تلمسها). تُدار من Dashboard (manager).
+class EntityType(str, Enum):
+    CITY = "city"           # مدينة (العاصمة/جربة/سوسة/صفاقس…)
+    DISTRICT = "district"   # حيّ يُحلّ إلى مدينة (باردو/أريانة/منوبة → العاصمة)
+    SERVICE = "service"     # قناة/خدمة تحويل
+    BANK = "bank"
+    WALLET = "wallet"
+    TREASURY = "treasury"
+    SUPPLIER = "supplier"
+
+
+# ── كيانات مبذورة (§4) — أخطاء إملائية/اختصارات/أحياء→مدن. الثقة high (كيانات معروفة).
+#    البنية: alias, entity_type, canonical_name, confidence. تُبذَر إن غابت؛ تُدار من Dashboard.
+SEED_ENTITY_ALIASES: list[dict] = [
+    # أحياء → العاصمة (§4)
+    {"alias": "باردو", "entity_type": "district", "canonical_name": "العاصمة", "confidence": "high"},
+    {"alias": "أريانة", "entity_type": "district", "canonical_name": "العاصمة", "confidence": "high"},
+    {"alias": "اريانة", "entity_type": "district", "canonical_name": "العاصمة", "confidence": "high"},
+    {"alias": "منوبة", "entity_type": "district", "canonical_name": "العاصمة", "confidence": "high"},
+    # مدينة/حيّ → جربة (§4)
+    {"alias": "مدنين", "entity_type": "district", "canonical_name": "جربة", "confidence": "high"},
+]
+
+
 # ── العلامات (§8.3) ──────────────────────────────────────────────────────────
 class Mark(str, Enum):
     MATCHED = "🟡"     # 🟡 وصلت للمراجعة/الانتظار (مطابقة الغرف) — تفاعل على المركزية (قرار المستخدم)

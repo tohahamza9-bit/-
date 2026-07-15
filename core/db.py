@@ -31,6 +31,7 @@ from .models import (
     DetectionConfig,
     Deal,
     EmployeeRecord,
+    EntityAlias,
     FxRateSnapshot,
     FxRatesConfig,
     LedgerEntry,
@@ -446,6 +447,39 @@ class PaymentChannelListRepo(_Repo):
         for s in seed:
             doc = {"active": True, "aliases": [], **s}
             await self.col.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+
+
+class EntityAliasRepo(_Repo):
+    """نظام الكيانات الموحّد (FX_RATES_SPEC §4) — مجموعة entity_aliases **مستقلّة تمامًا** عن
+    إملاءات الخزائن/الموردين القائمة. المفتاح المنطقيّ (alias, entity_type). التحليل نفسه في
+    core/entity_aliases.py (دالّة نقيّة على all_active) — نمط resolve_treasury القائم."""
+
+    async def upsert(self, rec: EntityAlias) -> None:
+        payload = self._dump(rec)
+        payload["entity_type"] = rec.entity_type.value       # نصّ صريح للاستعلام المتّسق
+        await self.col.update_one(
+            {"alias": rec.alias, "entity_type": rec.entity_type.value},
+            {"$set": payload}, upsert=True,
+        )
+
+    async def all_active(self) -> list[EntityAlias]:
+        cur = self.col.find({"active": True})
+        return [EntityAlias(**d) async for d in cur]
+
+    async def set_active(self, alias: str, entity_type: str, active: bool) -> bool:
+        """إيقاف/تفعيل كيان (بلا حذف §13). يُرجِع False إن لم يُوجد (alias, entity_type)."""
+        res = await self.col.update_one(
+            {"alias": alias, "entity_type": entity_type}, {"$set": {"active": active}})
+        return res.matched_count > 0
+
+    async def seed_if_missing(self, seed: list[dict]) -> None:
+        """يُدرِج الكيانات المبذورة الناقصة فقط ($setOnInsert) — لا يمسّ تعديلات Dashboard."""
+        for s in seed:
+            doc = {"active": True, "confidence": "high", **s}
+            await self.col.update_one(
+                {"alias": doc["alias"], "entity_type": doc["entity_type"]},
+                {"$setOnInsert": doc}, upsert=True,
+            )
 
 
 class EmployeeListRepo(_Repo):
@@ -1025,6 +1059,8 @@ class Database:
         self.treasuries = TreasuryListRepo(self.mdb, "treasuries", "name")
         self.suppliers = SupplierListRepo(self.mdb, "suppliers", "name")
         self.payment_channels = PaymentChannelListRepo(self.mdb, "payment_channels", "name")
+        # نظام الأسعار (§4): الكيانات الموحّدة — مجموعة مستقلّة عن إملاءات الخزائن/الموردين
+        self.entity_aliases = EntityAliasRepo(self.mdb, "entity_aliases", "alias")
         self.employees = EmployeeListRepo(self.mdb, "employees", "whatsapp_number")
         self.control = ControlRepo(self.mdb, "bot_control", "_key")
         self.dead_letter = DeadLetterRepo(self.mdb, "dead_letter", "_id")
@@ -1097,6 +1133,8 @@ class Database:
         # نظام الأسعار (الخطوة ٢): بحث بالعملة + نافذة الصلاحية (current/rate_at)
         await self.fx_rates.col.create_index([("currency", 1), ("valid_until", 1)])
         await self.fx_rates.col.create_index([("currency", 1), ("valid_from", -1)])
+        # نظام الأسعار (الخطوة ٣): الكيانات الموحّدة — مفتاح منطقيّ فريد (alias, entity_type)
+        await self.entity_aliases.col.create_index([("alias", 1), ("entity_type", 1)], unique=True)
         log.info("تمّت تهيئة الفهارس")
 
     async def close(self) -> None:
