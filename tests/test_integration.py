@@ -1194,3 +1194,50 @@ async def test_matching_skipped_when_no_rooms_in_db_or_env(db):
 def SupplierRecordFactory(name, code):
     from core.models import SupplierRecord
     return SupplierRecord(name=name, code=code, aliases=[], active=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# نظام الأسعار — الربط أ: استيعاب رسائل غرفتَي الأسعار في process_inbox (معزول)
+# ─────────────────────────────────────────────────────────────────────────────
+async def test_price_room_message_ingested_not_a_deal(db):
+    """رسالة غرفة أسعار من مُشرف معتمد → لقطة في fx_rate_history، بلا صفقة/خانة/طابور/ردّ."""
+    from core.constants import Currency
+    from core.models import EmployeeRecord, FxRatesConfig
+    PRICE_EG = "price_eg@g.us"
+    await db.fx_config.set(FxRatesConfig(egp_room_jid=PRICE_EG))
+    await db.employees.upsert(EmployeeRecord(whatsapp_number="20100", name="مشرف"))  # EMP=20100@…
+    pipe = _make_pipeline(db)
+    await pipe.capture(_raw("px1", "فودافون 6.10\nانستا 6.12", jid=PRICE_EG, sender=EMP))
+    deals = await pipe.process_inbox(PAST + timedelta(seconds=30))
+    cur = await db.fx_rates.current(Currency.EGP)
+    assert cur is not None and cur.rates["vodafone"]["net"] == 6.10 and cur.rates["insta"]["net"] == 6.12
+    assert deals == [], "لا صفقة من رسالة أسعار"
+    assert await db.deals.col.count_documents({}) == 0, "لا حوالة تُنشأ"
+    assert (await db.raw.get("px1")).processed is True, "الرسالة عُلّمت معالَجة"
+    assert await db.outgoing.next_unsent(10) == [], "لا ردّ/تنبيه من غرفة الأسعار"
+
+
+async def test_price_room_unauthorized_sender_records_nothing(db):
+    """رسالة غرفة أسعار من مُرسِل غير معتمد → تُتجاهَل (لا لقطة)، لكن تُعلَّم معالَجة (لا تدخل _ingest)."""
+    from core.constants import Currency
+    from core.models import FxRatesConfig
+    PRICE_EG = "price_eg@g.us"
+    await db.fx_config.set(FxRatesConfig(egp_room_jid=PRICE_EG))
+    pipe = _make_pipeline(db)
+    await pipe.capture(_raw("px2", "فودافون 6.10", jid=PRICE_EG, sender="99999@s.whatsapp.net"))
+    await pipe.process_inbox(PAST + timedelta(seconds=30))
+    assert await db.fx_rates.current(Currency.EGP) is None
+    assert (await db.raw.get("px2")).processed is True
+    assert await db.deals.col.count_documents({}) == 0
+
+
+async def test_no_price_rooms_configured_is_noop(db):
+    """بلا ضبط غرف أسعار (الافتراض): رسالة مركزية عادية تدخل _ingest ولا تُبتلَع كأسعار."""
+    from core.constants import Currency
+    await _enable_storage(db)
+    pipe = _make_pipeline(db)
+    text = "1208 فداء شاكونه 5.84\nبلاس\nA5169\n010954227116\n1600 ج م\nفودافون\nبدون خصم"
+    await pipe.capture(_raw("m1", text, jid=CENTRAL))
+    await pipe.process_inbox(PAST + timedelta(seconds=120))
+    assert await db.deals.col.count_documents({}) >= 1, "الرسالة المركزية دخلت _ingest (لم تُبتلَع كأسعار)"
+    assert await db.fx_rates.current(Currency.EGP) is None, "لا لقطة أسعار (لا غرف مضبوطة)"

@@ -53,6 +53,7 @@ from .parsing import (
     parse_completion_fragment,
     parse_message,
 )
+from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
 from .parsing.parser import _has_reference
 from .parsing.resolve import resolve_treasury
@@ -167,12 +168,28 @@ class Pipeline:
             # يقرأ الصفقة من DB لحظة تنفيذه (§3). معزولة: تتخطّى _ingest كليًّا.
             control_ops: list[RawMessage] = []
             batch = await self.db.raw.unprocessed()
+            # نظام الأسعار (الربط أ): إعداد الأسعار يُقرأ مرّة لكل دفعة (hot-reload) — لتمييز غرفتَي
+            #   الأسعار. فارغ افتراضيًّا ⇒ price_room_currency=None دائمًا ⇒ الفرع أدناه لا يُنفَّذ.
+            fx_cfg = await self.db.fx_config.get()
             for raw in batch:
                 # 🔴 رسائل البوت نفسه (is_from_me): Reply/تفاعل/تأكيد كتبها البوت — ليست مدخلات
                 #    (§2.2). تُعلَّم معالَجة بلا أي معالجة **كأوّل شرط**، فلا يقرأ البوت رسائله ولا
                 #    تُفسَّر كحوالة/إلغاء (مثلاً ردّ «… مُلغاة مسبقًا» لا يُطلق كشف الإلغاء).
                 if raw.is_from_me:
                     log.debug("تخطٍّ: رسالة من البوت نفسه (is_from_me) %s", raw.message_key)
+                    await self.db.raw.mark_processed(raw.message_key)
+                    continue
+                # ═══ نظام الأسعار (الربط أ) — اعتراض معزول لرسائل غرفتَي الأسعار ═══
+                # رسالة من غرفة أسعار (يحدّدها المالك في FxRatesConfig) → تُبتلَع لتحديث fx_rate_history
+                # **بلا دخول _ingest إطلاقًا** (لا خانة مُرسِل، لا مطابقة، لا طابور، لا حوالة، لا ردّ).
+                # قبل فحص العمر عمدًا: تسجيل السعر صامت (لا يردّ) فلا يقلقه استرجاع §12؛ ورسائل الأسعار
+                # الفائتة تُسجَّل بترتيبها الزمنيّ (§10). آمنة: الشرط لا يتحقّق ما لم يضبط المالك JIDs
+                # الغرفتين (فارغة افتراضيًّا ⇒ price_room_currency=None ⇒ سلوك اليوم مطابق بايت-ببايت).
+                if price_room_currency(raw.chat_jid, fx_cfg) is not None:
+                    try:
+                        await ingest_price_message(self.db, raw, fx_cfg)
+                    except Exception as exc:      # best-effort (T5): تسجيل السعر لا يوقف معالجة الحوالات
+                        log.warning("تعذّر استيعاب رسالة أسعار %s (متابعة): %s", raw.message_key, exc)
                     await self.db.raw.mark_processed(raw.message_key)
                     continue
                 # 🔴 استرجاع بعد الإطفاء (§12): رسالة عمرها > 15 دقيقة (INCOMPLETE_DATA_ESCALATE_SECONDS)
