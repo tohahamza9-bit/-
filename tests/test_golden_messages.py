@@ -110,6 +110,7 @@ async def _golden_db():
             self.unknown_terms = dbmod.UnknownTermRepo(self.mdb, "unknown_terms", "term")
             self.sender_slots = dbmod.SenderSlotRepo(self.mdb, "sender_slots", "slot_key")
             self.reconciliation = dbmod.ReconciliationRepo(self.mdb, "reconciliation_reports", "deal_id")
+            self.detection = dbmod.DashboardConfigRepo(self.mdb, "dashboard_config", "_key")
 
     d = _Mock("mongodb://mock", "moneyado_golden")
     await d.connect()

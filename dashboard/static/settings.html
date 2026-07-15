@@ -144,6 +144,7 @@
     <div class="row" style="gap:12px">
       <label class="dfield">نافذة المسح (ساعة)<input id="d_scan" type="number"></label>
       <label class="dfield">كيان جديد: مهلة (ساعة)<input id="d_newent" type="number"></label>
+      <label class="dfield">تكرار المرجع (دقيقة، 0=إيقاف)<input id="d_dupref" type="number"></label>
       <button onclick="saveDetection()" style="align-self:flex-end">حفظ الحدود</button>
     </div>
     <p class="muted" style="margin:8px 0 0">القيم بذرة متحفّظة موثّقة؛ تُحدَّث من التحليل التاريخي.</p>
@@ -266,6 +267,7 @@ async function loadDetection(){
     $("d_refwin").value=c.ref_reuse_window_hours; $("d_disc").value=c.discount_deviation_tolerance;
     $("d_min").value=c.discount_min_samples; $("d_scan").value=c.scan_window_hours;
     $("d_newent").value=c.new_entity_lookback_hours;
+    $("d_dupref").value=c.duplicate_reference_window_minutes;
   }catch(e){}
 }
 async function saveDetection(){
@@ -279,6 +281,7 @@ async function saveDetection(){
     discount_min_samples:parseInt($("d_min").value,10),
     scan_window_hours:parseInt($("d_scan").value,10),
     new_entity_lookback_hours:parseInt($("d_newent").value,10),
+    duplicate_reference_window_minutes:parseInt($("d_dupref").value,10),
   });
   try{ await api("/settings/detection","PUT",c); window._det=c; toast("حُفظت الحدود ✓"); loadLog(); }catch(e){}
 }

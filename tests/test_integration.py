@@ -1242,3 +1242,62 @@ async def test_no_price_rooms_configured_is_noop(db):
     await pipe.process_inbox(PAST + timedelta(seconds=120))
     assert await db.deals.col.count_documents({}) >= 1, "الرسالة المركزية دخلت _ingest (لم تُبتلَع كأسعار)"
     assert await db.fx_rates.current(Currency.EGP) is None, "لا لقطة أسعار (لا غرف مضبوطة)"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# فحص تكرار المرجع (DetectionConfig.duplicate_reference_window_minutes) — قراءة فقط
+# ─────────────────────────────────────────────────────────────────────────────
+async def _seed_completed_deal(db, ref, when, status=None):
+    from core.constants import Status
+    await db.deals.col.insert_one({
+        "deal_id": f"D-{ref}", "status": (status or Status.COMPLETED.value),
+        "updated_at": when, "sell_leg": {"reference_number": ref}})
+
+
+async def test_is_duplicate_reference_detects_recent_processed(db):
+    from core.db import utcnow
+    from core.models import DetectionConfig
+    await db.detection.set(DetectionConfig(duplicate_reference_window_minutes=5))
+    now = utcnow()
+    await _seed_completed_deal(db, "SI9999", now)
+    pipe = _make_pipeline(db)
+    assert await pipe._is_duplicate_reference("SI9999", now) is True     # نفس المرجع، مكتملة، حديثًا
+    assert await pipe._is_duplicate_reference("SI0000", now) is False    # مرجع آخر
+    assert await pipe._is_duplicate_reference(None, now) is False        # بلا مرجع
+
+
+async def test_is_duplicate_reference_ignores_waiting_second_leg(db):
+    """صفقة تنتظر طرفًا ثانيًا بنفس المرجع لا تُحجَب (الطرف الثاني الشرعيّ يمرّ)."""
+    from core.constants import Status
+    from core.db import utcnow
+    from core.models import DetectionConfig
+    await db.detection.set(DetectionConfig(duplicate_reference_window_minutes=5))
+    now = utcnow()
+    await _seed_completed_deal(db, "A100", now, status=Status.WAITING_SECOND_LEG.value)
+    pipe = _make_pipeline(db)
+    assert await pipe._is_duplicate_reference("A100", now) is False
+
+
+async def test_is_duplicate_reference_zero_window_disables(db):
+    from core.db import utcnow
+    from core.models import DetectionConfig
+    await db.detection.set(DetectionConfig(duplicate_reference_window_minutes=0))
+    now = utcnow()
+    await _seed_completed_deal(db, "SI9999", now)
+    pipe = _make_pipeline(db)
+    assert await pipe._is_duplicate_reference("SI9999", now) is False    # 0 = معطّل كليًّا
+
+
+async def test_is_duplicate_reference_outside_window(db):
+    from core.db import utcnow
+    from core.models import DetectionConfig
+    await db.detection.set(DetectionConfig(duplicate_reference_window_minutes=5))
+    now = utcnow()
+    await _seed_completed_deal(db, "SI9999", now - timedelta(minutes=10))  # أقدم من النافذة
+    pipe = _make_pipeline(db)
+    assert await pipe._is_duplicate_reference("SI9999", now) is False
+
+
+async def test_duplicate_reference_default_window_is_five(db):
+    from core.models import DetectionConfig
+    assert DetectionConfig().duplicate_reference_window_minutes == 5

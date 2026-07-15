@@ -521,6 +521,14 @@ class Pipeline:
         if second is not None:
             return second   # المعالجة مؤجَّلة لفرز الدفعة بـ first_received_at (§7.3)
 
+        # 🔴 تكرار المرجع (إعادة إرسال): رسالة تُنشئ صفقة جديدة بمرجع لصفقة **غير منتظِرة طرفًا ثانيًا**
+        #    عولِجت خلال النافذة (DetectionConfig) = تكرار → تُتجاهَل no-op (بلا حوالة/تنبيه). الرسائل
+        #    الثانية (تكمّل صفقة منتظِرة) مرّت وعادت أعلاه فلا تتأثّر. لا يمسّ المطابقة/الكتابة/الإلغاء/التعديل.
+        if await self._is_duplicate_reference(leg.reference_number, now):
+            log.info("مرجع مكرّر خلال النافذة — تجاهل (no-op): %s ref=%s",
+                     raw.message_key, leg.reference_number)
+            return None
+
         # التجميع (§7.3): صفقة جديدة أو دمج طرف ثانٍ
         deal = await self.queue.try_group(leg, now, chat_jid=raw.chat_jid)
         # افتح خانة مُرسِل إن بقيت الصفقة تنتظر طرفًا ثانيًا (§7.3): الرسالة الثانية من نفس المُرسِل
@@ -533,6 +541,27 @@ class Pipeline:
                 window_seconds=SENDER_SLOT_WINDOW_SECONDS,
             )
         return deal
+
+    async def _is_duplicate_reference(self, reference: Optional[str], now: datetime) -> bool:
+        """تكرار المرجع (DetectionConfig.duplicate_reference_window_minutes، دقائق؛ 0 = معطّل).
+
+        True إن وُجدت صفقة **غير منتظِرة طرفًا ثانيًا** (WAITING_SECOND_LEG مستثناة) بنفس reference
+        عولِجت (updated_at) خلال النافذة — أي أنّ الرسالة الحاليّة إعادة إرسال. الاستثناء يمنع حجب
+        طرفٍ ثانٍ شرعيّ. **قراءة فقط** — لا يكتب حالة ولا يمسّ matching/writer/cancellation/amendment."""
+        if not reference:
+            return False
+        cfg = await self.db.detection.get()
+        win = getattr(cfg, "duplicate_reference_window_minutes", 0) or 0
+        if win <= 0:
+            return False
+        horizon = _as_naive_utc(now) - timedelta(minutes=win)
+        doc = await self.db.deals.col.find_one({
+            "status": {"$ne": Status.WAITING_SECOND_LEG.value},
+            "updated_at": {"$gte": horizon},
+            "$or": [{"sell_leg.reference_number": reference},
+                    {"buy_leg.reference_number": reference}],
+        })
+        return doc is not None
 
     async def _phase_a_alerts(self, leg: ParsedLeg, raw: RawMessage) -> None:
         """مرحلة أ (best-effort، **لا يمسّ** الربط/المطابقة/الكتابة): تنبيهات القيمة المالية أولوية.

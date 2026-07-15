@@ -358,6 +358,9 @@ class DetectionConfig(BaseModel):
     discount_min_samples: int = 5                # حدّ أدنى لعيّنات الخزينة قبل المقارنة
     # كيان جديد (خزينة/مورد لم يُشاهَد قبل النافذة)
     new_entity_lookback_hours: int = 48          # أقدم من هذا الحدّ = ليس جديدًا
+    # تكرار المرجع (إعادة إرسال نفس الرقم الإشاري): رسالة بمرجع صفقة **غير منتظِرة** عولِجت خلال هذه
+    #   النافذة تُتجاهَل no-op (بلا حوالة/تنبيه). 0 = تعطيل الفحص كاملًا.
+    duplicate_reference_window_minutes: int = 5
 
 
 class FxRatesConfig(BaseModel):
