@@ -51,6 +51,7 @@ async def db():
             self.reviews = dbmod.DashboardReviewRepo(self.mdb, "dashboard_reviews", "deal_id")
             self.detection = dbmod.DashboardConfigRepo(self.mdb, "dashboard_config", "_key")
             self.fx_config = dbmod.FxRatesConfigRepo(self.mdb, "dashboard_config", "_key")
+            self.fx_rates = dbmod.FxRatesRepo(self.mdb, "fx_rate_history", "_id")
 
     d = _MockDatabase("mongodb://mock", "moneyado_test")
     await d.connect()

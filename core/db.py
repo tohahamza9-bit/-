@@ -31,6 +31,7 @@ from .models import (
     DetectionConfig,
     Deal,
     EmployeeRecord,
+    FxRateSnapshot,
     FxRatesConfig,
     LedgerEntry,
     OutgoingMessage,
@@ -951,6 +952,56 @@ class FxRatesConfigRepo(_Repo):
         await self.col.update_one({"_key": self._KEY}, {"$set": payload}, upsert=True)
 
 
+class FxRatesRepo(_Repo):
+    """سجل أسعار العملات (FX_RATES_SPEC §2 §3 ط٥ — الخطوة ٢). append-only في fx_rate_history.
+
+    نوافذ صلاحية غير متداخلة لكلّ عملة: «الحاليّ» = اللقطة المفتوحة (valid_until=None). تسجيل لقطة
+    جديدة يُغلق السابقة عند valid_from الجديد. يفترض التسجيل التقدّميّ زمنيًّا (valid_from غير متناقص
+    لكلّ عملة)؛ الإدراج التاريخيّ خارج الترتيب (§10 الرسائل الفائتة) TODO لخطوة لاحقة.
+    التخزين بدقّة ميلي عبر datetime (naive UTC، اتّساقًا مع received_at في raw §7.1)."""
+
+    async def record(self, snap: FxRateSnapshot) -> None:
+        """يُسجّل لقطة أسعار جديدة (مفتوحة) ويُغلق السابقة المفتوحة لنفس العملة عند valid_from الجديد."""
+        cur = getattr(snap.currency, "value", snap.currency)
+        vf = _naive_utc(snap.valid_from)
+        await self.col.update_one(
+            {"currency": cur, "valid_until": None},
+            {"$set": {"valid_until": vf}},
+        )
+        payload = self._dump(snap)
+        payload["currency"] = cur
+        payload["valid_from"] = vf
+        payload["valid_until"] = None
+        if payload.get("recorded_at") is None:
+            payload["recorded_at"] = utcnow()
+        await self.col.insert_one(payload)
+
+    async def current(self, currency) -> Optional[FxRateSnapshot]:
+        """اللقطة المفتوحة الحاليّة لعملة (valid_until=None) — None إن لا سعر مُسجَّل بعد."""
+        cur = getattr(currency, "value", currency)
+        doc = await self.col.find_one({"currency": cur, "valid_until": None})
+        if not doc:
+            return None
+        doc.pop("_id", None)
+        return FxRateSnapshot(**doc)
+
+    async def rate_at(self, currency, ts: datetime) -> Optional[FxRateSnapshot]:
+        """اللقطة السارية في لحظة ts: valid_from ≤ ts < valid_until (أو ∞) — السفر الزمنيّ §3 ط٥.
+
+        يُستخدم received_at للرسالة (لا وقت المعالجة): سعر تغيّر بعد الإرسال لا يُطبَّق بأثر رجعيّ."""
+        cur = getattr(currency, "value", currency)
+        at = _naive_utc(ts)
+        cursor = self.col.find({
+            "currency": cur,
+            "valid_from": {"$lte": at},
+            "$or": [{"valid_until": None}, {"valid_until": {"$gt": at}}],
+        }).sort("valid_from", -1).limit(1)
+        async for doc in cursor:
+            doc.pop("_id", None)
+            return FxRateSnapshot(**doc)
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # الواجهة الجامعة
 # ─────────────────────────────────────────────────────────────────────────────
@@ -991,6 +1042,8 @@ class Database:
         self.detection = DashboardConfigRepo(self.mdb, "dashboard_config", "_key")
         # نظام الأسعار (FX_RATES_SPEC §12): إعداد مفرد مستقلّ (_key='fx_rates') — نفس المجموعة
         self.fx_config = FxRatesConfigRepo(self.mdb, "dashboard_config", "_key")
+        # نظام الأسعار (§2 §3 ط٥): سجل أسعار العملات بنوافذ صلاحية (الخطوة ٢)
+        self.fx_rates = FxRatesRepo(self.mdb, "fx_rate_history", "_id")
         log.info("اتصال MongoDB: %s / %s", self._uri, self._db_name)
 
     async def ensure_indexes(self) -> None:
@@ -1041,6 +1094,9 @@ class Database:
         await self.sessions.col.create_index("expires_at", expireAfterSeconds=0, name="ttl_session")
         await self.auth_events.col.create_index("at")
         await self.reviews.col.create_index("deal_id", unique=True)
+        # نظام الأسعار (الخطوة ٢): بحث بالعملة + نافذة الصلاحية (current/rate_at)
+        await self.fx_rates.col.create_index([("currency", 1), ("valid_until", 1)])
+        await self.fx_rates.col.create_index([("currency", 1), ("valid_from", -1)])
         log.info("تمّت تهيئة الفهارس")
 
     async def close(self) -> None:

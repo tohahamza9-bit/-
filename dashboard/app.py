@@ -128,6 +128,13 @@ class RoomsImportIn(BaseModel):
     jids: list[str] = Field(default_factory=list)
 
 
+class FxTestParseIn(BaseModel):
+    """اختبار محلّل الأسعار (زرّ «اختبار» — تحليل تجريبيّ بلا تخزين). FX_RATES_SPEC §12."""
+    text: str = Field(..., min_length=1)
+    currency: str = Field(..., pattern="^(EGP|TND)$")
+    template: Optional[str] = None                # غياب ⇒ قالب الإعداد المحفوظ (أو fallback إن فرغ)
+
+
 class LoginIn(BaseModel):
     """اعتماد تسجيل الدخول (§14.3)."""
     username: str = Field(..., min_length=1)
@@ -832,6 +839,20 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         await db.fx_config.set(body)
         log.info("تحديث إعداد نظام الأسعار (FX §12) عبر اللوحة")
         return body.model_dump(mode="json")
+
+    @router.post("/settings/fx-rates/test-parse", dependencies=[manager])
+    async def test_parse_fx(body: FxTestParseIn) -> dict:
+        """تحليل تجريبيّ لرسالة أسعار — **بلا تخزين**. يغذّي زرّ «اختبار» (واجهته في الخطوة ٥).
+
+        يستخدم القالب المُرسَل إن وُجد، وإلا قالب الإعداد المحفوظ للعملة (أو fallback إن فرغ)."""
+        from core.fx_rates import parse_price_message
+        cfg = await db.fx_config.get()
+        if body.template is not None:
+            template = body.template
+        else:
+            template = cfg.egp_price_template if body.currency == "EGP" else cfg.tnd_price_template
+        rates = parse_price_message(body.text, template, body.currency)
+        return {"currency": body.currency, "rates": rates}
 
     @router.post("/attention/{deal_id}/escalate")
     async def escalate_transfer(deal_id: str,

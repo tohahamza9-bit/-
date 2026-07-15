@@ -357,6 +357,11 @@ class FxRatesConfig(BaseModel):
     tnd_room_jid: str = ""                        # JID غرفة أسعار تونس
     large_amount_room_jid: str = ""              # JID غرفة القيم الكبيرة — إشعار الأسعار الجديدة (§11)
     #   TODO(خطوة ٥): مزامنة هذه القيمة إلى Settings.large_amount_room_jid (القائمة البيضاء) عند الحفظ.
+    # قوالب رسائل الأسعار — يحدّدها المالك من الداشبورد لتوجيه المحلّل (parse_price_message).
+    #   فارغ ⇒ محلّل مرن افتراضيّ (fallback) بقوائم كلمات §3 (قنوات مصر / مدن تونس).
+    #   صيغة السطر: «الكلمات المفتاحية = المفتاح» (مثال: «فودافون = vodafone»).
+    egp_price_template: str = ""                 # قالب رسالة أسعار مصر
+    tnd_price_template: str = ""                 # قالب رسالة أسعار تونس
     # الحدود المطلقة — خارجها HELD فورًا (§6)
     rate_min_egp: float = 5.50
     rate_max_egp: float = 8.00
@@ -375,6 +380,24 @@ class FxRatesConfig(BaseModel):
     # فترة التكيّف + الحدّ الديناميكيّ (§6)
     price_change_adaptation_deals: int = 10      # عدد الحوالات التي يُقبَل فيها السعران بعد التغيير
     dynamic_deviation_lookback_deals: int = 50   # آخر حوالات الخزينة لحساب الانحراف المعياريّ
+
+
+class FxRateSnapshot(BaseModel):
+    """لقطة أسعار عملة واحدة بنافذة صلاحية (docs/FX_RATES_SPEC.md §2 §3 ط٥ — الخطوة ٢).
+
+    تُخزَّن في `fx_rate_history` (append-only). «الحاليّ» = اللقطة المفتوحة (valid_until=None) لكلّ عملة.
+    نوافذ غير متداخلة بدقّة ميلي: تسجيل لقطة جديدة يُغلق السابقة عند valid_from الجديد.
+    `rates`: مصر {key: {"net": x, "gross": y|None}} · تونس {city_key: {"net": x}} (§7 لا خصم بتونس).
+    """
+    currency: Currency
+    rates: dict = Field(default_factory=dict)    # حمولة مرنة حسب القناة/المدينة + net/gross
+    valid_from: datetime                         # لحظة السريان (received_at للرسالة §3 ط٥) — دقّة ميلي
+    valid_until: Optional[datetime] = None       # None = مفتوحة (الحاليّة)؛ تُضبط عند وصول لقطة أحدث
+    # المصدر (تتبّع/تدقيق) — لا يؤثّر على المطابقة
+    source_room_jid: Optional[str] = None
+    source_sender: Optional[str] = None
+    source_message_key: Optional[str] = None
+    recorded_at: Optional[datetime] = None       # لحظة التسجيل الفعليّة (قد تختلف عن valid_from)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
