@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>إدارة الأسعار — MONEYADO</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2233; --line:#2c3853; --txt:#e7ecf5; --muted:#8a99b5;
+          --accent:#3b82f6; --ok:#22c55e; --warn:#ef4444; --chip:#243049; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",Tahoma,system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); font-size:15px; line-height:1.6; }
+  header { padding:16px 20px; background:var(--card); border-bottom:1px solid var(--line);
+           display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+  header h1 { margin:0; font-size:20px; }
+  a.back { color:var(--muted); text-decoration:none; font-size:14px; }
+  a.back:hover { color:var(--txt); }
+  .wrap { max-width:920px; margin:0 auto; padding:16px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:14px; }
+  .card h2 { margin:0 0 10px; font-size:15px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; }
+  label.fld { display:flex; flex-direction:column; gap:3px; font-size:13px; color:var(--muted); }
+  input, select, button, textarea { font-family:inherit; font-size:14px; padding:8px 10px; border-radius:8px;
+                  border:1px solid var(--line); background:var(--bg); color:var(--txt); }
+  textarea { width:100%; resize:vertical; min-height:88px; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button.ghost { background:transparent; }
+  .switch { display:flex; align-items:center; gap:8px; font-size:14px; color:var(--txt); }
+  .tpl-ex { font-size:12px; color:var(--muted); white-space:pre; background:var(--bg); border:1px dashed var(--line);
+            border-radius:8px; padding:8px 10px; margin-top:6px; overflow-x:auto; }
+  pre.out { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px;
+            font-size:13px; overflow-x:auto; margin:8px 0 0; direction:ltr; text-align:left; min-height:20px; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; }
+  th, td { text-align:right; padding:8px; border-bottom:1px solid var(--line); font-size:13px; }
+  th { color:var(--muted); font-weight:600; }
+  td.rates { direction:ltr; text-align:left; font-size:12px; color:var(--muted); }
+  #msg { position:fixed; bottom:16px; inset-inline-start:16px; background:var(--card);
+         border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:9; }
+  .role-badge { font-size:12px; font-weight:700; padding:2px 10px; border-radius:999px;
+                background:rgba(59,130,246,.15); color:var(--accent); border:1px solid var(--accent); }
+  .userbox { display:flex; gap:10px; align-items:center; }
+  #noaccess { display:none; text-align:center; padding:64px 16px; color:var(--muted); font-size:16px; }
+  body.no-access .wrap { display:none; }
+  body.no-access #noaccess { display:block; }
+  .ro-note { color:var(--warn); font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>إدارة الأسعار</h1>
+    <a class="back" href="/">→ لوحة التحكّم</a>
+  </div>
+  <div class="userbox">
+    <span id="roleBadge" class="role-badge" style="display:none"></span>
+    <span id="whoami" class="muted">…</span>
+    <button id="logoutBtn" class="ghost" style="display:none">خروج</button>
+  </div>
+</header>
+
+<div id="noaccess">لا صلاحية لعرض هذه الشاشة بحسابك الحالي.</div>
+
+<div class="wrap">
+  <p class="muted">إعداد نظام الأسعار (كل القيم قابلة للتعديل). نظام الأسعار لا يعمل حتى تُفعِّله يدويًّا.</p>
+  <p id="roNote" class="ro-note" style="display:none">عرض فقط — التعديل للمدير.</p>
+
+  <div class="card">
+    <div class="switch"><input type="checkbox" id="fx_rates_enabled"><label for="fx_rates_enabled">تفعيل نظام الأسعار (المرحلة ٢ — سعر الغرفة يفوز)</label></div>
+  </div>
+
+  <div class="card"><h2>غرف المصدر</h2><div class="grid" id="grp_rooms"></div></div>
+
+  <div class="card"><h2>قوالب رسائل الأسعار</h2>
+    <p class="muted">سطر لكل قناة/مدينة: «الكلمات المفتاحية = المفتاح». قالب فارغ ⇒ محلّل افتراضيّ.</p>
+    <div style="margin-bottom:12px">
+      <label class="fld">قالب مصر
+        <textarea id="egp_price_template"></textarea></label>
+      <div class="tpl-ex">مثال:
+فودافون = vodafone
+انستا, انستاباي = insta
+بنك = bank
+بريد = post</div>
+    </div>
+    <div>
+      <label class="fld">قالب تونس
+        <textarea id="tnd_price_template"></textarea></label>
+      <div class="tpl-ex">مثال:
+العاصمة = capital
+جربة = djerba
+سوسة = sousse
+صفاقس = sfax</div>
+    </div>
+  </div>
+
+  <div class="card"><h2>الحدود المطلقة (خارجها HELD)</h2><div class="grid" id="grp_bounds"></div></div>
+  <div class="card"><h2>الخصم (مصر)</h2><div class="grid" id="grp_disc"></div></div>
+  <div class="card"><h2>الشرائح والعتبات</h2><div class="grid" id="grp_thr"></div></div>
+
+  <div style="margin-bottom:16px"><button class="primary" id="saveBtn" onclick="save()" style="display:none">💾 حفظ الإعداد</button></div>
+
+  <div class="card"><h2>اختبار المحلّل (بلا تخزين)</h2>
+    <div class="grid">
+      <div>
+        <label class="fld">رسالة أسعار مصر (تجريبيّة)
+          <textarea id="test_egp" placeholder="ألصق رسالة أسعار…"></textarea></label>
+        <button class="ghost" onclick="testParse('EGP')" style="margin-top:6px">اختبار مصر</button>
+        <pre class="out" id="out_egp"></pre>
+      </div>
+      <div>
+        <label class="fld">رسالة أسعار تونس (تجريبيّة)
+          <textarea id="test_tnd" placeholder="ألصق رسالة أسعار…"></textarea></label>
+        <button class="ghost" onclick="testParse('TND')" style="margin-top:6px">اختبار تونس</button>
+        <pre class="out" id="out_tnd"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="card"><h2>تاريخ الأسعار</h2>
+    <table><thead><tr><th>العملة</th><th>من</th><th>إلى</th><th>الأسعار</th><th>المصدر</th></tr></thead>
+    <tbody id="hist"></tbody></table>
+    <div id="histEmpty" class="muted" style="display:none; padding:16px 0; text-align:center">لا تاريخ أسعار بعد.</div>
+  </div>
+</div>
+<div id="msg"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ROLE = null;
+const canWrite = () => ROLE === "manager";
+let CFG = {};
+
+const LABELS = {
+  egp_room_jid:"JID غرفة أسعار مصر", tnd_room_jid:"JID غرفة أسعار تونس",
+  large_amount_room_jid:"JID غرفة القيم الكبيرة",
+  rate_min_egp:"أدنى سعر مصر", rate_max_egp:"أعلى سعر مصر",
+  rate_min_tnd:"أدنى سعر تونس", rate_max_tnd:"أعلى سعر تونس",
+  discount_tolerance_min:"حدّ الخصم الأدنى", discount_tolerance_max:"حدّ الخصم الأعلى",
+  discount_error_margin:"هامش خطأ الخصم",
+  amount_tier_threshold_egp:"عتبة شريحة مصر", amount_tier_threshold_tnd:"عتبة شريحة تونس",
+  loss_alert_threshold:"حدّ تنبيه الخسارة", price_change_notification_threshold:"حدّ إشعار تغيّر السعر",
+  price_change_adaptation_deals:"حوالات فترة التكيّف", dynamic_deviation_lookback_deals:"حوالات الانحراف الديناميكيّ",
+};
+const GROUPS = {
+  grp_rooms:  [["egp_room_jid","text"],["tnd_room_jid","text"],["large_amount_room_jid","text"]],
+  grp_bounds: [["rate_min_egp","num"],["rate_max_egp","num"],["rate_min_tnd","num"],["rate_max_tnd","num"]],
+  grp_disc:   [["discount_tolerance_min","num"],["discount_tolerance_max","num"],["discount_error_margin","num"]],
+  grp_thr:    [["amount_tier_threshold_egp","num"],["amount_tier_threshold_tnd","num"],
+               ["loss_alert_threshold","num"],["price_change_notification_threshold","num"],
+               ["price_change_adaptation_deals","int"],["dynamic_deviation_lookback_deals","int"]],
+};
+const ALL_FIELDS = [].concat(...Object.values(GROUPS));   // [key,type]
+
+function toast(t){ const m=$("msg"); m.textContent=t; m.style.display="block";
+  clearTimeout(window._tt); window._tt=setTimeout(()=>m.style.display="none",2500); }
+function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+
+async function api(path, method="GET", body=null){
+  const opt={ method, headers:{}, credentials:"same-origin" };
+  if (body){ opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
+  const r=await fetch("/api"+path, opt);
+  if (r.status===401){ location.replace("/login"); throw new Error(401); }
+  if (!r.ok){ let d=""; try{ d=(await r.json()).detail; }catch(e){} toast("خطأ "+r.status+(d?": "+d:"")); throw new Error(r.status); }
+  return r.status===204 ? null : r.json();
+}
+
+function buildFields(){
+  for (const [gid, items] of Object.entries(GROUPS)){
+    $(gid).innerHTML = items.map(([k])=>`<label class="fld">${LABELS[k]||k}
+      <input id="${k}"></label>`).join("");
+  }
+}
+function fillForm(){
+  $("fx_rates_enabled").checked = !!CFG.fx_rates_enabled;
+  $("egp_price_template").value = CFG.egp_price_template||"";
+  $("tnd_price_template").value = CFG.tnd_price_template||"";
+  for (const [k] of ALL_FIELDS){ const el=$(k); if (el) el.value = CFG[k]??""; }
+  if (!canWrite()){
+    document.querySelectorAll("input,textarea,select").forEach(e=>e.disabled=true);
+    $("roNote").style.display="block";
+  } else { $("saveBtn").style.display="inline-block"; }
+}
+async function save(){
+  const body = Object.assign({}, CFG);
+  body.fx_rates_enabled = $("fx_rates_enabled").checked;
+  body.egp_price_template = $("egp_price_template").value;
+  body.tnd_price_template = $("tnd_price_template").value;
+  for (const [k,t] of ALL_FIELDS){
+    const v=$(k).value;
+    body[k] = t==="text" ? v : (t==="int" ? parseInt(v||"0",10) : parseFloat(v||"0"));
+  }
+  try{ CFG = await api("/settings/fx-rates","PUT",body); }catch(e){ return; }
+  toast("حُفظ الإعداد ✓");
+}
+async function testParse(cur){
+  const text = $(cur==="EGP"?"test_egp":"test_tnd").value;
+  const tpl  = $(cur==="EGP"?"egp_price_template":"tnd_price_template").value;
+  if (!text.trim()){ toast("ألصق رسالة أسعار أولًا"); return; }
+  try{
+    const r = await api("/settings/fx-rates/test-parse","POST",{ text, currency:cur, template:tpl });
+    $(cur==="EGP"?"out_egp":"out_tnd").textContent = JSON.stringify(r.rates, null, 2);
+  }catch(e){}
+}
+async function loadHistory(){
+  let rows=[]; try{ rows=await api("/fx-rates/history?limit=50"); }catch(e){ return; }
+  $("histEmpty").style.display = rows.length?"none":"block";
+  $("hist").innerHTML = rows.map(s=>`<tr>
+    <td>${esc(s.currency)}</td><td>${esc((s.valid_from||"").replace("T"," ").slice(0,19))}</td>
+    <td>${s.valid_until?esc(s.valid_until.replace("T"," ").slice(0,19)):"— (حاليّ)"}</td>
+    <td class="rates">${esc(JSON.stringify(s.rates))}</td>
+    <td class="muted">${esc(s.source_sender||"")}</td></tr>`).join("");
+}
+
+const ROLE_AR = { manager:"مدير", reviewer:"مراجع", data_entry:"مُدخل بيانات" };
+$("logoutBtn").onclick = async () => {
+  try{ await fetch("/api/auth/logout",{ method:"POST", credentials:"same-origin" }); }catch(e){}
+  location.replace("/login");
+};
+async function boot(){
+  let me;
+  try{ const r=await fetch("/api/auth/me",{ credentials:"same-origin" });
+       if(!r.ok){ location.replace("/login"); return; } me=await r.json(); }
+  catch(e){ location.replace("/login"); return; }
+  ROLE=me.role; $("whoami").textContent=me.username;
+  const rb=$("roleBadge"); rb.textContent=ROLE_AR[ROLE]||ROLE; rb.style.display="inline-block";
+  $("logoutBtn").style.display="inline-block";
+  if (ROLE==="data_entry"){ document.body.classList.add("no-access"); return; }
+  buildFields();
+  try{ CFG = await api("/settings/fx-rates"); }catch(e){ return; }
+  fillForm();
+  loadHistory();
+}
+boot();
+</script>
+</body>
+</html>

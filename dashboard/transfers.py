@@ -91,6 +91,7 @@ def _deal_summary(d: dict) -> dict:
         "updated_at": _iso(d.get("updated_at")),
         "cancelled_at": _iso(d.get("cancelled_at")),
         "cancellation_reason": d.get("cancellation_reason"),
+        "deal_margin": d.get("deal_margin"),         # §8 عرض فقط (None حتى ربط التسعير)
     }
 
 

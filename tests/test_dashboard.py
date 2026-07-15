@@ -725,3 +725,39 @@ async def test_fx_rates_endpoints_rbac(db):
         r2 = await ac.put("/api/settings/fx-rates", json=body)
         assert r2.status_code == 200 and r2.json()["fx_rates_enabled"] is True
         assert (await ac.get("/api/settings/fx-rates")).json()["tnd_room_jid"] == "tn@g.us"
+
+
+# ── الخطوة ٥: تاريخ الأسعار + صفحات + deal_margin ────────────────────────────
+async def test_fx_rates_history_rbac_and_returns_snapshots(db):
+    pytest.importorskip("fastapi")
+    from datetime import datetime
+    from core.constants import Role
+    from core.models import FxRateSnapshot
+    await db.fx_rates.record(FxRateSnapshot(currency="EGP", rates={"vodafone": {"net": 6.1}},
+                                            valid_from=datetime(2026, 7, 1, 10, 0, 0)))
+    async with _anon_client(db) as ac:
+        assert (await ac.get("/api/fx-rates/history")).status_code == 401
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        r = await ac.get("/api/fx-rates/history")                 # قراءة متاحة للمراجع
+        assert r.status_code == 200 and len(r.json()) == 1
+        assert r.json()[0]["currency"] == "EGP" and r.json()[0]["rates"]["vodafone"]["net"] == 6.1
+    async with _client(db) as ac:
+        assert (await ac.get("/api/fx-rates/history?currency=TND")).json() == []  # تصفية بالعملة
+
+
+async def test_fx_and_entity_pages_served(db):
+    pytest.importorskip("fastapi")
+    async with _anon_client(db) as ac:                            # الصفحات تُقدَّم؛ الحماية في الـAPI
+        assert (await ac.get("/fx-rates")).status_code == 200
+        assert (await ac.get("/entity-aliases")).status_code == 200
+
+
+async def test_deal_margin_in_timeline(db):
+    pytest.importorskip("fastapi")
+    from core.db import utcnow
+    await db.deals.col.insert_one({"deal_id": "DMARGIN", "status": "completed",
+                                   "deal_margin": 0.05, "created_at": utcnow(),
+                                   "updated_at": utcnow(), "sell_leg": {"amount": 1000}})
+    async with _client(db) as ac:
+        r = await ac.get("/api/transfers/DMARGIN")
+        assert r.status_code == 200 and r.json()["deal"]["deal_margin"] == 0.05

@@ -167,6 +167,9 @@ class Deal(BaseModel):
     amendments: list[dict] = Field(default_factory=list)
     # التتبّع
     source_message_keys: list[str] = Field(default_factory=list)
+    # نظام الأسعار (§8): هامش الصفقة sell_rate−buy_rate — **عرض فقط** حاليًّا (يُعبَّأ في خطوة
+    #   ربط التسعير لاحقًا، مسيّجة بـ fx_rates_enabled). None حتى ذلك الحين.
+    deal_margin: Optional[float] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

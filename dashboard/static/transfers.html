@@ -130,7 +130,7 @@ function renderTimeline(tl){
   }).join("");
   return `<div class="top"><h2 style="margin:0;font-size:17px">حوالة <span class="mono">${esc(d.deal_id)}</span></h2>
       <button class="ghost" onclick="$('detail').style.display='none'">إغلاق ✕</button></div>
-    <div class="meta">المرجع ${esc(d.reference_number||"—")} · ${esc(d.customer_name||"—")} · ${esc(d.phone||"—")} · الحالة ${esc(d.status)}</div>
+    <div class="meta">المرجع ${esc(d.reference_number||"—")} · ${esc(d.customer_name||"—")} · ${esc(d.phone||"—")} · الحالة ${esc(d.status)} · الهامش ${d.deal_margin==null?"—":num(d.deal_margin)}</div>
     ${rev}<div class="tl">${ev||"<span class='meta'>لا أحداث</span>"}</div>`;
 }
 

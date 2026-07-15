@@ -1019,6 +1019,18 @@ class FxRatesRepo(_Repo):
         doc.pop("_id", None)
         return FxRateSnapshot(**doc)
 
+    async def history(self, currency=None, limit: int = 50) -> list[FxRateSnapshot]:
+        """أحدث لقطات الأسعار (للعرض في اللوحة §15) — الأحدث أولًا. تصفية اختيارية بالعملة."""
+        query: dict = {}
+        if currency is not None:
+            query["currency"] = getattr(currency, "value", currency)
+        cur = self.col.find(query).sort("valid_from", -1).limit(limit)
+        out: list[FxRateSnapshot] = []
+        async for doc in cur:
+            doc.pop("_id", None)
+            out.append(FxRateSnapshot(**doc))
+        return out
+
     async def rate_at(self, currency, ts: datetime) -> Optional[FxRateSnapshot]:
         """اللقطة السارية في لحظة ts: valid_from ≤ ts < valid_until (أو ∞) — السفر الزمنيّ §3 ط٥.
 

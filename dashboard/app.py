@@ -901,6 +901,14 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         await _notify_owner(_owner_text("كيان", "تفعيل", body.alias, body.entity_type.value))
         return {"alias": body.alias, "entity_type": body.entity_type.value, "active": True}
 
+    # ── تاريخ الأسعار (FX §15) — قراءة فقط لعرض اللقطات في اللوحة ──────────────
+    @router.get("/fx-rates/history", dependencies=[reader])
+    async def fx_rates_history(currency: Optional[str] = None, limit: int = 50) -> list[dict]:
+        """أحدث لقطات الأسعار (الأحدث أولًا). تصفية اختيارية بالعملة (EGP/TND)."""
+        cur = currency if currency in ("EGP", "TND") else None
+        snaps = await db.fx_rates.history(cur, min(max(limit, 1), 200))
+        return [s.model_dump(mode="json") for s in snaps]
+
     @router.post("/attention/{deal_id}/escalate")
     async def escalate_transfer(deal_id: str,
                                 actor: UserRecord = Depends(require_read)) -> dict:
@@ -974,6 +982,16 @@ def create_app(db: Database, settings: Optional[Settings] = None) -> FastAPI:
     async def connect_page() -> FileResponse:
         """صفحة الاتصال + QR + صحة MONEYADO (لوحة V2 م٥) — البوّابة في الواجهة/الـ API."""
         return FileResponse(str(STATIC_DIR / "connect.html"))
+
+    @app.get("/fx-rates")
+    async def fx_rates_page() -> FileResponse:
+        """صفحة إدارة الأسعار (FX §15) — المصادقة/الصلاحيات تُفرَض في الـAPI."""
+        return FileResponse(str(STATIC_DIR / "fx_rates.html"))
+
+    @app.get("/entity-aliases")
+    async def entity_aliases_page() -> FileResponse:
+        """صفحة إدارة الكيانات الموحّدة (§4)."""
+        return FileResponse(str(STATIC_DIR / "entity_aliases.html"))
 
     @app.get("/settings")
     async def settings_page() -> FileResponse:
