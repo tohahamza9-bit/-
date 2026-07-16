@@ -833,7 +833,11 @@ class QueueService:
             if target.currency is None:
                 target.currency = frag.treasury.currency
         if frag.is_supplier_counterpart and frag.supplier is not None and deal.buy_leg is None:
-            # رد مورد = الطرف الثاني (شراء) لصفقة طرفين
+            # رد مورد = الطرف الثاني (شراء) لصفقة طرفين.
+            # 🔴 (م: A845، دفاع بعمق) parse_completion_fragment يُرجِع operation=SELL افتراضيًّا؛
+            #    طرفُ المورّد شراءٌ صراحةً (§5.3)، فنقلبه BUY هنا كي لا يُسجَّل الشراء بيعًا حتى لو
+            #    وصل عبر مسار الجزء المكمِّل بدل _merge_second_leg.
+            frag.operation = OperationType.BUY
             deal.buy_leg = frag
             deal.is_two_legged = True
         elif target is not None:

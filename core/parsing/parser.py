@@ -863,6 +863,13 @@ def _fragment_supplier_name(residual: list[str], code: Optional[str]) -> Optiona
     return None
 
 
+def _strip_phone_tokens(ln: str) -> str:
+    """يُزيل مقاطع الهاتف من السطر قبل استخراج المبلغ — كي لا يُلتقَط رقمُ الهاتف مبلغًا حين يجتمع
+    الهاتف والمبلغ في سطرٍ واحد («01… فودافون 11.880 ج م» → «فودافون 11.880 ج م»)، مطابِقًا لسلوك
+    parse_message. classify_phone يستبعد المصريّ/التونسيّ (ويرفض الليبيّ فيبقى مبلغًا محتملًا)."""
+    return " ".join(t for t in (ln or "").split() if not classify_phone(t))
+
+
 def parse_completion_fragment(
     text: str, treasuries: list[TreasuryRecord], suppliers: list[SupplierRecord],
 ) -> ParsedLeg:
@@ -883,16 +890,20 @@ def parse_completion_fragment(
 
     for ln in lines:
         n = normalize_ar(ln)
-        if normalize_payment(ln) or _is_discount_indicator(n) or "بنك" in n or _is_request_noise(ln):
-            continue                             # وسيلة دفع/مؤشّر خصم/بنك/طلب بشري → يُتجاهَل
+        cur = detect_currency(ln)                # سطر مبلغ (فيه رمز عملة ج.م/د.ت) — يُفحَص أوّلًا
+        # 🔴 (م: A845) لا يُتجاهَل سطرٌ يحمل مبلغًا (عملة) لمجرّد احتوائه وسيلةَ دفع: السطر «01…
+        #    فودافون 11.880 ج م» يجمع الهاتف+الوسيلة+المبلغ معًا، وتجاهُله كان يُفقِد المبلغ (11.880).
+        #    الفحص الآن مشروط بغياب العملة فقط، مطابِقًا لـparse_message الذي يستخرج المبلغ سليمًا.
+        if cur is None and (normalize_payment(ln) or _is_discount_indicator(n)
+                            or "بنك" in n or _is_request_noise(ln)):
+            continue                             # وسيلة دفع/مؤشّر خصم/بنك/طلب بشري (بلا مبلغ) → يُتجاهَل
         if n in _FRAGMENT_CURRENCY:              # «تونس/مصر» سطرًا كاملًا → عملة
             currency = currency or _FRAGMENT_CURRENCY[n]
             continue
-        cur = detect_currency(ln)                # سطر مبلغ (فيه رمز عملة ج.م/د.ت) → المبلغ + العملة
         if cur is not None:                      #   (يميّز المبلغ عن الكود، ويمنع تلويث الاسم بـ«ج م»)
             currency = currency or cur
-            if amount is None:
-                amount = parse_amount(ln)
+            if amount is None:                   # جرّد الهاتف قبل المبلغ (السطر قد يحمل هاتفًا+مبلغًا)
+                amount = parse_amount(_strip_phone_tokens(ln))
             continue
         if treasury_rec is None:                 # خزينة سطر-كامل (مطابقة تامّة — آمنة §0)
             rec = resolve_treasury(ln, treasuries)
