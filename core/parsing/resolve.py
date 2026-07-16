@@ -35,6 +35,18 @@ _MATCH_MIN_LEN = 3          # لا مطابقة بادئة/تقريبية على
 # «ال» التعريف في بداية كلمة (يتبعها حرفان على الأقلّ) — تُزال للمطابقة («العاصمه»→«عاصمه»)
 _AL_PREFIX = re.compile(r"^ال(?=..)")
 
+# 🔴 كلمات تنظيميّة عامّة (شركة/مكتب/…) — تُجرَّد **في مرحلة fuzzy وحدها** كي لا تضخّم كلمةٌ
+#   عامّة مشتركة درجةَ التطابق فتُخلَط هويّتان مختلفتان: زبون «شركة القن» ⇔ مورّد «شركة النور»
+#   (WRatio=80 من «شركه» المشتركة وحدها). الأشكال هنا **بعد** normalize_ar (ة→ه، ؤ→و). المطابقة
+#   التامّة/البادئة/الكلمات (2-4) لا تتأثّر — الخلط الوحيد كان في fuzzy (§0 لا تخمين على العامّ).
+_GENERIC_ORG = {"شركه", "مكتب", "محل", "موسسه"}
+
+
+def _strip_generic(qn: str) -> str:
+    """يُزيل الكلمات التنظيميّة العامّة (شركة/مكتب/…) من نصّ مطبَّع — للمقارنة التقريبيّة على
+    الجزء المميِّز وحده. يُرجِع الباقي (قد يكون فارغًا لو كان النصّ كلمةً عامّةً فقط)."""
+    return " ".join(t for t in qn.split() if t not in _GENERIC_ORG)
+
 
 def normalize_arabic_for_matching(s: Optional[str]) -> str:
     """تطبيع عربيّ للمطابقة التقريبية (§1): يبني على normalize_ar (تشكيل/همزات/ة→ه/ى→ي/مسافات)
@@ -95,15 +107,22 @@ def _loose_match(token: Optional[str], records: list):
     if hits:
         return hits[0] if len(hits) == 1 else _ambiguous(token, hits)
 
-    # (٥) fuzzy (rapidfuzz WRatio) — تتخطّى النصوص < 3 أحرف والمُسجِّل المعطّل
+    # (٥) fuzzy (rapidfuzz WRatio) — تتخطّى النصوص < 3 أحرف والمُسجِّل المعطّل.
+    # 🔴 تُقارَن الأجزاء المميِّزة وحدها (بعد تجريد الكلمات العامّة شركة/مكتب/…) كي لا تُطابَق
+    #    هويّتان مختلفتان بسبب كلمة عامّة مشتركة («شركة القن» ⇔ «شركة النور»). لو لم يبقَ جزءٌ
+    #    مميِّزٌ كافٍ (نصّ عامّ فقط) → لا تخمين تقريبيّ (§0).
     if fuzz is None or len(qn) < _MATCH_MIN_LEN:
+        return None
+    q_core = _strip_generic(qn)
+    if len(q_core) < _MATCH_MIN_LEN:
         return None
     scored = []
     for r in records:
-        best = max(
-            (fuzz.WRatio(qn, c) for c in _match_forms(r) if len(c) >= _MATCH_MIN_LEN),
-            default=0.0,
-        )
+        best = 0.0
+        for c in _match_forms(r):
+            c_core = _strip_generic(c)
+            if len(c_core) >= _MATCH_MIN_LEN:
+                best = max(best, fuzz.WRatio(q_core, c_core))
         if best >= _FUZZY_THRESHOLD:
             scored.append(r)
     hits = _distinct(scored)

@@ -26,7 +26,7 @@ from ..db import Database
 from ..logging_setup import get_logger
 from ..models import Deal, ParsedLeg, RawMessage, SupplierRecord, SupplierRef, TreasuryRecord, TreasuryRef, WriteJob
 from ..parsing import extract_code_name_price_lines, parse_completion_fragment, parse_message
-from ..parsing.normalize import normalize_price
+from ..parsing.normalize import normalize_ar, normalize_payment, normalize_price
 from ..parsing.resolve import resolve_treasury
 from .commission import compute_commission
 from .grouping import _is_discount_identity_leg, _norm_ref, compute_grouping_key, discount_pair
@@ -43,6 +43,21 @@ def _as_naive_utc(dt: datetime) -> datetime:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+
+def _unresolved_treasury_tokens(text: str, treasuries: list[TreasuryRecord]) -> list[str]:
+    """أسطر تبدو خزينةً لكنها لم تُحلّ: سطر **كلمة عربية واحدة** بلا رقم، ليست وسيلة دفع، ولا
+    تُطابِق أي خزينة (§0 — الخزائن تامّة). يميّز «محموذ» (خطأ إملاء «محمود صفاقس») عن أسطر السعر/
+    الاسم المتعدّدة الكلمات. يُستعمَل لالتقاط الرمز المجهول وربط الرسالة الثانية بدل إسقاطها."""
+    out: list[str] = []
+    for ln in (text or "").replace("/", "\n").splitlines():
+        ln = ln.strip()
+        if (ln and len(ln.split()) == 1 and normalize_ar(ln)
+                and not any(ch.isdigit() for ch in ln)
+                and not normalize_payment(ln)
+                and resolve_treasury(ln, treasuries) is None):
+            out.append(ln)
+    return out
 
 
 def is_completion_fragment(leg: ParsedLeg | None) -> bool:
@@ -511,6 +526,31 @@ class QueueService:
             log.info("خانة المُرسِل: رُبط الجزء المكمّل بالصفقة %s (PARSED — تُعالِجه النبضة)",
                      deal.deal_id)
             return deal, False
+        # (٤) 🔴 رسالة ثانية بهوية زبون واضحة (كود+اسم، بلا مبلغ/مرجع) **مع رمز خزينة لم يُحلّ**
+        #     (سطر كلمة عربية واحدة غير مطابِق لأي خزينة — إملاء غريب مثل «محموذ»→«محمود صفاقس»؛
+        #     الخزائن تُحلّ تامًّا §0). سابقًا تُسقَط صامتةً فتبقى الأولى معلّقةً وتسرق ثانيةَ التالية
+        #     (انزياح FIFO §7.3، حادثة X850–X853). الآن: تُربَط الهويةُ بهدفها (فتخرج من طابور
+        #     المرشّحين)، وتبقى الخزينة None فتُصعَّد لاحقًا «لا خزينة محلولة» لا تُسقَط، ويُلتقَط الرمز.
+        #     🔴 القيد برمزٍ مجهولٍ صريح يمنع ابتلاع أسطر مبهمة (سطرَا سعر مثل «… 34.5 / النور 35.75»
+        #     التي يُفترَض ألا تُحلَّ — golden shape_04#3).
+        unresolved = _unresolved_treasury_tokens(text, treasuries)
+        target_leg = deal.sell_leg or deal.buy_leg
+        if (unresolved and frag.customer_code and (frag.customer_name or "").strip()
+                and frag.amount is None and not frag.reference_number
+                and target_leg is not None and not target_leg.customer_code):
+            self._apply_fragment(deal, frag)          # يكمل كود/اسم/سعر؛ الخزينة تبقى None
+            for tok in unresolved:
+                await self.db.unknown_terms.record(tok, "treasury")
+            deal.status = Status.PARSED
+            deal.waiting_deadline = None
+            if raw.message_key and raw.message_key not in deal.source_message_keys:
+                deal.source_message_keys.append(raw.message_key)
+            deal.updated_at = now
+            await self.db.deals.upsert(deal)
+            log.warning("خانة المُرسِل: رُبطت هوية «%s %s» بالصفقة %s لكن الخزينة «%s» غير محلولة "
+                        "— تُصعَّد لاحقًا لا تُسقَط (§7.3)",
+                        frag.customer_code, frag.customer_name, deal.deal_id, "، ".join(unresolved))
+            return deal, False
         return None
 
     @staticmethod
@@ -793,7 +833,11 @@ class QueueService:
             if target.currency is None:
                 target.currency = frag.treasury.currency
         if frag.is_supplier_counterpart and frag.supplier is not None and deal.buy_leg is None:
-            # رد مورد = الطرف الثاني (شراء) لصفقة طرفين
+            # رد مورد = الطرف الثاني (شراء) لصفقة طرفين.
+            # 🔴 (م: A845، دفاع بعمق) parse_completion_fragment يُرجِع operation=SELL افتراضيًّا؛
+            #    طرفُ المورّد شراءٌ صراحةً (§5.3)، فنقلبه BUY هنا كي لا يُسجَّل الشراء بيعًا حتى لو
+            #    وصل عبر مسار الجزء المكمِّل بدل _merge_second_leg.
+            frag.operation = OperationType.BUY
             deal.buy_leg = frag
             deal.is_two_legged = True
         elif target is not None:

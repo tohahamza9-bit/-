@@ -76,6 +76,10 @@ class MoneyadoWriter(Writer):
         self._POST_STORE_CLOSE_WAIT = getattr(self.settings, "moneyado_post_store_close_wait", 1.0)
         # DRY_RUN: مهلة معاينة بصرية بعد التعبئة (الشاشة تبقى مفتوحة بلا «تخزين»/«خروج»).
         self._DRY_RUN_WAIT = getattr(self.settings, "moneyado_dry_run_wait", 3.0)
+        # 🔴 تأكيد التخزين بحالة الزرّ (§11.3): انتظار الجاهزية قبل الإدخال، وانتظار الإباهت بعد الضغط.
+        self._STORE_READY_TIMEOUT = getattr(self.settings, "moneyado_store_ready_timeout", 8.0)
+        self._STORE_CONFIRM_TIMEOUT = getattr(self.settings, "moneyado_store_confirm_timeout", 10.0)
+        self._STORE_POLL_INTERVAL = getattr(self.settings, "moneyado_store_poll_interval", 0.25)
 
     def _get_screen(self) -> ScreenController:
         if self._screen is None:
@@ -120,6 +124,16 @@ class MoneyadoWriter(Writer):
             unexpected = screen.check_unexpected_window()
             if unexpected:
                 return self._unexpected(screen, op, job, unexpected)
+
+            # (3.5) 🔴 قاعدة صارمة (§11.3): لا نُدخِل بيانات قبل جاهزية «تخزين». الزرّ باهت لحظة فتح
+            #       الفورم ثم يُفعَّل عند الجاهزية (أُثبِت حيًّا) — ننتظر تفعيله؛ إن بقي باهتًا خلال
+            #       المهلة فالفورم لم يُهيَّأ (شاشة سابقة لم تكتمل) → لا إدخال، إغلاق آمن + تصعيد.
+            if not screen.wait_store_ready(op, self._STORE_READY_TIMEOUT, self._STORE_POLL_INTERVAL):
+                log.error("زر «تخزين» لم يُفعَّل خلال %ss (الفورم غير جاهز) — لا إدخال (job=%s).",
+                          self._STORE_READY_TIMEOUT, job.job_id)
+                self._try_stop(screen, op)
+                return WriteResult(ok=False, needs_review=True,
+                                   error="زر «تخزين» لم يصبح جاهزًا (الفورم لم يُهيَّأ للإدخال) — لم تُدخَل بيانات")
 
             # (4) التعبئة بالترتيب مع فحص النافذة الطارئة بعد كل خطوة
             for field_op in ops:
@@ -191,6 +205,15 @@ class MoneyadoWriter(Writer):
                 if post:
                     self._try_stop(screen, op)   # أغلقها (STOP/رجوع) — best-effort
                     raise RuntimeError(f"نافذة غير متوقّعة بعد «تخزين»: {post}")
+                # (1.5) 🔴 قاعدة صارمة (§11.3): تأكيد الحفظ قبل أي عملية تالية — ننتظر **إباهت** زرّ
+                #       «تخزين» (VB6 يعطّله بعد الحفظ الناجح؛ اختفاء الفورم تأكيدٌ أيضًا). إن بقي
+                #       مفعَّلًا خلال المهلة فالتخزين **غير مؤكَّد** → لا ننتقل للتالية إطلاقًا:
+                #       نُرجِع فشلًا فيتولّى الأنبوب التصعيد 🔴 + TECH_FAILED ووقف الصفقة (§11.3).
+                if not screen.wait_store_confirmed(op, self._STORE_CONFIRM_TIMEOUT, self._STORE_POLL_INTERVAL):
+                    log.error("تخزين %s غير مؤكَّد: زر «تخزين» لم يُعطَّل خلال %ss (job=%s) — توقّف + تصعيد.",
+                              op.value, self._STORE_CONFIRM_TIMEOUT, job.job_id)
+                    return WriteResult(ok=False, needs_review=True,
+                                       error=f"تخزين لم يتأكد — زر «تخزين» لم يُعطَّل خلال {self._STORE_CONFIRM_TIMEOUT}s")
                 # (2) «رجوع»/Enter على النافذة الرئيسية → إغلاق الشاشة والعودة للقائمة، **مع التحقّق
                 #     من إغلاق الشاشة فعلًا** (confirm_store_on_main يعيد الضغط حتى is_main_screen §11.3).
                 screen.confirm_store_on_main()

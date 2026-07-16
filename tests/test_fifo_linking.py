@@ -10,6 +10,8 @@ import contextlib
 import io
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from core.bus import Bus
 from core.constants import Status
 from core.models import RawMessage, WriteResult
@@ -209,3 +211,67 @@ async def test_linking_separate_from_validation_missing_identity(db):
     assert (sl.get("treasury") or {}).get("name") == "بلاس فون"   # الربط تمّ (الخزينة من الثانية)
     assert sl.get("customer_code") is None                        # الهوية ما زالت ناقصة
     assert d["status"] in ("held", "escalated")                  # التحقّق حجبها (كود مفقود) — كالمعتاد
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# خطأ إملاء الخزينة في الرسالة الثانية — لا إسقاط صامت ولا انزياح FIFO (حادثة X850–X853)
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_misspelled_treasury_second_escalates_not_dropped(db):
+    """رسالة ثانية بهوية زبون واضحة + خزينة بخطأ إملائيّ («خزينةمجهوله» لا تُطابِق أيّ خزينة §0):
+    سابقًا تُسقَط صامتةً فتبقى الأولى معلّقة. الآن: تُربَط الهوية بالأولى، وتبقى الخزينة غير محلولة
+    (تُصعَّد لاحقًا)، ويُلتقَط الرمز المجهول في unknown_terms."""
+    pipe = _pipeline(db)
+    # now_offset=95 > STABILIZE_MAX: الرسالة الثانية (خزينة مجهولة → ليست ردّ إكمال) تستقرّ بالعمر
+    # فتُعالَج في الدفعة (في الإنتاج تُعالِجها نبضة لاحقة بعد الاستقرار). نختبر منطق الربط لا التوقيت.
+    await _run_burst(pipe, [
+        ("X900\n\n01000000001\n1000 ج م", "x900", S1),      # ناقصة: بلا كود/اسم/خزينة
+        ("11 زبون واحد 6.04\nخزينةمجهوله", "x900b", S1),     # هوية + خزينة بخطأ إملائيّ
+    ], now_offset=95)
+    by = await _deals_by_ref(db)
+    sl = by["X900"][0]["sell_leg"]
+    assert sl["customer_code"] == "11"                        # الهوية رُبطت (لا إسقاط صامت)
+    assert (sl.get("treasury") or None) is None               # الخزينة غير محلولة → تصعيد لاحق
+    terms = [t["term"] async for t in db.unknown_terms.col.find({})]
+    assert "خزينةمجهوله" in terms                             # الرمز الغريب التُقِط للوحة
+
+
+async def test_typo_treasury_does_not_shift_fifo(db):
+    """الإصلاح الجوهريّ (X850–X853): خطأُ إملاءِ خزينةٍ في ثانية X900 لا يُزيح الطابور —
+    X900 يأخذ زبونه وX901 يأخذ زبونه (بلا off-by-one). بلا الإصلاح كانت X900 تسرق زبون X901."""
+    pipe = _pipeline(db)
+    await _run_burst(pipe, [
+        ("X900\n\n01000000001\n1000 ج م", "x900", S1),
+        ("11 زبون واحد 6.04\nخزينةمجهوله", "x900b", S1),      # خزينة بخطأ إملائيّ (كانت تُسقِط X900)
+        ("X901\n\n01000000002\n2000 ج م", "x901", S1),
+        ("22 زبون اثنين 6.04\nبلاس", "x901b", S1),            # خزينة صحيحة (بلاس فون)
+    ])
+    by = await _deals_by_ref(db)
+    # كلٌّ بزبونه — لا انزياح. بلا الإصلاح: X900 (معلّقة لأن ثانيتها سقطت) تبتلع «22» فتصير X900=22.
+    assert by["X900"][0]["sell_leg"]["customer_code"] == "11"
+    assert by["X901"][0]["sell_leg"]["customer_code"] == "22"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A845 — طرفان بنفس الرقم: مبلغ طرف الشراء (11.880) يجب أن يبقى ولا ينقلب op (يفشل قبل الإصلاح)
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_a845_two_leg_buy_amount_preserved(db):
+    """A845: بيع «1284 مروان الشاوش 12000» + شراء «760 طه 11.880» بنفس الرقم. يجب أن يبقى مبلغ
+    طرف الشراء = 11880 ونوعه BUY.
+
+    🔴 يفشل الآن: سطر «01063481070 فودافون 11.880 جنيه مصري» يحمل الهاتفَ+الوسيلةَ+المبلغَ معًا،
+    فـparse_completion_fragment يتجاهله كوسيلة دفع (فيه «فودافون» → normalize_payment، parser.py:886)
+    → amount=None؛ ثم _apply_fragment يُسند frag (operation=SELL افتراضيّ) لطرف الشراء دون قلبه BUY
+    (service.py). النتيجة: buy_leg.amount=None و op=sell. يمرّ بعد إصلاح استخراج المبلغ + قلب op."""
+    from core.models import SupplierRecord
+    await db.suppliers.upsert(SupplierRecord(code="760", name="طه", aliases=["طه"], active=True))
+    pipe = _pipeline(db)
+    await _run_burst(pipe, [
+        ("A845\n\n01063481070 فودافون 12000 جنيه مصري\n\n\n1284مروان الشاوش 6.10", "a845s", S1),
+        ("A845\n\n01063481070 فودافون 11.880 جنيه مصري\n\n\n760 طه 6.07", "a845b", S1),
+    ])
+    by = await _deals_by_ref(db)
+    d = by["A845"][0]
+    bl = d.get("buy_leg")
+    assert bl is not None, "طرف الشراء يجب أن يوجد (صفقة طرفين)"
+    assert bl["amount"] == 11880.0, f"مبلغ طرف الشراء يجب أن يبقى 11880 لا {bl.get('amount')}"
+    assert bl["operation"] == "buy", f"نوع طرف الشراء يجب أن يكون buy لا {bl.get('operation')}"

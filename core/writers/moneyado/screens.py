@@ -37,6 +37,23 @@ def _actionable(ctrl) -> bool:
         return True
 
 
+def _poll_until(pred, timeout: float, interval: float,
+                *, now=time.monotonic, sleep=time.sleep) -> bool:
+    """يسبر `pred()` كل `interval` حتى تصير True أو تنقضي `timeout`. يُرجع True عند التحقّق،
+    False عند انقضاء المهلة. استثناء `pred` = «لم يتحقّق بعد» (يُتابع السبر). now/sleep مُحقَنان
+    للاختبار الحتميّ (بلا انتظار حقيقيّ)."""
+    deadline = now() + max(0.0, timeout)
+    while True:
+        try:
+            if pred():
+                return True
+        except Exception:
+            pass
+        if now() >= deadline:
+            return False
+        sleep(max(0.0, interval))
+
+
 def _pids_by_image_name(image_name: str) -> list[int]:
     """قائمة PIDs لكل العمليات التي اسم صورتها image_name (عبر ToolHelp32 — بلا psutil).
 
@@ -157,6 +174,24 @@ class ScreenController(ABC):
     @abstractmethod
     def screenshot(self, path: str) -> None:
         """يحفظ لقطة شاشة للنافذة (dead-letter §11.3)."""
+
+    @abstractmethod
+    def store_button_enabled(self, operation: OperationType) -> Optional[bool]:
+        """حالة زرّ «تخزين»: True مفعَّل (الفورم جاهز للإدخال)، False باهت/معطَّل (بعد حفظ ناجح —
+        VB6 يضبط WS_DISABLED)، None إن لم يُوجد الزرّ (فورم مُغلق/غير جاهز §11.3). المصدر is_enabled
+        (= IsWindowEnabled؛ أُثبِت حيًّا أنّه يعكس الإباهت تمامًا — لا حاجة لفحص بكسل)."""
+
+    def wait_store_ready(self, operation: OperationType, timeout: float, interval: float) -> bool:
+        """ينتظر تفعيل «تخزين» (الفورم جاهز للإدخال). الزرّ باهت لحظة فتح الفورم ثم يُفعَّل عند
+        الجاهزية (أُثبِت حيًّا) — فلا نُدخِل بيانات قبل ذلك. يُرجع False إن لم يُفعَّل خلال المهلة."""
+        return _poll_until(lambda: self.store_button_enabled(operation) is True, timeout, interval)
+
+    def wait_store_confirmed(self, operation: OperationType, timeout: float, interval: float) -> bool:
+        """ينتظر إباهت «تخزين» بعد الضغط = **تأكيد الحفظ** (VB6 يعطّله بعد الحفظ الناجح). اختفاء
+        الزرّ (None، الفورم يُغلَق بُعيد الحفظ) يُعدّ تأكيدًا أيضًا. False = لم يُعطَّل خلال المهلة →
+        تخزين غير مؤكَّد (توقّف + تصعيد)."""
+        return _poll_until(lambda: self.store_button_enabled(operation) in (False, None),
+                           timeout, interval)
 
     @abstractmethod
     def press_store(self, operation: OperationType) -> None:
@@ -758,6 +793,18 @@ class MoneyadoScreen(ScreenController):
             )
         return btn
 
+    def store_button_enabled(self, operation: OperationType) -> Optional[bool]:
+        """حالة زرّ «تخزين» عبر is_enabled (= IsWindowEnabled؛ VB6 يضبط WS_DISABLED بعد الحفظ).
+        None إن لم يُوجد الزرّ (فورم مُغلق/غير جاهز) — يُفسَّر تأكيدًا في wait_store_confirmed."""
+        try:
+            btn = self._button(self.button_config(operation)["store"])
+        except Exception:
+            return None
+        try:
+            return bool(btn.is_enabled())
+        except Exception:
+            return None
+
     def press_store(self, operation: OperationType) -> None:
         btn = self._button(self.button_config(operation)["store"])
         text = btn.window_text() or ""
@@ -765,7 +812,10 @@ class MoneyadoScreen(ScreenController):
         for forbidden in self._forbidden(operation):
             if forbidden and forbidden in text:
                 raise RuntimeError(f"رفض ضغط زر ممنوع '{text}' (§2.3)")
-        btn.click()
+        # 🔴 (قرار المستخدم §11.3) الضغط بـ ENTER على الزرّ لا click: نركّز الزرّ ثم ENTER —
+        #    أكثر موثوقيّة على أزرار VB6 (النقر قد يُبتلَع؛ Enter على الزرّ المركَّز يُفعّله يقينًا).
+        btn.set_focus()
+        btn.type_keys("{ENTER}", set_foreground=True)
 
     def confirm_store_on_main(self) -> None:
         """Enter على النافذة الرئيسية للتطبيق (top_window) لإغلاق رسالة التأكيد بعد «تخزين»

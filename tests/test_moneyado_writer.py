@@ -91,6 +91,9 @@ def make_screen(coord=(1, 1), name="فداء شاكونه", unexpected=None) -> 
     }
     screen.check_unexpected_window.return_value = unexpected
     screen.read_text.return_value = name
+    # افتراضيّ: زرّ «تخزين» جاهز قبل الإدخال ويتأكّد إباهته بعد الضغط (المسار السعيد §11.3).
+    screen.wait_store_ready.return_value = True
+    screen.wait_store_confirmed.return_value = True
     return screen
 
 
@@ -1199,3 +1202,97 @@ async def test_write_buy_leg_stores(tmp_path):
     screen.press_store.assert_called_once()
     # لا قراءة اسم زبون في شاشة الشراء (لا customer_name_display)
     screen.read_text.assert_not_called()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# قاعدة تأكيد التخزين بحالة زرّ «تخزين» (§11.3) — VB6 يعطّل الزرّ بعد الحفظ الناجح
+# ═════════════════════════════════════════════════════════════════════════════
+from core.writers.moneyado.screens import _poll_until   # noqa: E402
+
+
+def test_poll_until_true_immediately():
+    """pred صحيحة فورًا → True بلا انتظار."""
+    assert _poll_until(lambda: True, timeout=5, interval=1,
+                       now=lambda: 0.0, sleep=lambda s: None) is True
+
+
+def test_poll_until_becomes_true_then_returns():
+    """pred تصير صحيحة بعد عدّة دورات → True (بلا انتظار حقيقيّ — clock محقون)."""
+    seq = iter([False, False, True])
+    t = {"v": 0.0}
+    def clock():
+        return t["v"]
+    def sleep(s):
+        t["v"] += s
+    assert _poll_until(lambda: next(seq), timeout=10, interval=1, now=clock, sleep=sleep) is True
+
+
+def test_poll_until_times_out():
+    """pred لا تتحقّق أبدًا → False عند انقضاء المهلة."""
+    t = {"v": 0.0}
+    def clock():
+        return t["v"]
+    def sleep(s):
+        t["v"] += s
+    assert _poll_until(lambda: False, timeout=3, interval=1, now=clock, sleep=sleep) is False
+
+
+@pytest.mark.asyncio
+async def test_store_ready_checked_before_filling_and_pressing(tmp_path):
+    """قبل الإدخال: wait_store_ready يُستدعى **قبل** أيّ fill وقبل press_store (لا إدخال فوق فورم غير جاهز)."""
+    screen = make_screen()
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    await writer.write(make_job(make_sell_leg()), commit=True)
+    names = [c[0] for c in screen.method_calls]
+    assert "wait_store_ready" in names
+    assert names.index("wait_store_ready") < names.index("fill")
+    assert names.index("wait_store_ready") < names.index("press_store")
+
+
+@pytest.mark.asyncio
+async def test_store_not_ready_escalates_without_input(tmp_path):
+    """الزرّ لم يصبح جاهزًا (باهت خلال المهلة) → لا إدخال ولا تخزين، إغلاق آمن + تصعيد للمراجعة."""
+    screen = make_screen()
+    screen.wait_store_ready.return_value = False
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    result = await writer.write(make_job(make_sell_leg()), commit=True)
+    assert result.ok is False and result.needs_review is True
+    assert "تخزين" in result.error and "جاهز" in result.error
+    screen.fill.assert_not_called()                 # لا إدخال بيانات
+    screen.press_store.assert_not_called()          # لا تخزين
+    screen.press_stop.assert_called()               # إغلاق آمن
+
+
+@pytest.mark.asyncio
+async def test_store_not_confirmed_halts_and_escalates(tmp_path):
+    """بعد الضغط: الزرّ لم يُعطَّل خلال المهلة → تخزين غير مؤكَّد → فشل (ok=False) فيوقف الأنبوبُ
+    الصفقةَ ويصعّد TECH_FAILED. لا confirm_store_on_main (لا متابعة للتالية)."""
+    screen = make_screen()
+    screen.wait_store_confirmed.return_value = False
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    result = await writer.write(make_job(make_sell_leg()), commit=True)
+    assert result.ok is False and result.needs_review is True
+    assert "تخزين" in result.error and "يتأكد" in result.error
+    screen.press_store.assert_called_once()             # ضُغِط «تخزين»
+    screen.confirm_store_on_main.assert_not_called()    # لم ننتقل/نتابع بلا تأكيد
+
+
+@pytest.mark.asyncio
+async def test_store_confirmed_proceeds_ok(tmp_path):
+    """الزرّ أُعطِّل بعد الضغط = تأكيد الحفظ → نجاح ومتابعة (confirm_store_on_main)."""
+    screen = make_screen()   # wait_store_confirmed=True افتراضيًّا
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    result = await writer.write(make_job(make_sell_leg()), commit=True)
+    assert result.ok is True
+    screen.wait_store_confirmed.assert_called_once()
+    screen.confirm_store_on_main.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_store_confirm_before_confirm_on_main(tmp_path):
+    """الترتيب: press_store → wait_store_confirmed → confirm_store_on_main (تأكيد الحفظ قبل الرجوع)."""
+    screen = make_screen()
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    await writer.write(make_job(make_sell_leg()), commit=True)
+    names = [c[0] for c in screen.method_calls]
+    assert names.index("press_store") < names.index("wait_store_confirmed") < names.index("confirm_store_on_main")
