@@ -1071,7 +1071,11 @@ def _build_leg(
     supplier_ref: Optional[SupplierRef] = None
     is_supplier = False
     name = f.get("customer_name")
-    if name:
+    # 🔴 حصر «الطرف مورد ⇒ شراء» (§5.3) بالصيغ غير المعنونة (Format A) وحدها. صيغة SI تُسمّي
+    #    الزبون صراحةً في حقل «اسم الزبون» والموردَ في حقل «المورد:» المنفصل (أدناه) — فاسم زبون
+    #    SI **لا يُقلَب موردًا أبدًا** حتى لو طابق القائمةَ البيضاء تقريبيًّا (مثال «شركة القن» زبون
+    #    يُطابِق موردَ «شركة النور» تقريبيًّا). يمنع تسجيل بيع SI شراءً بالغلط (§0).
+    if name and not is_si:
         srec = resolve_supplier(name, suppliers)
         if srec is not None:
             supplier_ref = SupplierRef(code=srec.code, name=srec.name)

@@ -375,12 +375,33 @@ async function pushChannelAlias(i) {
   toast("أُضيف الإملاء ✓"); loadChannels();
 }
 
-// ── بحث فوري (م٣) — واجهة فقط ──
+// ── بحث فوري (م٣) — تطبيع عربيّ + بحث في الاسم/الكود/الإملاءات ──
+// يحاكي core/parsing/normalize.normalize_ar: تشكيل/تطويل/علامات اتجاه/NBSP + توحيد الهمزات
+// والتاء المربوطة والألف المقصورة + أرقام عربية-هندية → لاتينية. بدونه كان «القن» (إملاء) أو اسمٌ
+// فيه تطويل/علامة اتجاه من واتساب يختفي رغم وجوده (بحث نصّي خام سابقًا لا يطابق إلا حرفيًّا).
+function normAr(s){
+  return String(s??"")
+    .replace(/[ؐ-ًؚ-ٰٟۖ-ۭـ]/g,"")   // تشكيل + تطويل ـ
+    .replace(/[‎‏‪-‮ ]/g," ")                       // RLM/LRM/تضمين + NBSP
+    .replace(/[أإآٱ]/g,"ا").replace(/ة/g,"ه").replace(/ى/g,"ي")
+    .replace(/ؤ/g,"و").replace(/ئ/g,"ي").replace(/ء/g,"")
+    .replace(/[٠-٩]/g,d=>"٠١٢٣٤٥٦٧٨٩".indexOf(d))                             // أرقام عربية-هندية
+    .replace(/[۰-۹]/g,d=>"۰۱۲۳۴۵۶۷۸۹".indexOf(d))                             // أرقام فارسية
+    .replace(/\s+/g," ").trim();
+}
+// نصّ البحث للسجلّ = الاسم + الكود + كل الإملاءات، مطبَّعًا (بحث في كل الحقول لا الاسم وحده).
+function assetHaystack(rec){
+  return normAr([rec && rec.name, rec && rec.code, ...((rec && rec.aliases)||[])].join(" "));
+}
 function applyAssetSearch() {
-  const q = ($("assetSearch").value||"").trim();
-  ["t_body","s_body","c_body"].forEach(id => {
-    const tb = $(id); if (!tb) return;
-    tb.querySelectorAll("tr").forEach(tr => { tr.style.display = (!q || tr.textContent.includes(q)) ? "" : "none"; });
+  const q = normAr($("assetSearch").value||"");
+  [["t_body","trow-t-",window._trows],["s_body","trow-s-",window._srows],
+   ["c_body","trow-c-",window._crows]].forEach(([bodyId,prefix,rows]) => {
+    if (!$(bodyId)) return;
+    (rows||[]).forEach((rec,i) => {
+      const tr = $(prefix+i); if (!tr) return;
+      tr.style.display = (!q || assetHaystack(rec).includes(q)) ? "" : "none";
+    });
   });
 }
 
