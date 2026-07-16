@@ -91,8 +91,8 @@ def make_screen(coord=(1, 1), name="فداء شاكونه", unexpected=None) -> 
     }
     screen.check_unexpected_window.return_value = unexpected
     screen.read_text.return_value = name
-    # افتراضيّ: زرّ «تخزين» جاهز قبل الإدخال ويتأكّد إباهته بعد الضغط (المسار السعيد §11.3).
-    screen.wait_store_ready.return_value = True
+    # افتراضيّ: زرّ «تخزين» يُفعَّل بعد التعبئة (جاهز للحفظ) ويتأكّد إباهته بعد الضغط (المسار السعيد §11.3).
+    screen.wait_store_enabled.return_value = True
     screen.wait_store_confirmed.return_value = True
     return screen
 
@@ -1238,28 +1238,30 @@ def test_poll_until_times_out():
 
 
 @pytest.mark.asyncio
-async def test_store_ready_checked_before_filling_and_pressing(tmp_path):
-    """قبل الإدخال: wait_store_ready يُستدعى **قبل** أيّ fill وقبل press_store (لا إدخال فوق فورم غير جاهز)."""
+async def test_store_enabled_checked_after_fill_before_press(tmp_path):
+    """🔴 إصلاح deadlock X910: فحص تفعيل «تخزين» يقع **بعد** التعبئة (fill) و**قبل** press_store —
+    لا قبل الإدخال (زرّ الشراء باهت حتى تُملأ الحقول). الترتيب: fill → wait_store_enabled → press."""
     screen = make_screen()
     writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
     await writer.write(make_job(make_sell_leg()), commit=True)
     names = [c[0] for c in screen.method_calls]
-    assert "wait_store_ready" in names
-    assert names.index("wait_store_ready") < names.index("fill")
-    assert names.index("wait_store_ready") < names.index("press_store")
+    assert "wait_store_enabled" in names
+    assert names.index("fill") < names.index("wait_store_enabled")          # بعد الإدخال لا قبله
+    assert names.index("wait_store_enabled") < names.index("press_store")   # قبل الضغط
 
 
 @pytest.mark.asyncio
-async def test_store_not_ready_escalates_without_input(tmp_path):
-    """الزرّ لم يصبح جاهزًا (باهت خلال المهلة) → لا إدخال ولا تخزين، إغلاق آمن + تصعيد للمراجعة."""
+async def test_store_button_stays_disabled_after_fill_escalates(tmp_path):
+    """الحقول مُلئت لكن «تخزين» بقي باهتًا (إدخال ناقص/غير مقبول) → لا ضغط، إغلاق آمن + تصعيد.
+    التعبئة **تحدث** (بخلاف السابق): الحارس بعد التعبئة لا قبلها."""
     screen = make_screen()
-    screen.wait_store_ready.return_value = False
+    screen.wait_store_enabled.return_value = False
     writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
     result = await writer.write(make_job(make_sell_leg()), commit=True)
     assert result.ok is False and result.needs_review is True
-    assert "تخزين" in result.error and "جاهز" in result.error
-    screen.fill.assert_not_called()                 # لا إدخال بيانات
-    screen.press_store.assert_not_called()          # لا تخزين
+    assert "تخزين" in result.error and "يُفعَّل" in result.error
+    screen.fill.assert_called()                     # الإدخال حدث (ثم فشل تفعيل الزرّ)
+    screen.press_store.assert_not_called()          # لا ضغط بلا تفعيل
     screen.press_stop.assert_called()               # إغلاق آمن
 
 
