@@ -125,15 +125,10 @@ class MoneyadoWriter(Writer):
             if unexpected:
                 return self._unexpected(screen, op, job, unexpected)
 
-            # (3.5) 🔴 قاعدة صارمة (§11.3): لا نُدخِل بيانات قبل جاهزية «تخزين». الزرّ باهت لحظة فتح
-            #       الفورم ثم يُفعَّل عند الجاهزية (أُثبِت حيًّا) — ننتظر تفعيله؛ إن بقي باهتًا خلال
-            #       المهلة فالفورم لم يُهيَّأ (شاشة سابقة لم تكتمل) → لا إدخال، إغلاق آمن + تصعيد.
-            if not screen.wait_store_ready(op, self._STORE_READY_TIMEOUT, self._STORE_POLL_INTERVAL):
-                log.error("زر «تخزين» لم يُفعَّل خلال %ss (الفورم غير جاهز) — لا إدخال (job=%s).",
-                          self._STORE_READY_TIMEOUT, job.job_id)
-                self._try_stop(screen, op)
-                return WriteResult(ok=False, needs_review=True,
-                                   error="زر «تخزين» لم يصبح جاهزًا (الفورم لم يُهيَّأ للإدخال) — لم تُدخَل بيانات")
+            # (3.5) 🔴 جاهزية الفورم للإدخال مضمونة بحارس عدد الحقول في _bind_form (~21 خانة §0) — فلا
+            #       ننتظر تفعيل «تخزين» **قبل** الإدخال: زرّ شاشة الشراء يبقى باهتًا (disabled) حتى تُملأ
+            #       الحقول (بخلاف البيع)، فانتظاره قبل الإدخال كان يُحدث deadlock (م: X910 22:00). فحصُ
+            #       تفعيل الزرّ نُقِل إلى **بعد التعبئة وقبل الضغط** (أدناه) = «جاهز للحفظ».
 
             # (4) التعبئة بالترتيب مع فحص النافذة الطارئة بعد كل خطوة
             for field_op in ops:
@@ -197,6 +192,15 @@ class MoneyadoWriter(Writer):
             do_store = commit   # dry_run=False مؤكّد هنا → التخزين يحكمه Kill Switch وحده
 
             if do_store:
+                # (0.5) 🔴 قاعدة صارمة (§11.3): بعد التعبئة وقبل الضغط — «تخزين» يجب أن يكون **مفعَّلًا**
+                #       (الحقول اكتملت فقَبِل البرنامجُ الإدخال). إن بقي باهتًا خلال المهلة فالإدخال
+                #       ناقص/غير مقبول → **لا نضغط**: إغلاق آمن + تصعيد (لا حفظ ناقص، لا شاشة معلّقة).
+                if not screen.wait_store_enabled(op, self._STORE_READY_TIMEOUT, self._STORE_POLL_INTERVAL):
+                    log.error("زر «تخزين» لم يُفعَّل بعد التعبئة خلال %ss (إدخال ناقص/غير مقبول) — لا ضغط (job=%s).",
+                              self._STORE_READY_TIMEOUT, job.job_id)
+                    self._try_stop(screen, op)
+                    return WriteResult(ok=False, needs_review=True,
+                                       error="زر «تخزين» لم يُفعَّل بعد التعبئة — إدخال ناقص/غير مقبول (لم يُحفَظ)")
                 screen.press_store(op)
                 # (1) مهلة قصيرة لظهور رسالة التأكيد/نافذة طارئة، ثم فحص النافذة الطارئة **قبل**
                 #     تأكيدها بـ Enter (رصيد غير كافٍ/خطأ) — لو ظهرت → إغلاق آمن + تصعيد (RuntimeError).

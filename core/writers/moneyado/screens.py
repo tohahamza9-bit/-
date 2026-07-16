@@ -181,9 +181,11 @@ class ScreenController(ABC):
         VB6 يضبط WS_DISABLED)، None إن لم يُوجد الزرّ (فورم مُغلق/غير جاهز §11.3). المصدر is_enabled
         (= IsWindowEnabled؛ أُثبِت حيًّا أنّه يعكس الإباهت تمامًا — لا حاجة لفحص بكسل)."""
 
-    def wait_store_ready(self, operation: OperationType, timeout: float, interval: float) -> bool:
-        """ينتظر تفعيل «تخزين» (الفورم جاهز للإدخال). الزرّ باهت لحظة فتح الفورم ثم يُفعَّل عند
-        الجاهزية (أُثبِت حيًّا) — فلا نُدخِل بيانات قبل ذلك. يُرجع False إن لم يُفعَّل خلال المهلة."""
+    def wait_store_enabled(self, operation: OperationType, timeout: float, interval: float) -> bool:
+        """ينتظر **تفعيل** زرّ «تخزين» = «جاهز للحفظ». 🔴 يُستدعى **بعد التعبئة** لا قبلها: شاشة
+        الشراء تُبقي الزرّ باهتًا (disabled) حتى تُملأ الحقول (بخلاف البيع الذي يُفعَّل فارغًا) —
+        فانتظاره قبل الإدخال يُحدث deadlock (م: X910). تفعيلُه بعد التعبئة = قَبِل البرنامجُ الإدخالَ.
+        يُرجع False إن بقي باهتًا خلال المهلة (إدخال ناقص/غير مقبول)."""
         return _poll_until(lambda: self.store_button_enabled(operation) is True, timeout, interval)
 
     def wait_store_confirmed(self, operation: OperationType, timeout: float, interval: float) -> bool:
