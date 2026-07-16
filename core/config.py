@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     moneyado_open_retry_wait: float = Field(default=6.0)   # انتظار ظهور الفورم بعد كل ضغطة قبل إعادة الضغط
     moneyado_open_click_retries: int = Field(default=3)    # إعادة ضغط زر القائمة إن ابتُلع النقر (نقر VB6 مبتلَع)
     moneyado_dry_run_wait: float = Field(default=3.0)      # DRY_RUN: مهلة معاينة بصرية (الشاشة مفتوحة) قبل ✅
+    # ── تأكيد التخزين بحالة زرّ «تخزين» (§11.3) — VB6 يعطّل الزرّ (WS_DISABLED) بعد الحفظ الناجح ──
+    moneyado_store_ready_timeout: float = Field(default=8.0)    # انتظار تفعيل «تخزين» (الفورم جاهز) قبل الإدخال
+    moneyado_store_confirm_timeout: float = Field(default=10.0) # انتظار إباهت «تخزين» بعد الضغط = تأكيد الحفظ
+    moneyado_store_poll_interval: float = Field(default=0.25)   # فترة سبر حالة الزرّ (تُصفَّر في الاختبار)
 
     # ── مصادقة لوحة التحكّم (§14.3 SEC-001) — جلسات خادم + قفل تخمين ──
     session_ttl_hours: int = Field(default=12)          # عمر الجلسة المطلق (٨–١٢ ساعة)
