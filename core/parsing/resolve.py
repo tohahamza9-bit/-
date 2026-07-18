@@ -208,3 +208,33 @@ def resolve_supplier(token: Optional[str], suppliers: list[SupplierRecord]) -> O
             return s
     # (٣-٥) مطابقة تقريبية
     return _loose_match(token, suppliers)
+
+
+def resolve_bold(token: Optional[str], records: list, threshold: int = 70):
+    """(الحل الجريء §5، قرار المالك) أفضل مرشّح تقريبيّ للاسم بعد **فشل الحل الصارم** — عتبة منخفضة
+    (WRatio ≥ threshold، افتراضي ٧٠) على **الجزء المميِّز** وحده (بعد التطبيع وتجريد العامّ شركة/مكتب/…).
+    يُرجِع (record, score) لأعلى مرشّح فوق العتبة، أو (None, 0).
+
+    🔴 الخطّان الأحمران (حماية القن، بلا كلفة):
+      • تُستدعى على **قوائم الخزائن/الموردين فقط** — أسماء العملاء ليست مرشّحات إطلاقًا (المُستدعي يمرّر
+        القائمة الصحيحة).
+      • **الكلمة العامّة وحدها لا تصنع مطابقة**: إن كان الجزء المميِّز بعد التجريد < ٣ أحرف → (None, 0)."""
+    if fuzz is None:
+        return None, 0
+    qn = normalize_arabic_for_matching(token)
+    if not qn:
+        return None, 0
+    q_core = _strip_generic(qn)
+    if len(q_core) < _MATCH_MIN_LEN:          # عامّ وحده / أقصر من ٣ → لا تخمين (§0 القن)
+        return None, 0
+    best_rec, best_score = None, 0.0
+    for r in records:
+        for c in _match_forms(r):
+            c_core = _strip_generic(c)
+            if len(c_core) >= _MATCH_MIN_LEN:
+                s = fuzz.WRatio(q_core, c_core)
+                if s > best_score:
+                    best_rec, best_score = r, s
+    if best_rec is not None and best_score >= threshold:
+        return best_rec, int(best_score)
+    return None, 0

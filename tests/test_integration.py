@@ -1247,55 +1247,53 @@ async def test_no_price_rooms_configured_is_noop(db):
 # ─────────────────────────────────────────────────────────────────────────────
 # فحص تكرار المرجع (DetectionConfig.duplicate_reference_window_minutes) — قراءة فقط
 # ─────────────────────────────────────────────────────────────────────────────
-async def _seed_completed_deal(db, ref, when, status=None):
+async def _seed_content_deal(db, ref, phone, amount, code, status=None):
     from core.constants import Status
+    from core.db import utcnow
     await db.deals.col.insert_one({
-        "deal_id": f"D-{ref}", "status": (status or Status.COMPLETED.value),
-        "updated_at": when, "sell_leg": {"reference_number": ref}})
+        "deal_id": f"D-{ref}-{code}", "status": (status or Status.COMPLETED.value),
+        "created_at": utcnow(), "updated_at": utcnow(), "chat_jid": CENTRAL,
+        "sell_leg": {"operation": "sell", "reference_number": ref, "phone": phone,
+                     "amount": amount, "customer_code": code}})
 
 
-async def test_is_duplicate_reference_detects_recent_processed(db):
+async def test_dedup_same_content_is_duplicate(db):
+    """(§9، X1243) نفس المرجع + نفس الجوهر (هاتف/مبلغ/كود) — مهما طال الوقت → 'duplicate'."""
+    from core.constants import OperationType
     from core.db import utcnow
-    from core.models import DetectionConfig
-    await db.detection.set(DetectionConfig(duplicate_reference_window_minutes=5))
-    now = utcnow()
-    await _seed_completed_deal(db, "SI9999", now)
+    from core.models import ParsedLeg
+    await _seed_content_deal(db, "SI9999", "01024383998", 3000.0, "1208")
     pipe = _make_pipeline(db)
-    assert await pipe._is_duplicate_reference("SI9999", now) is True     # نفس المرجع، مكتملة، حديثًا
-    assert await pipe._is_duplicate_reference("SI0000", now) is False    # مرجع آخر
-    assert await pipe._is_duplicate_reference(None, now) is False        # بلا مرجع
+    inc = ParsedLeg(operation=OperationType.SELL, reference_number="SI9999",
+                    phone="01024383998", amount=3000.0, customer_code="1208")
+    assert await pipe._reference_reuse_action(inc, utcnow()) == "duplicate"
+    inc2 = ParsedLeg(operation=OperationType.SELL, reference_number="OTHER", amount=1.0)
+    assert await pipe._reference_reuse_action(inc2, utcnow()) == "new"        # مرجع آخر
 
 
-async def test_is_duplicate_reference_ignores_waiting_second_leg(db):
-    """صفقة تنتظر طرفًا ثانيًا بنفس المرجع لا تُحجَب (الطرف الثاني الشرعيّ يمرّ)."""
-    from core.constants import Status
+async def test_dedup_different_content_is_reused(db):
+    """(§9، X1242) نفس المرجع + جوهر مختلف → 'reused' (صفقة جديدة + تنبيه، لا تجاهل)."""
+    from core.constants import OperationType
     from core.db import utcnow
-    from core.models import DetectionConfig
-    await db.detection.set(DetectionConfig(duplicate_reference_window_minutes=5))
-    now = utcnow()
-    await _seed_completed_deal(db, "A100", now, status=Status.WAITING_SECOND_LEG.value)
+    from core.models import ParsedLeg
+    await _seed_content_deal(db, "X1242", "01000000001", 500.0, "100")
     pipe = _make_pipeline(db)
-    assert await pipe._is_duplicate_reference("A100", now) is False
+    inc = ParsedLeg(operation=OperationType.SELL, reference_number="X1242",
+                    phone="01099999999", amount=40000.0, customer_code="826")
+    assert await pipe._reference_reuse_action(inc, utcnow()) == "reused"
 
 
-async def test_is_duplicate_reference_zero_window_disables(db):
+async def test_dedup_ignores_waiting_and_cancelled(db):
+    """صفقة WAITING (طرف ثانٍ شرعيّ) أو CANCELLED (أُلغيت) بنفس المرجع لا تُحسَب سابقةً → 'new'."""
+    from core.constants import OperationType, Status
     from core.db import utcnow
-    from core.models import DetectionConfig
-    await db.detection.set(DetectionConfig(duplicate_reference_window_minutes=0))
-    now = utcnow()
-    await _seed_completed_deal(db, "SI9999", now)
+    from core.models import ParsedLeg
+    await _seed_content_deal(db, "A100", "01011", 100.0, "1", status=Status.WAITING_SECOND_LEG.value)
+    await _seed_content_deal(db, "A100", "01011", 100.0, "1", status=Status.CANCELLED.value)
     pipe = _make_pipeline(db)
-    assert await pipe._is_duplicate_reference("SI9999", now) is False    # 0 = معطّل كليًّا
-
-
-async def test_is_duplicate_reference_outside_window(db):
-    from core.db import utcnow
-    from core.models import DetectionConfig
-    await db.detection.set(DetectionConfig(duplicate_reference_window_minutes=5))
-    now = utcnow()
-    await _seed_completed_deal(db, "SI9999", now - timedelta(minutes=10))  # أقدم من النافذة
-    pipe = _make_pipeline(db)
-    assert await pipe._is_duplicate_reference("SI9999", now) is False
+    inc = ParsedLeg(operation=OperationType.SELL, reference_number="A100",
+                    phone="01011", amount=100.0, customer_code="1")
+    assert await pipe._reference_reuse_action(inc, utcnow()) == "new"
 
 
 async def test_duplicate_reference_default_window_is_five(db):

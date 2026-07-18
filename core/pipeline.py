@@ -57,7 +57,7 @@ from .parsing import (
 from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
 from .parsing.parser import _has_reference
-from .parsing.resolve import resolve_treasury
+from .parsing.resolve import resolve_bold, resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
 from .queue.service import (
     QueueService,
@@ -124,6 +124,38 @@ class Pipeline:
         self._last_gate_alert: Optional[datetime] = None
         # (البند 5) خنق الرسائل الإلزامية لكل مرجع: كامل مرّتين ثم مختصرة (ممنوع صفر). ذاكرة حيّة.
         self._alert_counts: dict[str, int] = {}
+        # (الجزء 1، قرار المالك) عتبة الحل الجريء للأسماء (WRatio بعد التطبيع) — منخفضة عمدًا.
+        self._AUTO_RESOLVE_THRESHOLD = 70
+
+    async def _auto_resolve_treasury(self, leg: Optional[ParsedLeg], raw: RawMessage,
+                                     treasuries: list) -> None:
+        """(الجزء 1، قرار المالك) خزينةٌ لم تُحلّ بالمطابقة الصارمة → **حلّ جريء** (WRatio ≥ ٧٠ بعد
+        التطبيع) على قائمة الخزائن وحدها: يأخذ أفضل مرشّح، يطبّقه، يُنزّل الحوالة فورًا، ويُنبّه المسؤول
+        + يسجّل في الصفقة (deviation_log) + يتعلّم alias (نفس الغلطة تُحلّ صارمًا لاحقًا). لا مرشّح فوق
+        العتبة → يبقى unresolved (يُلتقط مجهولًا ويُصعَّد). الخطّان الأحمران داخل resolve_bold."""
+        if leg is None or not leg.unresolved_treasury:
+            return
+        original = leg.unresolved_treasury
+        rec, score = resolve_bold(original, treasuries, threshold=self._AUTO_RESOLVE_THRESHOLD)
+        if rec is None:
+            return                              # لا مرشّح ≥ العتبة → لا تخمين (يُصعَّد لاحقًا)
+        from .models import TreasuryRef
+        from .parsing.normalize import normalize_ar
+        leg.treasury = TreasuryRef(code=rec.code, name=rec.name, type=rec.type, currency=rec.currency)
+        if leg.currency is None:
+            leg.currency = rec.currency
+        leg.unresolved_treasury = None
+        leg.deviation_log.append({"field": "treasury", "raw_value": original,
+                                  "extracted_value": rec.name, "method": "similarity",
+                                  "confidence": score})
+        ref = leg.reference_number or "؟"
+        await self.bus.notify_admin(
+            f"⚠️ {ref} نُزّلت — تشابه اسم خزينة: «{original}» ← «{rec.name}» (score {score}). "
+            f"للتراجع: احذف الإملاء المتعلَّم من الداشبورد.", raw.message_key)
+        learned = normalize_ar(original)
+        if learned and learned != normalize_ar(rec.name):
+            await self.db.treasuries.add_alias(rec.name, learned)   # source=auto (حيّ فورًا)
+        log.info("(الجزء 1) حلّ خزينة جريء: «%s» ← «%s» (%d) — نُزّلت وتُعلّم", original, rec.name, score)
 
     async def _mandatory_alert(self, deal: Deal, detail: str, reply_key: Optional[str]) -> None:
         """(البند 5) رسالة سبب **إلزامية** للمُرسِل مع كل ⚠️/🔴/❌ — مربوطةٌ بمرجع الصفقة، is_alert=True
@@ -456,6 +488,10 @@ class Pipeline:
             )
             return None
 
+        # 🔴 (الجزء 1، قرار المالك) حلّ الاسم الجريء: خزينة لم تُحلّ بالصارم → أفضل مرشّح ≥٧٠ + تنزيل
+        #    فوريّ + تنبيه المسؤول + تعلّم — **قبل** الربط/التصنيف كي تُعامَل الحوالة محلولةً لا مجهولة.
+        await self._auto_resolve_treasury(result.leg, raw, treasuries)
+
         # ═══ ربط الرسالة الثانية — حتميّ بطبقتين (§7.3، بلا قرب/تجاور/تصعيد) ═══
         # الطبقة ١ (مرجع صريح): الرسالة تحمل ref يطابق صفقة منتظِرة → تُربَط به مباشرة (الشكل الجديد،
         #   المرجع مكرّر في الرسالتين). الطبقة ٢ (FIFO): بلا ref → أقدم صفقة منتظِرة لنفس المُرسِل (أول
@@ -615,13 +651,26 @@ class Pipeline:
         if second is not None:
             return second   # المعالجة مؤجَّلة لفرز الدفعة بـ first_received_at (§7.3)
 
-        # 🔴 تكرار المرجع (إعادة إرسال): رسالة تُنشئ صفقة جديدة بمرجع لصفقة **غير منتظِرة طرفًا ثانيًا**
-        #    عولِجت خلال النافذة (DetectionConfig) = تكرار → تُتجاهَل no-op (بلا حوالة/تنبيه). الرسائل
-        #    الثانية (تكمّل صفقة منتظِرة) مرّت وعادت أعلاه فلا تتأثّر. لا يمسّ المطابقة/الكتابة/الإلغاء/التعديل.
-        if await self._is_duplicate_reference(leg.reference_number, now):
-            log.info("مرجع مكرّر خلال النافذة — تجاهل (no-op): %s ref=%s",
+        # 🔴 dedup **بالمحتوى** (§9، الجزء 2): بلا نافذة زمنيّة. نفس المرجع + نفس الجوهر (هاتف/مبلغ/كود)
+        #    = إعادة إرسال حقيقيّة → تجاهل **مع ريأكشن** (لا صمت) — يسدّ X1243 (نزلت مرّتين بفارق 10د).
+        #    نفس المرجع + جوهر مختلف = المُرسِل أعاد استخدام المرجع → صفقة جديدة تُعالَج + تنبيه المسؤول —
+        #    يسدّ X1242 (تجاهل تامّ لحوالة ٤٠ ألف). الرسائل الثانية (WAITING) مرّت أعلاه فلا تتأثّر.
+        _reuse = await self._reference_reuse_action(leg, now)
+        if _reuse == "duplicate":
+            log.info("تكرار حقيقيّ (نفس المرجع+الجوهر) — تجاهل + ريأكشن: %s ref=%s",
                      raw.message_key, leg.reference_number)
+            if raw.chat_jid == self.bus.central_jid:
+                await self.bus.mark_central(raw.message_key, "🔁")   # ريأكشن لا صمت (§9)
+                await self.bus.flush_reactions()
             return None
+        if _reuse == "reused":
+            log.warning("مرجع %s مُعاد استخدامه بمحتوى مختلف — صفقة جديدة + تنبيه (X1242): %s",
+                        leg.reference_number, raw.message_key)
+            await self.bus.notify_admin(
+                f"⚠️ المرجع {leg.reference_number} مُستخدَم سابقًا بمحتوى مختلف — عُولِجت كحوالة "
+                f"جديدة (لا تجاهل): {(raw.text or '').strip()[:60]}",
+                raw.message_key, forward_key=raw.message_key)
+            # يسقط للتجميع العادي (صفقة جديدة)
 
         # التجميع (§7.3): صفقة جديدة أو دمج طرف ثانٍ
         deal = await self.queue.try_group(leg, now, chat_jid=raw.chat_jid)
@@ -636,26 +685,39 @@ class Pipeline:
             )
         return deal
 
-    async def _is_duplicate_reference(self, reference: Optional[str], now: datetime) -> bool:
-        """تكرار المرجع (DetectionConfig.duplicate_reference_window_minutes، دقائق؛ 0 = معطّل).
+    @staticmethod
+    def _digits(s: Optional[str]) -> str:
+        return "".join(c for c in (s or "") if c.isdigit())
 
-        True إن وُجدت صفقة **غير منتظِرة طرفًا ثانيًا** (WAITING_SECOND_LEG مستثناة) بنفس reference
-        عولِجت (updated_at) خلال النافذة — أي أنّ الرسالة الحاليّة إعادة إرسال. الاستثناء يمنع حجب
-        طرفٍ ثانٍ شرعيّ. **قراءة فقط** — لا يكتب حالة ولا يمسّ matching/writer/cancellation/amendment."""
-        if not reference:
+    @classmethod
+    def _same_essential_content(cls, a: Optional[ParsedLeg], b: Optional[ParsedLeg]) -> bool:
+        """جوهر متطابق (§9 dedup بالمحتوى): الهاتف (آخر ٩ أرقام، تجاهل مفتاح الدولة) + المبلغ (مقرَّب)
+        + كود الزبون. تطابقُها = نفس الحوالة (إعادة إرسال حقيقيّة)."""
+        if a is None or b is None:
             return False
-        cfg = await self.db.detection.get()
-        win = getattr(cfg, "duplicate_reference_window_minutes", 0) or 0
-        if win <= 0:
-            return False
-        horizon = _as_naive_utc(now) - timedelta(minutes=win)
-        doc = await self.db.deals.col.find_one({
-            "status": {"$ne": Status.WAITING_SECOND_LEG.value},
-            "updated_at": {"$gte": horizon},
-            "$or": [{"sell_leg.reference_number": reference},
-                    {"buy_leg.reference_number": reference}],
-        })
-        return doc is not None
+        ph_a, ph_b = cls._digits(a.phone)[-9:], cls._digits(b.phone)[-9:]
+        amt_a = round(a.amount) if a.amount is not None else None
+        amt_b = round(b.amount) if b.amount is not None else None
+        code_a, code_b = (a.customer_code or "").strip(), (b.customer_code or "").strip()
+        return ph_a == ph_b and amt_a == amt_b and code_a == code_b
+
+    async def _reference_reuse_action(self, leg: Optional[ParsedLeg], now: datetime) -> str:
+        """(§9 dedup بالمحتوى، **بلا نافذة زمنيّة**) قرار المرجع المُعاد:
+          • 'duplicate' — صفقة سابقة بنفس المرجع و**نفس الجوهر** (هاتف/مبلغ/كود) → إعادة إرسال حقيقيّة.
+          • 'reused'    — صفقة سابقة بنفس المرجع لكن **جوهر مختلف** → المُرسِل أعاد استخدام المرجع.
+          • 'new'       — لا صفقة سابقة بالمرجع (تُستثنى WAITING الشرعيّة والملغاة CANCELLED).
+        **قراءة فقط** — لا يمسّ المطابقة/الكتابة/الإلغاء/التعديل."""
+        ref = leg.reference_number if leg is not None else None
+        if not ref:
+            return "new"
+        doc = await self.db.deals.col.find_one(
+            {"status": {"$nin": [Status.WAITING_SECOND_LEG.value, Status.CANCELLED.value]},
+             "$or": [{"sell_leg.reference_number": ref}, {"buy_leg.reference_number": ref}]},
+            sort=[("updated_at", -1)])
+        if doc is None:
+            return "new"
+        prior = Deal(**doc)
+        return "duplicate" if self._same_essential_content(leg, prior.sell_leg or prior.buy_leg) else "reused"
 
     async def _phase_a_alerts(self, leg: ParsedLeg, raw: RawMessage) -> None:
         """مرحلة أ (best-effort، **لا يمسّ** الربط/المطابقة/الكتابة): تنبيهات القيمة المالية أولوية.
