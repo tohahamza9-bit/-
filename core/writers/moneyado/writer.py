@@ -86,6 +86,15 @@ class MoneyadoWriter(Writer):
             self._screen = MoneyadoScreen.from_settings(self.settings)
         return self._screen
 
+    def moneyado_ready(self) -> tuple[bool, str]:
+        """جاهزية MONEYADO للكتابة (§11.3) — للبوابة قبل سحب الطابور: (جاهز, السبب). لا يتصل بالتطبيق،
+        فقط يفحص وجود نسخة مرئية واحدة (يعيد استخدام _visible_stock_pids)."""
+        try:
+            return self._get_screen().moneyado_readiness()
+        except Exception as exc:                        # fail-open — لا نحجب على خطأ فحص
+            log.warning("تعذّر فحص جاهزية MONEYADO (%s) — يُعامَل جاهزًا.", exc)
+            return True, ""
+
     async def write(self, job: WriteJob, *, commit: bool) -> WriteResult:
         # pywinauto متزامن → خيط منفصل حتى لا نحجب حلقة asyncio
         return await asyncio.to_thread(self._write_sync, job, commit)

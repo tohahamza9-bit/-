@@ -176,6 +176,12 @@ class ScreenController(ABC):
         """يحفظ لقطة شاشة للنافذة (dead-letter §11.3)."""
 
     @abstractmethod
+    def moneyado_readiness(self) -> tuple[bool, str]:
+        """جاهزية MONEYADO للكتابة (بلا رمي): يُرجِع (جاهز, السبب). جاهز = **نسخة stock.exe مرئية
+        واحدة بالضبط**. غير جاهز: لا نسخة عاملة / لا نافذة مرئية (مغلق/مصغّر) / أكثر من نسخة مرئية
+        (نسختان = التباس). للبوابة الدوريّة قبل سحب الكتابة (§11.3)."""
+
+    @abstractmethod
     def store_button_enabled(self, operation: OperationType) -> Optional[bool]:
         """حالة زرّ «تخزين»: True مفعَّل (الفورم جاهز للإدخال)، False باهت/معطَّل (بعد حفظ ناجح —
         VB6 يضبط WS_DISABLED)، None إن لم يُوجد الزرّ (فورم مُغلق/غير جاهز §11.3). المصدر is_enabled
@@ -346,6 +352,28 @@ class MoneyadoScreen(ScreenController):
             except Exception:                 # نافذة تلاشت/تعذّر فحصها — تخطٍّ آمن
                 continue
         return visible
+
+    def moneyado_readiness(self) -> tuple[bool, str]:
+        """جاهزية MONEYADO (بلا اتصال/رمي) — للبوابة (§11.3): نسخة مرئية واحدة بالضبط = جاهز.
+        يعيد استخدام _list_stock_pids + _visible_stock_pids (نفس منطق _connect_app). fail-open عند
+        تعذّر الفحص (لا نحجب الكتابة على خطأ فحص عابر — الكتابة نفسها تحرس بغير-مرئي §0)."""
+        if not _PYWINAUTO_AVAILABLE:
+            return True, ""
+        try:
+            screen = self._screen(OperationType.SELL)   # اسم العملية للـprocess_name فقط (واحد للشاشتين)
+            process_name = screen.get("process_name", self._DEFAULT_PROCESS)
+            pids = self._list_stock_pids(process_name)
+            if not pids:
+                return False, "MONEYADO غير مشغّل (لا نسخة عاملة)"
+            visible = self._visible_stock_pids(process_name, pids)
+            if not visible:
+                return False, "MONEYADO مغلق/مصغّر (لا نافذة مرئية)"
+            if len(visible) > 1:
+                return False, f"نسختان مرئيتان من MONEYADO ({len(visible)}) — التباس"
+            return True, ""
+        except Exception as exc:                        # فحص متعذّر → جاهز (fail-open)
+            log.warning("فحص جاهزية MONEYADO تعذّر (%s) — يُعامَل جاهزًا (fail-open).", exc)
+            return True, ""
 
     def _connect_app(self, operation: OperationType, *, pid: Optional[int] = None) -> None:
         """يتصل بعملية MONEYADO (بلا عنوان — VB6) ويهيّئ self._app. لا يربط فورمًا بعد.

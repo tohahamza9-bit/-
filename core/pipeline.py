@@ -25,6 +25,7 @@ from .amendment import (
     floor_commission,
 )
 from .bus import Bus
+from .config import get_settings
 from .cancellation import (
     build_cancellation_jobs,
     detect_cancellation,
@@ -114,6 +115,13 @@ class Pipeline:
             (customer_room_jids or getattr(self.matcher, "_customer_rooms", []))
             or (treasury_room_jids or getattr(self.matcher, "_treasury_rooms", []))
         )
+        # 🔴 بوابة صحّة MONEYADO (§11.3): توقف سحب الكتابة عند مغلق/مصغّر/نسختين — بدل فشل الحوالات
+        #    واحدة-واحدة صمتًا. الحالة تُحفَظ على الأنبوب (كائن حيّ): علَم الإيقاف + خنق التنبيه.
+        _s = get_settings()
+        self._gate_enabled = getattr(_s, "moneyado_gate_enabled", True)
+        self._gate_throttle = getattr(_s, "moneyado_gate_alert_throttle", 300.0)
+        self._moneyado_paused = False
+        self._last_gate_alert: Optional[datetime] = None
 
     async def _matching_rooms_configured(self) -> bool:
         """
@@ -129,6 +137,58 @@ class Pipeline:
         except Exception as exc:  # T5 — لا نبتلع؛ نسجّل ونرجع للـ seed الآمن
             log.warning("تعذّر قراءة تصنيف الغرف من DB (%s) — استخدام seed env", exc)
         return self._has_rooms_seed
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # بوابة صحّة MONEYADO (§11.3) — إيقاف سحب الكتابة عند مغلق/مصغّر/نسختين + استئناف تلقائيّ
+    # ═════════════════════════════════════════════════════════════════════════
+    def _moneyado_ready(self) -> tuple[bool, str]:
+        """(جاهز, السبب) من الـwriter — fail-open إن لم يدعم الفحص (اختبارات مبسّطة/كاتب آخر)."""
+        fn = getattr(self.writer, "moneyado_ready", None)
+        if fn is None:
+            return True, ""
+        try:
+            return fn()
+        except Exception:                               # فحص متعذّر → جاهز (لا نحجب)
+            return True, ""
+
+    async def _pending_write_count(self) -> int:
+        """عدد الحوالات المنتظِرة للكتابة (لنصّ التنبيه) — PARSED/MATCHING/READY/SELL_DONE."""
+        try:
+            return await self.db.deals.col.count_documents(
+                {"status": {"$in": [Status.PARSED.value, Status.MATCHING.value,
+                                    Status.READY.value, Status.SELL_DONE.value]}})
+        except Exception:
+            return 0
+
+    async def _moneyado_gate(self, now: datetime) -> bool:
+        """البوابة قبل أي كتابة (§11.3). تُرجِع **True = موقوف** (MONEYADO غير جاهز) → لا تُكتب
+        الصفقة وتبقى قابلة للتنفيذ (لا tech_failed)؛ False = جاهز (تُكتب).
+          - غير جاهز + شغل منتظر → تنبيه 🔴 **مخنوق زمنيًّا** (لا لكل حوالة) + رفع علَم الإيقاف.
+          - رجوع الجاهزية بعد إيقاف → رسالة ✅ «رجع — جاري تنزيل N» + خفض العلَم (استئناف تلقائيّ)."""
+        if not self._gate_enabled:
+            return False
+        ready, reason = self._moneyado_ready()
+        if ready:
+            if self._moneyado_paused:                   # كنّا موقوفين → استئناف تلقائيّ + إشعار
+                self._moneyado_paused = False
+                self._last_gate_alert = None
+                n = await self._pending_write_count()
+                await self.bus.notify_admin(
+                    f"✅ MONEYADO رجع — جاري تنزيل {n} حوالة منتظرة (استئناف تلقائيّ).")
+                log.info("بوابة MONEYADO: رجعت الجاهزية — استئناف تلقائيّ (%d منتظرة).", n)
+            return False
+        # غير جاهز → إيقاف. التنبيه مخنوق: أوّل مرّة، ثم كل _gate_throttle ثانية.
+        fire = (self._last_gate_alert is None
+                or (_as_naive_utc(now) - _as_naive_utc(self._last_gate_alert)).total_seconds()
+                >= self._gate_throttle)
+        if fire:
+            n = await self._pending_write_count()
+            await self.bus.notify_admin(
+                f"🔴 {reason} — {n} حوالة منتظرة، الكتابة موقوفة (تُستأنَف تلقائيًّا عند التوفّر).")
+            self._last_gate_alert = now
+            log.warning("بوابة MONEYADO: %s — إيقاف سحب الكتابة (%d منتظرة).", reason, n)
+        self._moneyado_paused = True
+        return True
 
     # ═════════════════════════════════════════════════════════════════════════
     # (1) الالتقاط — §7.1 بند 1: تخزين خام فوري قبل أي معالجة
@@ -681,6 +741,11 @@ class Pipeline:
     # ═════════════════════════════════════════════════════════════════════════
     async def process_deal(self, deal: Deal, now: datetime) -> Deal:
         try:
+            # (0) 🔴 بوابة صحّة MONEYADO (§11.3): مغلق/مصغّر/نسختين → **لا نُعالِج ولا نكتب**؛ الصفقة
+            #     تبقى بحالتها (PARSED/MATCHING) فتُعيد النبضةُ محاولتَها، وتُستأنَف تلقائيًّا عند التوفّر.
+            #     يمنع تحوّلها tech_failed بسبب عدم توفّر التطبيق (بدل الفشل واحدة-واحدة صمتًا).
+            if await self._moneyado_gate(now):
+                return deal
             # (6·SI) حوالة SI معنونة خزينتها مذكورة صراحةً دائمًا — فإن لم تُحلّ (نادر جدًّا:
             # اسم خزينة خارج القوائم/خطأ إملائي) فهي حالة شاذّة تحتاج إنسانًا: تُصعَّد لغرفة
             # المسؤول فورًا بتنبيه واضح (لا HELD صامت، ولا مطابقة غرف بلا خزينة) — §0.
@@ -1130,6 +1195,13 @@ class Pipeline:
             )
             return
 
+        # 🔴 بوابة MONEYADO (§11.3): مغلق/مصغّر/نسختين → لا نكتب القيد العكسيّ (لا فشل صامت). نُخطر
+        #    المُرسِل بإعادة الإرسال عند التوفّر (الإلغاء/التعديل رسالة تحكّم لمرّة — يُعاد إرسالها).
+        if await self._moneyado_gate(now):
+            await self.bus.reply_central(
+                f"🔴 MONEYADO غير جاهز الآن — «{action}» {self._ref(original)} لم يُنفَّذ؛ أعد الإرسال عند التوفّر.",
+                raw.message_key, is_alert=True)
+            return
         # كتابة القيود العكسية (نفس منطق الكتابة/التحقّق)
         await self._write_jobs(original, jobs, now)
         if action == "cancel":
@@ -1373,6 +1445,13 @@ class Pipeline:
 
         # COMPLETED → قيد الفرق في MONEYADO ثم تسجيل السجلّ
         if deal.status == Status.COMPLETED:
+            # 🔴 بوابة MONEYADO (§11.3): مغلق/مصغّر/نسختين → لا نكتب قيد التعديل (لا فشل صامت)؛
+            #    نُخطر المُرسِل بإعادة الإرسال عند التوفّر (التعديل رسالة تحكّم لمرّة).
+            if await self._moneyado_gate(now):
+                await self.bus.reply_central(
+                    f"🔴 MONEYADO غير جاهز الآن — تعديل {ref} لم يُنفَّذ؛ أعد الإرسال عند التوفّر.",
+                    raw.message_key, is_alert=True)
+                return
             # شرط دائم: قيد أصليّ بالدفتر؟ لا → 🔴 «قيد مفقود» (لا تعديل على فراغ) — نظير الإلغاء (§10).
             entries = await self.db.ledger.entries_for_deal(deal.deal_id)
             if not any(not e.is_reversal for e in entries):
