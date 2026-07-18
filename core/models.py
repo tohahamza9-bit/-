@@ -103,6 +103,7 @@ class ParsedLeg(BaseModel):
     is_supplier_counterpart: bool = False      # §5.3: الطرف اسمه مورد (⇒ شراء) لا زبون
     is_si_format: bool = False                 # §3.3: حوالة SI معنونة مكتملة برسالة واحدة (لا تنتظر طرفًا ثانيًا)
     unresolved_treasury: Optional[str] = None  # اسم خزينة SI معنون لم يُحلّ → يُلتقط مجهولًا (db.unknown_terms)
+    unresolved_supplier: Optional[str] = None  # (بند 4) اسم مورّد SI معنون لم يُحلّ صارمًا → حلّ جريء بالأنبوب
     # ── مرحلة أ (لا خسارة صامتة + قيمة مالية أولوية) ──
     phone_confidence: Optional[str] = None     # high (مصري/تونسي/ليبي) / international (كود دولة) / uncertain
     # ── مرحلة ب (استنتاج العملة من السياق) ──
@@ -196,6 +197,10 @@ class WriteResult(BaseModel):
     screenshot_path: Optional[str] = None       # عند النافذة الطارئة (§11.3)
     needs_review: bool = False                   # dead-letter
     dry_run: bool = False                        # DRY_RUN: عُبّئت الشاشة بلا «تخزين»/«خروج» (معاينة بصرية)
+    requeue: bool = False                        # (بند 2) فشل **عابر** قبل ضغط تخزين (توفّر MONEYADO/
+    #                                              فورم غير جاهز) → الحوالة تبقى قابلة للتنفيذ (لا tech_failed)
+    store_unconfirmed: bool = False              # (بند 2 استثناء) انقطاع **بعد** ضغط تخزين وقبل تأكيد
+    #                                              البهتان → غير مؤكّدة التخزين → تصعيد يدويّ (لا إعادة تلقائية)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -54,6 +54,11 @@ def _poll_until(pred, timeout: float, interval: float,
         sleep(max(0.0, interval))
 
 
+class FormNotReadyError(RuntimeError):
+    """(بند 1) بنية الفورم لم تكتمل (رسم ناقص) حتى بعد إغلاقه وفتح جديد — فشلٌ **عابر** يُعيد الحوالة
+    للطابور (لا tech_failed): لا علاقة له باكتمال بيانات الإدخال، بل بجاهزية الشاشة (§11.3)."""
+
+
 def _pids_by_image_name(image_name: str) -> list[int]:
     """قائمة PIDs لكل العمليات التي اسم صورتها image_name (عبر ToolHelp32 — بلا psutil).
 
@@ -271,6 +276,7 @@ class MoneyadoScreen(ScreenController):
         enter_wait: float = 3.0,
         store_press_settle_wait: float = 3.0,
         store_poll_interval: float = 0.25,
+        form_structure_timeout: float = 18.0,
         pid: Optional[int] = None,
     ) -> None:
         self._config = config
@@ -286,6 +292,8 @@ class MoneyadoScreen(ScreenController):
         self._store_press_settle_wait = store_press_settle_wait
         # فترة سبر حالة زرّ «تخزين» (للضغطة الثانية المشروطة §11.3، البند ج).
         self._store_poll_interval = store_poll_interval
+        # (بند 1) مهلة اكتمال بنية الفورم البطيء قبل التعبئة (رسم كامل ~21 حقلًا).
+        self._form_structure_timeout = form_structure_timeout
         # ربط فورم العملية بعد ظهوره (§11.3).
         self._open_timeout = open_timeout
         # فتح الشاشة من القائمة: انتظار ظهور الفورم بعد كل ضغطة، وعدد إعادات الضغط إن ابتُلع
@@ -311,6 +319,7 @@ class MoneyadoScreen(ScreenController):
             enter_wait=getattr(settings, "moneyado_enter_wait", 3.0),
             store_press_settle_wait=getattr(settings, "moneyado_store_press_settle_wait", 3.0),
             store_poll_interval=getattr(settings, "moneyado_store_poll_interval", 0.25),
+            form_structure_timeout=getattr(settings, "moneyado_form_structure_timeout", 18.0),
             pid=getattr(settings, "moneyado_pid", None),
         )
 
@@ -595,6 +604,28 @@ class MoneyadoScreen(ScreenController):
             return ""
         return txt.strip() if isinstance(txt, str) else ""
 
+    def wait_structure_complete(self, operation: OperationType, timeout: float) -> bool:
+        """(بند 1) ينتظر **اكتمال بنية** الفورم: بلوغ عدد حقول النص العددَ المتوقّع (رسم كامل ~21 حقلًا)
+        خلال المهلة. الفورم البطيء يُرسَم تدريجيًّا؛ حارس العدد في _bind_form يقبل عددًا ناقصًا (هامش
+        واسع) فيفشل لاحقًا حقلٌ لم يُرسَم بعد (م: X1238 الحقل 590,230). True عند الاكتمال أو غياب البصمة
+        (fail-open)، False عند انقضاء المهلة والفورم ناقص."""
+        if self._window is None:
+            return True
+        try:
+            expected = self._screen(operation).get("expected_field_count")
+        except Exception:
+            return True
+        if not expected:
+            return True                     # لا بصمة عدد → لا فحص
+        target = int(expected)
+
+        def _complete() -> bool:
+            try:
+                return len(self._window.descendants(class_name="ThunderRT6TextBox")) >= target
+            except Exception:
+                return False
+        return _poll_until(_complete, timeout, max(0.25, self._store_poll_interval))
+
     def _form_is_clean(self, operation: OperationType) -> bool:
         """هل الفورم المربوط **نظيف** (حقول الهوية الحرجة فارغة)؟ فورم فيه بقايا = حوالة سابقة فاشلة
         (البند أ §0): يمنع الكتابة فوقها. تعذّر قراءة حقل لا يُعدّ اتّساخًا (fail-open للقراءة)."""
@@ -680,10 +711,13 @@ class MoneyadoScreen(ScreenController):
         #   وفتح جديد** — ممنوع الكتابة فوق بقايا نهائيًا (م: SI408x «SI4082SI4083»).
         if self._form_open_and_visible(operation):
             self._bind_form(operation, timeout=self._open_timeout)
-            if self._form_is_clean(operation):
-                log.info("فورم «%s» مفتوح ونظيف → استئناف مباشر (بلا ضغط §11.3).", label)
+            # يُستأنَف فقط إن كان **نظيفًا** (البند أ) **ومكتمل البنية** (بند 1): فورم بطيء الرسم ننتظر
+            #   اكتماله؛ إن لم يكتمل خلال المهلة → لا نستأنفه (يفشل حقلٌ لم يُرسَم، م: X1238) بل نُغلق ونفتح.
+            if self._form_is_clean(operation) and self.wait_structure_complete(
+                    operation, self._form_structure_timeout):
+                log.info("فورم «%s» مفتوح نظيف ومكتمل البنية → استئناف مباشر (بلا ضغط §11.3).", label)
                 return True                     # أُعيد استخدام فورم نظيف (قد يحمل خزينة سابقة)
-            log.warning("فورم «%s» مفتوح لكنه غير نظيف (بقايا حوالة) → إغلاق وفتح جديد (البند أ §0).", label)
+            log.warning("فورم «%s» غير نظيف أو ناقص البنية → إغلاق وفتح جديد (البند أ + بند 1).", label)
             self._close_stray_forms()
             self._window = None
             if not self.is_main_screen():      # تعذّر إغلاق الفورم المتّسخ → لا كتابة فوق بقايا
@@ -726,7 +760,25 @@ class MoneyadoScreen(ScreenController):
             raise RuntimeError(
                 f"فورم «{label}» الجديد ليس فارغًا (بقايا غير متوقّعة) — لا كتابة فوق بقايا (البند أ §0)."
             )
-        return False                            # فورم جديد فارغ (لا خزينة سابقة تحتاج تحقّقًا)
+        # (بند 1) اكتمال البنية: ننتظر رسم كل الحقول. ناقص → إغلاق وإعادة فتح **مرّة**؛ ما زال ناقصًا →
+        #   FormNotReadyError (فشل عابر → الحوالة تعود للطابور، لا tech_failed لأسباب جاهزية الفورم).
+        if not self.wait_structure_complete(operation, self._form_structure_timeout):
+            log.warning("فورم «%s» الجديد ناقص البنية → إغلاق وإعادة فتح (بند 1).", label)
+            self._close_stray_forms()
+            self._window = None
+            for attempt in range(1, self._open_click_retries + 1):
+                if self._form_open_and_visible(operation):
+                    break
+                self.click_button(label)
+                if self._wait_form_open(operation):
+                    break
+            self._bind_form(operation, timeout=self._open_timeout)
+            if not self.wait_structure_complete(operation, self._form_structure_timeout):
+                raise FormNotReadyError(
+                    f"فورم «{label}» لم تكتمل بنيته حتى بعد إعادة الفتح ({self._form_structure_timeout}s) "
+                    "— فشل عابر (بند 1)."
+                )
+        return False                            # فورم جديد فارغ مكتمل البنية (جاهز)
 
     def open_sell_screen(self) -> bool:
         label = self._main_menu_cfg().get("sell_button", self._DEFAULT_SELL_BUTTON)

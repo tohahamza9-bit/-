@@ -157,6 +157,33 @@ class Pipeline:
             await self.db.treasuries.add_alias(rec.name, learned)   # source=auto (حيّ فورًا)
         log.info("(الجزء 1) حلّ خزينة جريء: «%s» ← «%s» (%d) — نُزّلت وتُعلّم", original, rec.name, score)
 
+    async def _auto_resolve_supplier(self, leg: Optional[ParsedLeg], raw: RawMessage,
+                                     suppliers: list) -> None:
+        """(بند 4، متابعة الأولوية 2) مورّدٌ معنون لم يُحلّ صارمًا (`unresolved_supplier`) → **حلّ جريء**
+        (WRatio ≥ ٧٠) نظيرَ الخزينة: يطبّق أفضل مرشّح + تنبيه المسؤول + deviation_log + تعلّم alias.
+        الخطّان الأحمران داخل resolve_bold (الموردون قائمة مستقلّة، والعامّ وحده لا يطابق). «فكهتني»."""
+        if leg is None or not leg.unresolved_supplier:
+            return
+        original = leg.unresolved_supplier
+        rec, score = resolve_bold(original, suppliers, threshold=self._AUTO_RESOLVE_THRESHOLD)
+        if rec is None:
+            return
+        from .models import SupplierRef
+        from .parsing.normalize import normalize_ar
+        leg.supplier = SupplierRef(code=rec.code, name=rec.name)
+        leg.unresolved_supplier = None
+        leg.deviation_log.append({"field": "supplier", "raw_value": original,
+                                  "extracted_value": rec.name, "method": "similarity",
+                                  "confidence": score})
+        ref = leg.reference_number or "؟"
+        await self.bus.notify_admin(
+            f"⚠️ {ref} نُزّلت — تشابه اسم مورّد: «{original}» ← «{rec.name}» (score {score}). "
+            f"للتراجع: احذف الإملاء المتعلَّم من الداشبورد.", raw.message_key)
+        learned = normalize_ar(original)
+        if learned and learned != normalize_ar(rec.name):
+            await self.db.suppliers.add_alias(rec.name, learned)
+        log.info("(بند 4) حلّ مورّد جريء: «%s» ← «%s» (%d) — نُزّلت وتُعلّم", original, rec.name, score)
+
     async def _mandatory_alert(self, deal: Deal, detail: str, reply_key: Optional[str]) -> None:
         """(البند 5) رسالة سبب **إلزامية** للمُرسِل مع كل ⚠️/🔴/❌ — مربوطةٌ بمرجع الصفقة، is_alert=True
         (تُعفى من warm-up فلا تُحجب). خنقٌ لكل مرجع: النصّ الكامل أوّل مرّتين، ثم مختصر «(تكرار N)» من
@@ -491,6 +518,7 @@ class Pipeline:
         # 🔴 (الجزء 1، قرار المالك) حلّ الاسم الجريء: خزينة لم تُحلّ بالصارم → أفضل مرشّح ≥٧٠ + تنزيل
         #    فوريّ + تنبيه المسؤول + تعلّم — **قبل** الربط/التصنيف كي تُعامَل الحوالة محلولةً لا مجهولة.
         await self._auto_resolve_treasury(result.leg, raw, treasuries)
+        await self._auto_resolve_supplier(result.leg, raw, suppliers)   # (بند 4) نظير الخزينة للموردين
 
         # ═══ ربط الرسالة الثانية — حتميّ بطبقتين (§7.3، بلا قرب/تجاور/تصعيد) ═══
         # الطبقة ١ (مرجع صريح): الرسالة تحمل ref يطابق صفقة منتظِرة → تُربَط به مباشرة (الشكل الجديد،
@@ -1122,8 +1150,37 @@ class Pipeline:
             await self.db.outbox.increment_attempt(job.job_id)
 
             if not res.ok:
-                # فشل/شكّ تقني → dead-letter + رسالة للمسؤول + وقف الصفقة (§11.3).
-                # 🔴 فشل تقنيّ: تفاعل 🔴 على المركزية (قرار المستخدم الجديد) + تصعيد للمسؤول.
+                unconfirmed = res.store_unconfirmed
+                # (بند 2) فشل **عابر** قبل الكتابة (توفّر MONEYADO/فورم غير جاهز) → الحوالة تبقى قابلة
+                #   للتنفيذ: PARSED فتُستأنَف تلقائيًّا (البوابة + النبضة، FIFO محفوظ) — **ممنوع tech_failed**.
+                #   شرط الأمان: لا قيد نزل بعد لهذه الصفقة (وإلا إعادتها تُعيد كتابة ما نزل → عاملها غير مؤكّد).
+                if res.requeue:
+                    wrote = await self.db.ledger.entries_for_deal(deal.deal_id)
+                    if not wrote:
+                        deal.status = Status.PARSED
+                        await self.db.deals.set_status(
+                            deal.deal_id, Status.PARSED, hold_reason="فشل عابر — تُستأنَف تلقائيًّا")
+                        await self._mandatory_alert(
+                            deal, f"تعذّرت الكتابة مؤقّتًا ({res.error}) — باقية بالطابور، تُستأنَف "
+                            f"تلقائيًّا عند توفّر MONEYADO.", key)
+                        log.info("(بند 2) فشل عابر — %s تعود PARSED (تُستأنَف): %s", deal.deal_id, res.error)
+                        return deal
+                    unconfirmed = True   # قيد سابق نزل → لا نعيد؛ نعامله غير مؤكّد (تصعيد يدويّ)
+                if unconfirmed:
+                    # (بند 2 استثناء) غير مؤكّد التخزين → تصعيد يدويّ، **لا إعادة تلقائية** (خطر ازدواج).
+                    deal.status = Status.SELL_DONE if job.operation == OperationType.BUY else Status.TECH_FAILED
+                    deal.mark = Mark.FAILED
+                    await self.db.deals.set_status(
+                        deal.deal_id, deal.status, mark=Mark.FAILED.value,
+                        hold_reason="غير مؤكّد التخزين — مراجعة يدويّة (لا إعادة تلقائية)")
+                    await self.matcher.apply_mark(deal, Mark.FAILED)
+                    await self.bus.flush_reactions()
+                    await self.bus.notify_admin(
+                        f"🔴 {self._ref(deal)} — {job.operation.value} **غير مؤكّد التخزين** "
+                        f"({res.error}). راجعه يدويًّا قبل أيّ إعادة (خطر ازدواج).",
+                        key, forward_key=self._deal_key(deal))
+                    return deal
+                # فشل/شكّ تقنيّ **حقيقيّ** غير قابل للإعادة → dead-letter + tech_failed + تصعيد (§11.3).
                 await self.db.dead_letter.add(
                     deal.deal_id, res.error or "فشل كتابة",
                     screenshot_path=res.screenshot_path,
@@ -1277,6 +1334,23 @@ class Pipeline:
                 f"⚠️ «{action}» على حوالة غير معروفة (Reply {raw.reply_to_key}) — مراجعة.",
                 raw.message_key,
             )
+            return
+
+        # (بند 3) إعادة تشغيل يدويّة سهلة (Reply «أعد») لصفقة فاشلة/عالقة — بدل جلسات الفحص. الأمان:
+        #   لا قيد نازل بعد (وإلا الإعادة تُحدث ازدواجًا) → تُرفض وتُطلَب مراجعة يدويّة. لا قيد → PARSED.
+        if action == "rerun":
+            wrote = await self.db.ledger.entries_for_deal(original.deal_id)
+            if wrote:
+                await self.bus.reply_central(
+                    f"⚠️ {self._ref(original)} — لها قيد نازل بالفعل؛ الإعادة قد تُحدث ازدواجًا — "
+                    f"راجعها يدويًّا (لم تُعَد).", raw.message_key, is_alert=True)
+                return
+            await self.db.deals.set_status(
+                original.deal_id, Status.PARSED, hold_reason="إعادة تشغيل يدويّة (§بند 3)")
+            await self.bus.reply_central(
+                f"🔄 {self._ref(original)} — أُعيدت للطابور؛ ستُنفَّذ عند توفّر MONEYADO.",
+                raw.message_key, is_alert=True)
+            log.info("(بند 3) إعادة تشغيل يدويّة: %s (%s) → PARSED", original.deal_id, original.status.value)
             return
 
         # تأكيد «تم» = تجاوز بشري موثوق للمطابقة (§8.1 بند 6) — فقط لصفقة لم تُحسم بعد.

@@ -1099,12 +1099,15 @@ def _build_leg(
     # طرف الشراء لاحقًا (pipeline._maybe_synthesize_buy_leg). لو لم تُذكَر «الخزينة:» صراحةً →
     # خزينة sell_and_buy افتراضيًا (خصم1% عند وجود «بعد الخصم»، وإلا «صافي») ليُخلَّق الطرفان (§6.1).
     supplier_name_si = f.get("supplier_name")
+    unresolved_supplier = None
     if is_si and supplier_name_si:
         srec2 = resolve_supplier(supplier_name_si, suppliers)
         supplier_ref = (
             SupplierRef(code=srec2.code, name=srec2.name) if srec2 is not None
             else SupplierRef(code=f.get("supplier_code"), name=supplier_name_si)
         )
+        if srec2 is None:                        # (بند 4) مورّد معنون لم يُحلّ صارمًا → للحلّ الجريء بالأنبوب
+            unresolved_supplier = supplier_name_si
         if tref is None:                     # بلا «الخزينة:» → خزينة sell_and_buy افتراضية (§6.1)
             default_tname = "خصم 1%" if f.get("amount_after") is not None else "صافي"
             trec_sab = resolve_treasury(default_tname, treasuries)
@@ -1184,6 +1187,7 @@ def _build_leg(
         is_supplier_counterpart=is_supplier,
         is_si_format=is_si,
         unresolved_treasury=unresolved_treasury,
+        unresolved_supplier=unresolved_supplier,
         deviation_log=deviation_log,
     )
     return leg, _confidence(leg, tref, currency)

@@ -20,7 +20,21 @@ from ...logging_setup import get_logger
 from ...models import WriteJob, WriteResult
 from ..base import Writer
 from .fields import ENTER_ONLY, build_buy_fields, build_sell_fields
-from .screens import MoneyadoScreen, ScreenController
+from .screens import FormNotReadyError, MoneyadoScreen, ScreenController
+
+# (بند 2) بصمات الفشل **العابر** (توفّر MONEYADO/جاهزية الفورم): لا علاقة لها ببيانات الإدخال —
+#   الحوالة تبقى قابلة للتنفيذ (requeue) لا tech_failed. تُكتشَف قبل ضغط «تخزين» فقط.
+_TRANSIENT_MARKERS = ("غير مرئي", "غير مشغّل", "ليست القائمة الرئيسية", "فوق فورم مفتوح",
+                      "لم تكتمل بنيته", "لم تفتح بعد", "تعذّر إغلاق", "Invalid window handle",
+                      "invalid window handle", "0, 'SetForegroundWindow'")
+
+
+def _is_transient(exc: Exception) -> bool:
+    """فشل عابر (توفّر MONEYADO/جاهزية الفورم) → requeue لا tech_failed (بند 2)."""
+    if isinstance(exc, FormNotReadyError):
+        return True
+    msg = str(exc)
+    return any(m in msg for m in _TRANSIENT_MARKERS)
 
 log = get_logger(__name__)
 
@@ -103,6 +117,7 @@ class MoneyadoWriter(Writer):
     def _write_sync(self, job: WriteJob, commit: bool) -> WriteResult:
         op = job.operation
         screen = self._get_screen()
+        pressed_store = False   # (بند 2) هل ضُغط «تخزين»؟ بعده: أيّ انقطاع = «غير مؤكّد» (لا إعادة تلقائية)
         try:
             # (1) بناء الخانات بالترتيب (نقيّ، بلا شاشة)
             ops = build_sell_fields(job.leg) if op == OperationType.SELL else build_buy_fields(job.leg)
@@ -218,6 +233,7 @@ class MoneyadoWriter(Writer):
                     self._try_stop(screen, op)
                     return WriteResult(ok=False, needs_review=True,
                                        error="زر «تخزين» لم يُفعَّل بعد التعبئة — إدخال ناقص/غير مقبول (لم يُحفَظ)")
+                pressed_store = True   # (بند 2) من الآن أيّ انقطاع = «غير مؤكّد التخزين» (لا إعادة تلقائية)
                 screen.press_store(op)
                 # (1) مهلة قصيرة لظهور رسالة التأكيد/نافذة طارئة، ثم فحص النافذة الطارئة **قبل**
                 #     تأكيدها بـ Enter (رصيد غير كافٍ/خطأ) — لو ظهرت → إغلاق آمن + تصعيد (RuntimeError).
@@ -233,7 +249,9 @@ class MoneyadoWriter(Writer):
                 if not screen.wait_store_confirmed(op, self._STORE_CONFIRM_TIMEOUT, self._STORE_POLL_INTERVAL):
                     log.error("تخزين %s غير مؤكَّد: زر «تخزين» لم يُعطَّل خلال %ss (job=%s) — توقّف + تصعيد.",
                               op.value, self._STORE_CONFIRM_TIMEOUT, job.job_id)
-                    return WriteResult(ok=False, needs_review=True,
+                    # (بند 2 استثناء) ضُغط «تخزين» ولم يتأكّد البهتان → **غير مؤكّد** → تصعيد يدويّ، **لا
+                    #   إعادة تلقائية** (قد يكون خُزّن فعلًا — إعادته تُحدث ازدواجًا).
+                    return WriteResult(ok=False, needs_review=True, store_unconfirmed=True,
                                        error=f"تخزين لم يتأكد — زر «تخزين» لم يُعطَّل خلال {self._STORE_CONFIRM_TIMEOUT}s")
                 # (2) «رجوع»/Enter على النافذة الرئيسية → إغلاق الشاشة والعودة للقائمة، **مع التحقّق
                 #     من إغلاق الشاشة فعلًا** (confirm_store_on_main يعيد الضغط حتى is_main_screen §11.3).
@@ -250,9 +268,17 @@ class MoneyadoWriter(Writer):
             log.info("تعبئة فقط بلا تخزين ثم STOP آمن %s (job=%s).", op.value, job.job_id)
             return WriteResult(ok=True)
 
-        except Exception as exc:  # لا silent catch (T5) — نسجّل، نوقف بأمان، نصعّد للمراجعة
-            log.exception("فشل تقني أثناء كتابة %s (job=%s): %s", op.value, job.job_id, exc)
+        except Exception as exc:  # لا silent catch (T5) — نسجّل، نوقف بأمان، نصنّف الفشل
+            log.exception("فشل أثناء كتابة %s (job=%s): %s", op.value, job.job_id, exc)
             self._try_stop(screen, op)
+            if pressed_store:
+                # (بند 2 استثناء) انقطاع **بعد** ضغط «تخزين» → غير مؤكّد → تصعيد يدويّ، لا إعادة تلقائية.
+                return WriteResult(ok=False, needs_review=True, store_unconfirmed=True,
+                                   error=f"انقطاع بعد ضغط «تخزين» — غير مؤكّد التخزين: {exc}")
+            if _is_transient(exc):
+                # (بند 2) فشل عابر قبل الضغط (توفّر MONEYADO/فورم غير جاهز) → الحوالة تبقى قابلة للتنفيذ.
+                return WriteResult(ok=False, requeue=True,
+                                   error=f"فشل عابر (توفّر MONEYADO/جاهزية الفورم): {exc}")
             return WriteResult(ok=False, needs_review=True, error=f"فشل تقني: {exc}")
 
     # ── مساعدات صمّام الأمان ────────────────────────────────────────────────────

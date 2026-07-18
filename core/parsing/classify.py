@@ -10,6 +10,7 @@ from core.constants import (
     CANCEL_KEYWORDS,
     CONFIRM_KEYWORDS,
     EDIT_KEYWORDS,
+    RERUN_KEYWORDS,
     EXPLICIT_BUY_KEYWORDS,
     EXPLICIT_SELL_KEYWORDS,
     OUT_OF_SCOPE_PHRASES,
@@ -77,6 +78,8 @@ def detect_control(text: str) -> Optional[tuple[str, Optional[float]]]:
     if not text or not text.strip():
         return None
     tokens = _tokens(text)
+    if any(normalize_ar(k) in tokens for k in RERUN_KEYWORDS):
+        return ("rerun", None)                # (بند 3) إعادة تشغيل يدويّة — قبل الإلغاء (كلمات متمايزة)
     if any(normalize_ar(k) in tokens for k in CANCEL_KEYWORDS):
         return ("cancel", None)
     if any(normalize_ar(k) in tokens for k in EDIT_KEYWORDS):

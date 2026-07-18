@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # ضغطة ENTER واحدة على «تخزين» لا تحفظ دائمًا (دليل حيّ SI4008/SI3991: ظهرت booked لكن لم تُخزَّن
     # فعليًّا) — نضغط ENTER مرّتين ثم ننتظر استقرار الحفظ قبل فحص التأكيد (wait_store_confirmed).
     moneyado_store_press_settle_wait: float = Field(default=3.0)  # ثوانٍ بعد الضغطة الثانية قبل فحص التأكيد
+    # (بند 1) اكتمال بنية الفورم البطيء: انتظار بلوغ عدد الحقول المتوقّع (رسم كامل) قبل التعبئة —
+    # يمنع فشل حقلٍ لم يُرسَم بعد (م: X1238 الحقل 590,230). قابل للضبط للجهاز البطيء.
+    moneyado_form_structure_timeout: float = Field(default=18.0)   # ثوانٍ انتظار اكتمال رسم الفورم
     # ── بوابة صحّة MONEYADO (§11.3): توقف سحب الكتابة عند مغلق/مصغّر/نسختين بدل فشل الحوالات واحدة-واحدة ──
     moneyado_gate_enabled: bool = Field(default=True)           # تفعيل البوابة (فحص جاهزية قبل الكتابة)
     moneyado_gate_alert_throttle: float = Field(default=300.0)  # ثوانٍ بين تنبيهات 🔴 المكرّرة (خنق — لا لكل حوالة)
