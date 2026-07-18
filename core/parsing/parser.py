@@ -402,9 +402,15 @@ def _parse_a_fields(text: str, treasuries: list[TreasuryRecord]) -> dict:
                 and _bind_labeled_value(field, segs[i + 1][0], f)):
             consumed.add(i + 1)              # القيمة تُستهلَك فقط عند الربط الناجح
     # مرور ثانٍ: التصنيف النمطيّ للمقاطع غير المُستهلَكة (يحفظ الاستقلالية عن الموضع)
+    # 🔴 (X1257) الموضع البنيويّ يحدّد النوع: المقطع التالي لكلمة «تسليم» = اسم المستلم — يُستبعَد من
+    #    مرشّحي الخزينة نهائيًّا حتى لو طابق اسمُه خزينةً بالاسم/اللقب («محمد» لقب خزينة «محمد حمامات»).
+    after_deliver = False
     for i, (seg, is_header) in enumerate(segs):
         if i not in consumed:
-            _classify_segment(seg, f, treasuries, is_header)
+            _classify_segment(seg, f, treasuries, is_header, after_deliver=after_deliver)
+        # مؤشّر «تسليم لمستلم» = «تسليم» **بلا أرقام** في مقطعه (مثل «ارجو تسليم»)؛ «تسليم 6،070 ج.م»
+        #   (تسليم مبلغ) ليس مؤشّر مستلم فلا يُستهلَك التالي («فودافون» يبقى قناة).
+        after_deliver = ("تسليم" in normalize_ar(seg) and not re.search(r"\d", seg))
     # 🔴 (فيكس د) مبلغ مجرّد بلا كلمة عملة: يُلتقَط فقط إن كانت الرسالة بشكل حوالة صحيح (مرجع/كود +
     #    هاتف/اسم) كي لا يُلتقَط رقمٌ عابر. مرشّح واحد → مبلغ؛ تعدّد بلا حسم → تصعيد لا تخمين (§0).
     if ("amount" not in f
@@ -559,9 +565,21 @@ def _amount_beside_phone(seg: str, phone: Optional[str], f: dict) -> None:
         f.setdefault("amount", amt)
 
 
-def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_header: bool) -> None:
-    """يصنّف سطرًا/جزءًا في الصيغة A ويملأ الحقول (§3.2)."""
+def _classify_segment(seg: str, f: dict, treasuries: list[TreasuryRecord], is_header: bool,
+                      *, after_deliver: bool = False) -> None:
+    """يصنّف سطرًا/جزءًا في الصيغة A ويملأ الحقول (§3.2).
+
+    `after_deliver`: هذا المقطع يلي كلمة «تسليم» → هو **اسم المستلم** بنيويًّا، فيُستبعَد من مرشّحي
+    الخزينة (الموضع يحدّد النوع — X1257: «محمد» مستلمٌ لا خزينة رغم مطابقته لقبَ «محمد حمامات»)."""
     n = normalize_ar(seg)
+
+    # 🔴 (X1257) اسم المستلم البنيويّ (بعد «تسليم»، عربيّ بلا كود/أرقام) → مستلم لا خزينة **أبدًا**،
+    #    قبل أيّ مطابقة خزينة. الموضع البنيويّ يحسم النوع (بند 4: الموضع يحدّد النوع لا التشابه).
+    if (after_deliver and "treasury_record" not in f and _ARABIC_RE.search(seg)
+            and not re.search(r"\d", seg) and normalize_ar(seg) not in _CITIES
+            and not normalize_payment(seg)):     # لا نبتلع قناةَ دفع (فودافون) مستلمًا
+        f.setdefault("recipient_name", seg.strip())
+        return
 
     # ضجيج مرفق (صورة: «127 كيلوبايت») → يُتجاهَل مبكّرًا كي لا يُقرأ «127» كودًا و«كيلوبايت» اسمًا.
     if any(w in n for w in _ATTACHMENT_NOISE):
