@@ -47,7 +47,7 @@ from .db import Database, utcnow
 from .guard import Guard, build_reversal, is_out_of_active_window
 from .logging_setup import get_logger
 from .matching.service import MatchingService
-from .models import Deal, LedgerEntry, ParsedLeg, RawMessage, WriteJob
+from .models import Deal, LedgerEntry, ParsedLeg, RawMessage, TreasuryRef, WriteJob
 from .parsing import (
     detect_control,
     extract_code_name_price_lines,
@@ -126,6 +126,9 @@ class Pipeline:
         self._alert_counts: dict[str, int] = {}
         # (الجزء 1، قرار المالك) عتبة الحل الجريء للأسماء (WRatio بعد التطبيع) — منخفضة عمدًا.
         self._AUTO_RESOLVE_THRESHOLD = 70
+        # (طبقة قروب الخزينة) — من الإعدادات (مفتاح المالك + النافذة).
+        self._room_match_enabled = getattr(_s, "room_match_enabled", True)
+        self._room_match_window = getattr(_s, "room_match_window_seconds", 50.0)
 
     async def _auto_resolve_treasury(self, leg: Optional[ParsedLeg], raw: RawMessage,
                                      treasuries: list) -> None:
@@ -183,6 +186,74 @@ class Pipeline:
         if learned and learned != normalize_ar(rec.name):
             await self.db.suppliers.add_alias(rec.name, learned)
         log.info("(بند 4) حلّ مورّد جريء: «%s» ← «%s» (%d) — نُزّلت وتُعلّم", original, rec.name, score)
+
+    @staticmethod
+    def _value_matches(room_amt: Optional[float], deal_amt: Optional[float]) -> bool:
+        """قيمة القروب ≈ الإجمالي **أو** ≈ ×0.99 (صافي خصم 1%)، بهامش تقريب بسيط للكسور (§قروب الخزينة)."""
+        if room_amt is None or deal_amt is None:
+            return False
+        for target in (deal_amt, deal_amt * 0.99):
+            if abs(room_amt - target) <= max(1.0, target * 0.005):
+                return True
+        return False
+
+    async def _room_match_treasury(self, deal: Deal, now: datetime, treasuries: list,
+                                   suppliers: list) -> bool:
+        """(طبقة قروب الخزينة، توجيه المالك) خزينةٌ لم تُحلّ من النص → ابحث رسائل **قروبات الخزائن**
+        ضمن النافذة (±room_match_window) عن رسالة تطابق **هاتف + قيمة** الحوالة (الإجمالي أو ×0.99
+        صافي، بهامش تقريب). المرجع تعزيزٌ لا شرط. المطابقة → خزينة القروب + تنزيل + تنبيه المسؤول
+        «حُلّت من قروب» + resolved_by=room_match. تعدّد القروبات → الأقرب زمنيًّا + ملاحظة للمراجعة.
+        يُرجِع True إن حُلّت. الاسم الصريح في النص يغلب (لا نصل هنا إلا وخزينة الطرف None)."""
+        if not self._room_match_enabled:
+            return False
+        leg = deal.sell_leg or deal.buy_leg
+        if leg is None or leg.treasury is not None or not leg.phone or leg.amount is None:
+            return False
+        tphone = self._digits(leg.phone)[-9:]
+        if not tphone:
+            return False
+        anchor = _as_naive_utc(deal.first_received_at or deal.created_at or now)
+        win = timedelta(seconds=self._room_match_window)
+        lo, hi = anchor - win, anchor + win
+        rooms = [r for r in await self.db.rooms.all()
+                 if r.type == RoomType.TREASURY and r.active and r.treasury_code]
+        if not rooms:
+            return False
+        by_code = {t.code: t for t in treasuries}
+        matches = []   # (|Δt|, treasury_code, room_name)
+        for room in rooms:
+            cur = self.db.raw.col.find(
+                {"chat_jid": room.jid, "received_at": {"$gte": lo, "$lte": hi}})
+            async for m in cur:
+                rl = parse_message(m.get("text") or "", treasuries, suppliers).leg
+                if rl is None or not rl.phone or rl.amount is None:
+                    continue
+                if self._digits(rl.phone)[-9:] != tphone or not self._value_matches(rl.amount, leg.amount):
+                    continue
+                dt = abs((_as_naive_utc(m.get("received_at")) - anchor).total_seconds())
+                matches.append((dt, room.treasury_code, room.name))
+        if not matches:
+            return False
+        matches.sort(key=lambda x: x[0])            # الأقرب زمنيًّا أولًا (لا يوقف الحوالة)
+        dt, code, rname = matches[0]
+        trec = by_code.get(code)
+        if trec is None:
+            return False
+        leg.treasury = TreasuryRef(code=trec.code, name=trec.name, type=trec.type, currency=trec.currency)
+        if leg.currency is None:
+            leg.currency = trec.currency
+        leg.unresolved_treasury = None
+        leg.deviation_log.append({"field": "treasury", "raw_value": "room_match",
+                                  "extracted_value": trec.name, "method": "room_match", "confidence": 100})
+        await self.db.deals.upsert(deal)
+        distinct = {c for _, c, _ in matches}
+        multi = f" (وُجد في {len(distinct)} قروبات — راجعه إن شئت)" if len(distinct) > 1 else ""
+        await self.bus.notify_admin(
+            f"⚠️ {leg.reference_number or '؟'} — حُلّت الخزينة من قروب «{rname}»{multi} "
+            f"(مطابقة هاتف+قيمة، resolved_by=room_match).", self._deal_key(deal))
+        log.info("(قروب الخزينة) حُلّت %s ← قروب «%s» (code %s، Δ%.1fs)",
+                 leg.reference_number, rname, code, dt)
+        return True
 
     async def _mandatory_alert(self, deal: Deal, detail: str, reply_key: Optional[str]) -> None:
         """(البند 5) رسالة سبب **إلزامية** للمُرسِل مع كل ⚠️/🔴/❌ — مربوطةٌ بمرجع الصفقة، is_alert=True
@@ -905,6 +976,20 @@ class Pipeline:
             #     يمنع تحوّلها tech_failed بسبب عدم توفّر التطبيق (بدل الفشل واحدة-واحدة صمتًا).
             if await self._moneyado_gate(now):
                 return deal
+            # (طبقة قروب الخزينة، توجيه المالك) خزينةٌ غير محلولة من النص → جرّبها من **قروبات الخزائن**
+            #   (هاتف+قيمة، ±نافذة) **قبل** أيّ تصعيد. النافذة (~50s) أقصر من مهلة التصعيد (90s) فلا توقف
+            #   شيئًا؛ ضمنها بلا مطابقة → انتظار (النبضة تعيد)؛ بعدها بلا مطابقة → المسار الحاليّ (تصعيد).
+            _lt = deal.sell_leg or deal.buy_leg
+            if self._room_match_enabled and _lt is not None and _lt.treasury is None and _lt.phone:
+                _trs = await self.db.treasuries.all_active()
+                _sup = await self.db.suppliers.all_active()
+                if await self._room_match_treasury(deal, now, _trs, _sup):
+                    deal = await self.db.deals.get(deal.deal_id) or deal   # حُلّت → تابع المسار العادي
+                elif not _lt.is_si_format:      # الانتظار للمسار العام (مكرر ثم قروب)؛ SI خزينتها معنونة
+                    _anchor = _as_naive_utc(deal.first_received_at or deal.created_at or now)
+                    if (_as_naive_utc(now) - _anchor).total_seconds() < self._room_match_window:
+                        return deal            # ضمن النافذة، رسالة القروب لم تصل بعد → انتظر النبضة
+
             # (6·SI) حوالة SI معنونة خزينتها مذكورة صراحةً دائمًا — فإن لم تُحلّ (نادر جدًّا:
             # اسم خزينة خارج القوائم/خطأ إملائي) فهي حالة شاذّة تحتاج إنسانًا: تُصعَّد لغرفة
             # المسؤول فورًا بتنبيه واضح (لا HELD صامت، ولا مطابقة غرف بلا خزينة) — §0.

@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     # (بند 1) اكتمال بنية الفورم البطيء: انتظار بلوغ عدد الحقول المتوقّع (رسم كامل) قبل التعبئة —
     # يمنع فشل حقلٍ لم يُرسَم بعد (م: X1238 الحقل 590,230). قابل للضبط للجهاز البطيء.
     moneyado_form_structure_timeout: float = Field(default=18.0)   # ثوانٍ انتظار اكتمال رسم الفورم
+    # ── طبقة حلّ الخزينة من قروب الخزينة (نسخة مخففة، الأولوية ألّا تقف حوالة) ──
+    room_match_enabled: bool = Field(default=True)                 # مفتاح المالك: تشغيل/إيقاف كامل
+    room_match_window_seconds: float = Field(default=50.0)         # نافذة البحث حول ختم الوصول (±)
+    room_match_recheck_seconds: float = Field(default=3.0)         # إعادة الفحص (تُنفَّذ عبر النبضة)
     # ── بوابة صحّة MONEYADO (§11.3): توقف سحب الكتابة عند مغلق/مصغّر/نسختين بدل فشل الحوالات واحدة-واحدة ──
     moneyado_gate_enabled: bool = Field(default=True)           # تفعيل البوابة (فحص جاهزية قبل الكتابة)
     moneyado_gate_alert_throttle: float = Field(default=300.0)  # ثوانٍ بين تنبيهات 🔴 المكرّرة (خنق — لا لكل حوالة)
