@@ -261,6 +261,7 @@ class MoneyadoScreen(ScreenController):
         open_retry_wait: float = 6.0,
         open_click_retries: int = 3,
         enter_wait: float = 3.0,
+        store_press_settle_wait: float = 3.0,
         pid: Optional[int] = None,
     ) -> None:
         self._config = config
@@ -272,6 +273,8 @@ class MoneyadoScreen(ScreenController):
         self._step_delay = step_delay
         # مهلة انتظار حساب البرنامج بعد Enter على خانة حاسبة (المبلغ الصافي §11.3) = MONEYADO_ENTER_WAIT.
         self._enter_wait = enter_wait
+        # استقرار الحفظ بعد ضغطتَي ENTER على «تخزين» قبل فحص التأكيد (§11.3، SI4008/SI3991).
+        self._store_press_settle_wait = store_press_settle_wait
         # ربط فورم العملية بعد ظهوره (§11.3).
         self._open_timeout = open_timeout
         # فتح الشاشة من القائمة: انتظار ظهور الفورم بعد كل ضغطة، وعدد إعادات الضغط إن ابتُلع
@@ -295,6 +298,7 @@ class MoneyadoScreen(ScreenController):
             open_retry_wait=getattr(settings, "moneyado_open_retry_wait", 6.0),
             open_click_retries=getattr(settings, "moneyado_open_click_retries", 3),
             enter_wait=getattr(settings, "moneyado_enter_wait", 3.0),
+            store_press_settle_wait=getattr(settings, "moneyado_store_press_settle_wait", 3.0),
             pid=getattr(settings, "moneyado_pid", None),
         )
 
@@ -844,8 +848,13 @@ class MoneyadoScreen(ScreenController):
                 raise RuntimeError(f"رفض ضغط زر ممنوع '{text}' (§2.3)")
         # 🔴 (قرار المستخدم §11.3) الضغط بـ ENTER على الزرّ لا click: نركّز الزرّ ثم ENTER —
         #    أكثر موثوقيّة على أزرار VB6 (النقر قد يُبتلَع؛ Enter على الزرّ المركَّز يُفعّله يقينًا).
+        # 🔴 ضغطتان لا واحدة (دليل حيّ SI4008/SI3991: booked لكن غير مخزَّن فعليًّا): ENTER أولى ثم
+        #    ثانية على نفس الزرّ، ثم انتظار استقرار الحفظ قبل فحص التأكيد (wait_store_confirmed) —
+        #    يُطبَّق على **كل أنواع الكتابة** (بيع/شراء/تعديل/إلغاء) لأنّها تمرّ جميعًا بهذا المسار.
         btn.set_focus()
-        btn.type_keys("{ENTER}", set_foreground=True)
+        btn.type_keys("{ENTER}", set_foreground=True)   # (1) الضغطة الأولى
+        btn.type_keys("{ENTER}", set_foreground=True)   # (2) الضغطة الثانية (تأمين الحفظ)
+        time.sleep(self._store_press_settle_wait)       # (3) استقرار الحفظ قبل فحص إباهت الزرّ
 
     def confirm_store_on_main(self) -> None:
         """Enter على النافذة الرئيسية للتطبيق (top_window) لإغلاق رسالة التأكيد بعد «تخزين»

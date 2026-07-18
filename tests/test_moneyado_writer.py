@@ -1298,3 +1298,87 @@ async def test_store_confirm_before_confirm_on_main(tmp_path):
     await writer.write(make_job(make_sell_leg()), commit=True)
     names = [c[0] for c in screen.method_calls]
     assert names.index("press_store") < names.index("wait_store_confirmed") < names.index("confirm_store_on_main")
+
+
+# ── ضغطة «تخزين» مزدوجة (SI4008/SI3991: ضغطة واحدة قد لا تحفظ فعليًّا §11.3) ──────────────
+def test_press_store_double_enter_then_settle_wait(monkeypatch):
+    """press_store يضغط ENTER **مرّتين** على «تخزين» ثم ينتظر settle_wait قبل فحص التأكيد —
+    دليل حيّ SI4008/SI3991: ضغطة واحدة سجّلت booked لكن لم تُخزَّن فعليًّا. يُطبَّق على كل الكتابة."""
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({}, step_delay=0, store_press_settle_wait=3.0)
+    btn = MagicMock()
+    btn.window_text.return_value = "تخزين"
+    scr._button = lambda cfg: btn
+    scr.button_config = lambda op: {"store": {}}
+    scr._forbidden = lambda op: []
+    slept: list[float] = []
+    monkeypatch.setattr(screens_mod.time, "sleep", lambda s: slept.append(s))
+
+    scr.press_store(OperationType.SELL)
+
+    enter_calls = [c for c in btn.type_keys.call_args_list if c.args and c.args[0] == "{ENTER}"]
+    assert len(enter_calls) == 2, "متوقّع ضغطتَي ENTER بالضبط على «تخزين»"
+    assert 3.0 in slept, "متوقّع انتظار الاستقرار (settle_wait) بعد الضغطة الثانية"
+    btn.set_focus.assert_called_once()
+
+
+def test_single_press_insufficient_two_presses_confirm_save(monkeypatch):
+    """محاكاة الدليل الحيّ: الزرّ يبقى مفعَّلاً (لم يُحفَظ) بعد ضغطة واحدة ويُعطَّل (محفوظ) بعد
+    ضغطتين. press_store يضغط مرّتين → store_button_enabled=False → wait_store_confirmed=True."""
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.screens import MoneyadoScreen
+
+    class _FakeStoreBtn:
+        def __init__(self):
+            self.presses = 0
+
+        def window_text(self):
+            return "تخزين"
+
+        def set_focus(self):
+            pass
+
+        def type_keys(self, keys, **kw):
+            if keys == "{ENTER}":
+                self.presses += 1
+
+        def is_enabled(self):
+            return self.presses < 2          # يُعطَّل (= محفوظ فعليًّا) فقط بعد ضغطتين
+
+    # إثبات صريح أنّ ضغطة واحدة لا تكفي: الزرّ يبقى مفعَّلاً (غير محفوظ)
+    solo = _FakeStoreBtn()
+    solo.type_keys("{ENTER}")
+    assert solo.is_enabled() is True, "ضغطة واحدة لا تحفظ — الزرّ ما زال مفعَّلاً"
+
+    fake = _FakeStoreBtn()
+    scr = MoneyadoScreen({}, step_delay=0, store_press_settle_wait=0)
+    scr._button = lambda cfg: fake
+    scr.button_config = lambda op: {"store": {}}
+    scr._forbidden = lambda op: []
+    monkeypatch.setattr(screens_mod.time, "sleep", lambda s: None)
+
+    assert scr.store_button_enabled(OperationType.SELL) is True   # قبل الضغط: مفعَّل
+    scr.press_store(OperationType.SELL)
+    assert fake.presses == 2, "press_store ضغط مرّتين"
+    # بعد ضغطتين: بات معطَّلاً = محفوظ فعليًّا → التأكيد ينجح
+    assert scr.store_button_enabled(OperationType.SELL) is False
+    assert scr.wait_store_confirmed(OperationType.SELL, timeout=0, interval=0) is True
+
+
+def test_press_store_double_enter_applies_to_buy_amend_cancel(monkeypatch):
+    """التعديل يشمل **كل أنواع الكتابة**: البيع والشراء (والتعديل/الإلغاء يمرّان بنفس مسار الكتابة/
+    القيود العكسية) — press_store لأيّ operation يضغط مرّتين. نتحقّق للبيع والشراء صراحةً."""
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.screens import MoneyadoScreen
+    monkeypatch.setattr(screens_mod.time, "sleep", lambda s: None)
+    for op in (OperationType.SELL, OperationType.BUY):
+        scr = MoneyadoScreen({}, step_delay=0, store_press_settle_wait=0)
+        btn = MagicMock()
+        btn.window_text.return_value = "تخزين"
+        scr._button = lambda cfg: btn
+        scr.button_config = lambda o: {"store": {}}
+        scr._forbidden = lambda o: []
+        scr.press_store(op)
+        enters = [c for c in btn.type_keys.call_args_list if c.args and c.args[0] == "{ENTER}"]
+        assert len(enters) == 2, f"{op.value}: متوقّع ضغطتَي ENTER"

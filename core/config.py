@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     moneyado_store_ready_timeout: float = Field(default=8.0)    # انتظار تفعيل «تخزين» (الفورم جاهز) قبل الإدخال
     moneyado_store_confirm_timeout: float = Field(default=10.0) # انتظار إباهت «تخزين» بعد الضغط = تأكيد الحفظ
     moneyado_store_poll_interval: float = Field(default=0.25)   # فترة سبر حالة الزرّ (تُصفَّر في الاختبار)
+    # ضغطة ENTER واحدة على «تخزين» لا تحفظ دائمًا (دليل حيّ SI4008/SI3991: ظهرت booked لكن لم تُخزَّن
+    # فعليًّا) — نضغط ENTER مرّتين ثم ننتظر استقرار الحفظ قبل فحص التأكيد (wait_store_confirmed).
+    moneyado_store_press_settle_wait: float = Field(default=3.0)  # ثوانٍ بعد الضغطة الثانية قبل فحص التأكيد
     # ── بوابة صحّة MONEYADO (§11.3): توقف سحب الكتابة عند مغلق/مصغّر/نسختين بدل فشل الحوالات واحدة-واحدة ──
     moneyado_gate_enabled: bool = Field(default=True)           # تفعيل البوابة (فحص جاهزية قبل الكتابة)
     moneyado_gate_alert_throttle: float = Field(default=300.0)  # ثوانٍ بين تنبيهات 🔴 المكرّرة (خنق — لا لكل حوالة)
