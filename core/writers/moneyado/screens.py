@@ -249,6 +249,9 @@ class MoneyadoScreen(ScreenController):
     # الخانات الأخيرة قبل «تخزين» (الهاتف/الملاحظات) → مهلة step_delay إضافية لتثبيت القيمة قبل
     # الضغط على «تخزين» في شاشتَي البيع والشراء (§11.3).
     _EXTRA_SETTLE_BEFORE_STORE = {"payment_method", "notes"}
+    # 🔴 حقول الهوية الحرجة (§0): الرقم الإشاري/الزبون/الحساب/المبلغ. فورم فيه أيّها غير فارغ = بقايا
+    #    حوالة سابقة (م: SI408x «SI4082SI4083»). تُستخدم لفحص نظافة الفورم (أ) والاستبدال المحقَّق (ب).
+    _IDENTITY_FIELDS = ("reference_number", "customer", "foreign_account", "foreign_amount", "quantity")
 
     def __init__(
         self,
@@ -262,6 +265,7 @@ class MoneyadoScreen(ScreenController):
         open_click_retries: int = 3,
         enter_wait: float = 3.0,
         store_press_settle_wait: float = 3.0,
+        store_poll_interval: float = 0.25,
         pid: Optional[int] = None,
     ) -> None:
         self._config = config
@@ -275,6 +279,8 @@ class MoneyadoScreen(ScreenController):
         self._enter_wait = enter_wait
         # استقرار الحفظ بعد ضغطتَي ENTER على «تخزين» قبل فحص التأكيد (§11.3، SI4008/SI3991).
         self._store_press_settle_wait = store_press_settle_wait
+        # فترة سبر حالة زرّ «تخزين» (للضغطة الثانية المشروطة §11.3، البند ج).
+        self._store_poll_interval = store_poll_interval
         # ربط فورم العملية بعد ظهوره (§11.3).
         self._open_timeout = open_timeout
         # فتح الشاشة من القائمة: انتظار ظهور الفورم بعد كل ضغطة، وعدد إعادات الضغط إن ابتُلع
@@ -299,6 +305,7 @@ class MoneyadoScreen(ScreenController):
             open_click_retries=getattr(settings, "moneyado_open_click_retries", 3),
             enter_wait=getattr(settings, "moneyado_enter_wait", 3.0),
             store_press_settle_wait=getattr(settings, "moneyado_store_press_settle_wait", 3.0),
+            store_poll_interval=getattr(settings, "moneyado_store_poll_interval", 0.25),
             pid=getattr(settings, "moneyado_pid", None),
         )
 
@@ -374,6 +381,10 @@ class MoneyadoScreen(ScreenController):
                 return False, "MONEYADO مغلق/مصغّر (لا نافذة مرئية)"
             if len(visible) > 1:
                 return False, f"نسختان مرئيتان من MONEYADO ({len(visible)}) — التباس"
+            # (البند د §11.3) فورم عملية مفتوح وقت فحص البوابة = غير نظيف/بقايا (المفترض: القائمة
+            #   الرئيسية بين الحوالات) → غير جاهز، فلا تُكتب فوق بقايا؛ يُغلَق الفورم للقائمة فتُستأنَف.
+            if self._operation_form_visible(visible):
+                return False, "MONEYADO على فورم عملية مفتوح (غير نظيف/بقايا) — أغلقه للقائمة الرئيسية"
             return True, ""
         except Exception as exc:                        # فحص متعذّر → جاهز (fail-open)
             log.warning("فحص جاهزية MONEYADO تعذّر (%s) — يُعامَل جاهزًا (fail-open).", exc)
@@ -567,6 +578,63 @@ class MoneyadoScreen(ScreenController):
                         log.warning("تعذّر إغلاق فورم متبقٍّ (رجوع): %s", exc)
             time.sleep(self._step_delay)
 
+    @staticmethod
+    def _safe_read(ctrl) -> str:
+        """قراءة نصّ حقل بأمان: "" عند تعذّر القراءة أو قيمة غير نصّية (mock/غير قابل للقراءة) —
+        كي لا نحجب/نفشل بذريعة قراءة فاشلة (fail-open للقراءة). القيمة النصّية الحقيقية تُقصّ فقط."""
+        try:
+            txt = ctrl.window_text()
+        except Exception:
+            return ""
+        return txt.strip() if isinstance(txt, str) else ""
+
+    def _form_is_clean(self, operation: OperationType) -> bool:
+        """هل الفورم المربوط **نظيف** (حقول الهوية الحرجة فارغة)؟ فورم فيه بقايا = حوالة سابقة فاشلة
+        (البند أ §0): يمنع الكتابة فوقها. تعذّر قراءة حقل لا يُعدّ اتّساخًا (fail-open للقراءة)."""
+        try:
+            fields = self.field_config(operation)
+        except Exception:
+            return True                    # لا إعداد حقول (اختبار/إعداد ناقص) → لا فحص (fail-open)
+        for key in self._IDENTITY_FIELDS:
+            cfg = fields.get(key)
+            if cfg is None:                # الحقل غير مُعرَّف في الإعداد → تخطٍّ (لا نحجب بذريعته)
+                continue
+            try:
+                ctrl = self._control(cfg, "read")
+            except Exception:
+                continue
+            val = self._safe_read(ctrl)
+            if val:
+                log.info("فورم «%s» غير نظيف: حقل «%s» يحمل بقايا %r (§0).", operation.value, key, val[:24])
+                return False
+        return True
+
+    def _operation_form_visible(self, pids) -> bool:
+        """أهناك فورم عملية (بيع/شراء) مرئيّ لأيّ من نسخ MONEYADO؟ (البند د §11.3 — خفيف: تعداد نوافذ
+        بلا ربط/قراءة حقول). عند فحص البوابة يجب أن يكون MONEYADO على القائمة الرئيسية؛ فورم عملية
+        مفتوح = بقايا/غير نظيف. fail-open (تعذّر الفحص → False، لا نحجب بذريعة)."""
+        if not _PYWINAUTO_AVAILABLE:
+            return False
+        try:
+            markers = {_norm_btn(self._form_marker(OperationType.SELL)),
+                       _norm_btn(self._form_marker(OperationType.BUY))}
+            markers.discard("")
+            btn_class = self._main_menu_cfg().get("button_class", self._DEFAULT_MAIN_BUTTON_CLASS)
+            pidset = set(pids or [])
+            for w in Desktop(backend="win32").windows(class_name=self._DEFAULT_FORM_CLASS):
+                try:
+                    if (pidset and w.process_id() not in pidset) or not w.is_visible():
+                        continue
+                    texts = {_norm_btn(b.window_text() or "")
+                             for b in w.descendants(class_name=btn_class)}
+                    if markers & texts:
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            return False
+        return False
+
     def _wait_form_open(self, operation: OperationType) -> bool:
         """ينتظر ظهور فورم العملية حتى `_open_retry_wait` (سبر كل 0.25s). True إن ظهر."""
         steps = max(1, int(self._open_retry_wait / 0.25))
@@ -581,15 +649,25 @@ class MoneyadoScreen(ScreenController):
         تأكّد القائمة → ضغط الزر بالنص مع إعادة إن ابتُلع النقر → ربط الفورم (§11.3)."""
         self._connect_app(operation)
 
-        # فورم العملية **نفسها** مفتوح ومرئي مسبقًا (استئناف) → اربطه مباشرة بلا ضغط.
+        # فورم العملية **نفسها** مفتوح ومرئي مسبقًا → يُستأنَف **فقط إن كان نظيفًا** (البند أ §0):
+        #   حقول الهوية فارغة = استئناف شرعيّ. فيه بقايا (حوالة سابقة فشلت وتُرك فورمها) → **إغلاق
+        #   وفتح جديد** — ممنوع الكتابة فوق بقايا نهائيًا (م: SI408x «SI4082SI4083»).
         if self._form_open_and_visible(operation):
-            log.info("فورم «%s» مفتوح ومطابق للعملية → استخدامه مباشرة (بلا ضغط §11.3).", label)
             self._bind_form(operation, timeout=self._open_timeout)
-            return
+            if self._form_is_clean(operation):
+                log.info("فورم «%s» مفتوح ونظيف → استئناف مباشر (بلا ضغط §11.3).", label)
+                return
+            log.warning("فورم «%s» مفتوح لكنه غير نظيف (بقايا حوالة) → إغلاق وفتح جديد (البند أ §0).", label)
+            self._close_stray_forms()
+            self._window = None
+            if not self.is_main_screen():      # تعذّر إغلاق الفورم المتّسخ → لا كتابة فوق بقايا
+                raise RuntimeError(
+                    f"تعذّر إغلاق فورم «{label}» المتّسخ (بقايا حوالة) — لا كتابة فوق بقايا (البند أ §0)."
+                )
 
         # فورم عملية **أخرى** متبقٍّ (مثل فورم بيع بعد تخزينه يبقى مرئيًا) يحجب القائمة → أغلقه
         # للعودة للقائمة قبل ضغط زر العملية المطلوبة (يمنع تخطّي الضغط أو ربط الشاشة الخطأ §0).
-        if not self.is_main_screen():
+        elif not self.is_main_screen():
             log.info("فورم عملية أخرى متبقٍّ → إغلاقه (رجوع) قبل فتح «%s» (§11.3).", label)
             self._close_stray_forms()
             if not self.is_main_screen():      # ما زال محجوبًا رغم الإغلاق → خطأ صريح
@@ -617,6 +695,11 @@ class MoneyadoScreen(ScreenController):
             )
 
         self._bind_form(operation, timeout=self._open_timeout)  # الفورم ظاهر الآن → ربط فوري
+        # (البند أ §0) الفورم الجديد يجب أن يكون **فارغًا**؛ بقايا فيه = خلل غير متوقّع → لا كتابة فوقه.
+        if not self._form_is_clean(operation):
+            raise RuntimeError(
+                f"فورم «{label}» الجديد ليس فارغًا (بقايا غير متوقّعة) — لا كتابة فوق بقايا (البند أ §0)."
+            )
 
     def open_sell_screen(self) -> None:
         label = self._main_menu_cfg().get("sell_button", self._DEFAULT_SELL_BUTTON)
@@ -757,6 +840,15 @@ class MoneyadoScreen(ScreenController):
         # type_keys وليس set_text (§11.3): يحاكي كتابة حقيقية فيُفعّل البحث التلقائي
         ctrl.set_focus()
         ctrl.type_keys("^a{BACKSPACE}", set_foreground=True)  # مسح المحتوى القديم بأمان
+        # (البند ب §0) استبدال **محقَّق** للحقول الحرجة (الرقم الإشاري/الزبون/الحساب/المبلغ): تأكّد أن
+        #   الحقل فُرِّغ فعلًا قبل الكتابة — يمنع التصاق قيمتين على فورم أُعيد استخدامه ببقايا
+        #   («SI4082»+«SI4083»). لم يُفرَّغ → مسح أقوى (تحديد كامل ثم حذف) ثم رفض صريح (لا كتابة فوق بقايا).
+        if field_op.key in self._IDENTITY_FIELDS and self._safe_read(ctrl):
+            ctrl.type_keys("{END}+{HOME}{BACKSPACE}", set_foreground=True)   # مسح أقوى (Shift+Home ثم حذف)
+            if self._safe_read(ctrl):
+                raise RuntimeError(
+                    f"الحقل «{field_op.key}» لم يُفرَّغ من قيمة سابقة — رفض الكتابة فوق بقايا (البند ب §0)."
+                )
         if field_op.value:
             ctrl.type_keys(field_op.value, with_spaces=True, set_foreground=True)
         if field_op.enter:
@@ -848,12 +940,15 @@ class MoneyadoScreen(ScreenController):
                 raise RuntimeError(f"رفض ضغط زر ممنوع '{text}' (§2.3)")
         # 🔴 (قرار المستخدم §11.3) الضغط بـ ENTER على الزرّ لا click: نركّز الزرّ ثم ENTER —
         #    أكثر موثوقيّة على أزرار VB6 (النقر قد يُبتلَع؛ Enter على الزرّ المركَّز يُفعّله يقينًا).
-        # 🔴 ضغطتان لا واحدة (دليل حيّ SI4008/SI3991: booked لكن غير مخزَّن فعليًّا): ENTER أولى ثم
-        #    ثانية على نفس الزرّ، ثم انتظار استقرار الحفظ قبل فحص التأكيد (wait_store_confirmed) —
-        #    يُطبَّق على **كل أنواع الكتابة** (بيع/شراء/تعديل/إلغاء) لأنّها تمرّ جميعًا بهذا المسار.
+        # 🔴 الضغطة الثانية **مشروطة** (البند ج §11.3): ضغطة أولى، ثم نسبر حالة الزرّ — إن أُبيهت/
+        #    اختفى (خُزِّن بالأولى) نتوقّف؛ إن بقي مفعَّلًا (لم تُخزِّن الأولى، دليل SI4008/SI3991) نضغط
+        #    ثانيةً لتأمين الحفظ. يمنع الضغطة العمياء بعد نجاح الأولى (تضرب مقبضًا مُدمَّرًا WinError
+        #    1400 → tech_failed كاذب → ازدواج عند الإعادة). يُطبَّق على كل الكتابة (بيع/شراء/تعديل/إلغاء).
         btn.set_focus()
         btn.type_keys("{ENTER}", set_foreground=True)   # (1) الضغطة الأولى
-        btn.type_keys("{ENTER}", set_foreground=True)   # (2) الضغطة الثانية (تأمين الحفظ)
+        if self.wait_store_confirmed(operation, self._store_press_settle_wait, self._store_poll_interval):
+            return                                       # خُزِّن بالأولى → لا ضغطة ثانية عمياء
+        btn.type_keys("{ENTER}", set_foreground=True)   # (2) الأولى لم تُخزِّن → أمّن الحفظ
         time.sleep(self._store_press_settle_wait)       # (3) استقرار الحفظ قبل فحص إباهت الزرّ
 
     def confirm_store_on_main(self) -> None:

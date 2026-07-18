@@ -1300,10 +1300,10 @@ async def test_store_confirm_before_confirm_on_main(tmp_path):
     assert names.index("press_store") < names.index("wait_store_confirmed") < names.index("confirm_store_on_main")
 
 
-# ── ضغطة «تخزين» مزدوجة (SI4008/SI3991: ضغطة واحدة قد لا تحفظ فعليًّا §11.3) ──────────────
-def test_press_store_double_enter_then_settle_wait(monkeypatch):
-    """press_store يضغط ENTER **مرّتين** على «تخزين» ثم ينتظر settle_wait قبل فحص التأكيد —
-    دليل حيّ SI4008/SI3991: ضغطة واحدة سجّلت booked لكن لم تُخزَّن فعليًّا. يُطبَّق على كل الكتابة."""
+# ── الضغطة الثانية **مشروطة** (البند ج §11.3: فقط إن لم تُخزِّن الأولى) ──────────────────────
+def test_press_store_single_press_when_first_stores(monkeypatch):
+    """(ج) إن خُزِّنت الضغطة الأولى (wait_store_confirmed=True) → **لا ضغطة ثانية** ولا انتظار —
+    يمنع الضغطة العمياء التي تضرب مقبضًا مُدمَّرًا بعد إغلاق الفورم (WinError 1400 → ازدواج)."""
     from core.writers.moneyado import screens as screens_mod
     from core.writers.moneyado.screens import MoneyadoScreen
     scr = MoneyadoScreen({}, step_delay=0, store_press_settle_wait=3.0)
@@ -1312,15 +1312,38 @@ def test_press_store_double_enter_then_settle_wait(monkeypatch):
     scr._button = lambda cfg: btn
     scr.button_config = lambda op: {"store": {}}
     scr._forbidden = lambda op: []
+    scr.wait_store_confirmed = lambda op, t, i: True          # الأولى خزّنت (الزرّ أُبيهت)
     slept: list[float] = []
     monkeypatch.setattr(screens_mod.time, "sleep", lambda s: slept.append(s))
 
     scr.press_store(OperationType.SELL)
 
     enter_calls = [c for c in btn.type_keys.call_args_list if c.args and c.args[0] == "{ENTER}"]
-    assert len(enter_calls) == 2, "متوقّع ضغطتَي ENTER بالضبط على «تخزين»"
-    assert 3.0 in slept, "متوقّع انتظار الاستقرار (settle_wait) بعد الضغطة الثانية"
+    assert len(enter_calls) == 1, "ضغطة واحدة فقط (الأولى خزّنت)"
+    assert 3.0 not in slept, "لا انتظار استقرار (لا ضغطة ثانية)"
     btn.set_focus.assert_called_once()
+
+
+def test_press_store_second_press_and_settle_when_first_fails(monkeypatch):
+    """(ج، دليل SI4008/SI3991) إن بقي الزرّ مفعَّلاً بعد الأولى (wait_store_confirmed=False) →
+    ضغطة ثانية لتأمين الحفظ ثم انتظار settle_wait."""
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({}, step_delay=0, store_press_settle_wait=3.0)
+    btn = MagicMock()
+    btn.window_text.return_value = "تخزين"
+    scr._button = lambda cfg: btn
+    scr.button_config = lambda op: {"store": {}}
+    scr._forbidden = lambda op: []
+    scr.wait_store_confirmed = lambda op, t, i: False         # الأولى لم تُخزِّن
+    slept: list[float] = []
+    monkeypatch.setattr(screens_mod.time, "sleep", lambda s: slept.append(s))
+
+    scr.press_store(OperationType.SELL)
+
+    enter_calls = [c for c in btn.type_keys.call_args_list if c.args and c.args[0] == "{ENTER}"]
+    assert len(enter_calls) == 2, "ضغطتان (الأولى لم تُخزِّن)"
+    assert 3.0 in slept, "انتظار الاستقرار بعد الضغطة الثانية"
 
 
 def test_single_press_insufficient_two_presses_confirm_save(monkeypatch):
@@ -1382,3 +1405,92 @@ def test_press_store_double_enter_applies_to_buy_amend_cancel(monkeypatch):
         scr.press_store(op)
         enters = [c for c in btn.type_keys.call_args_list if c.args and c.args[0] == "{ENTER}"]
         assert len(enters) == 2, f"{op.value}: متوقّع ضغطتَي ENTER"
+
+
+# ── فورم وسخ / بقايا حوالة سابقة (SI408x «SI4082SI4083») — البند أ + ب ────────────────────
+def _ctrl_with_text(text):
+    c = MagicMock()
+    c.window_text.return_value = text
+    return c
+
+
+def test_form_is_clean_detects_residue():
+    """(أ) _form_is_clean: حقول الهوية فارغة = نظيف؛ حقل يحمل بقايا (رقم إشاريّ سابق) = غير نظيف."""
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({"sell_screen": {"fields": {"reference_number": {"coord": [1, 1]},
+                                                     "customer": {"coord": [2, 2]}}}})
+    scr._control = lambda cfg, method="": _ctrl_with_text("")
+    assert scr._form_is_clean(OperationType.SELL) is True
+    # الرقم الإشاري يحمل بقايا «SI4082» → غير نظيف
+    scr._control = lambda cfg, method="": _ctrl_with_text("SI4082")
+    assert scr._form_is_clean(OperationType.SELL) is False
+
+
+def test_open_screen_reuses_clean_form():
+    """(أ) فورم مفتوح **نظيف** → استئناف مباشر بلا إغلاق ولا ضغط زر القائمة."""
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({"sell_screen": {}}, step_delay=0)
+    scr._connect_app = lambda op: None
+    scr._form_open_and_visible = lambda op: True
+    scr._bind_form = lambda op, timeout=None: None
+    scr._form_is_clean = lambda op: True
+    calls = {"close": 0, "click": 0}
+    scr._close_stray_forms = lambda: calls.__setitem__("close", calls["close"] + 1)
+    scr.click_button = lambda label: calls.__setitem__("click", calls["click"] + 1)
+    scr.open_sell_screen()
+    assert calls == {"close": 0, "click": 0}, "الفورم النظيف يُستأنَف مباشرة"
+
+
+def test_open_screen_reopens_dirty_form():
+    """(أ) فورم مفتوح **غير نظيف** (بقايا) → إغلاق (رجوع) ثم فتح جديد — لا كتابة فوق بقايا."""
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({"sell_screen": {}}, step_delay=0)
+    scr._connect_app = lambda op: None
+    scr._form_open_and_visible = lambda op: True         # فورم مفتوح (يُكتشَف اتّساخه)
+    scr._bind_form = lambda op, timeout=None: None
+    clean_seq = iter([False, True])                      # أوّلًا متّسخ، بعد الفتح الجديد نظيف
+    scr._form_is_clean = lambda op: next(clean_seq)
+    calls = {"close": 0}
+    scr._close_stray_forms = lambda: calls.__setitem__("close", calls["close"] + 1)
+    scr.is_main_screen = lambda: True
+    scr.open_sell_screen()
+    assert calls["close"] == 1, "أُغلق الفورم المتّسخ مرّة قبل الفتح الجديد"
+
+
+def test_open_screen_raises_when_dirty_uncloseable():
+    """(أ) فورم متّسخ تعذّر إغلاقه (يبقى ليس القائمة الرئيسية) → خطأ صريح، لا كتابة فوق بقايا."""
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({"sell_screen": {}}, step_delay=0)
+    scr._connect_app = lambda op: None
+    scr._form_open_and_visible = lambda op: True
+    scr._bind_form = lambda op, timeout=None: None
+    scr._form_is_clean = lambda op: False                # يبقى متّسخًا
+    scr._close_stray_forms = lambda: None
+    scr.is_main_screen = lambda: False                   # لم يُغلَق
+    with pytest.raises(RuntimeError, match="بقايا"):
+        scr.open_sell_screen()
+
+
+def test_fill_rejects_residue_on_identity_field():
+    """(ب) حقل هوية لم يُفرَّغ بعد المسح (بقايا صامدة) → رفض صريح، لا كتابة «SI4083» فوق «SI4082»."""
+    from core.writers.moneyado.fields import FieldOp, TYPE_KEYS
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({"sell_screen": {"fields": {"reference_number": {}}}}, step_delay=0)
+    ctrl = _ctrl_with_text("SI4082")                     # المسح لا يفرّغه (بقايا صامدة)
+    scr._control = lambda cfg, method="": ctrl
+    with pytest.raises(RuntimeError, match="لم يُفرَّغ"):
+        scr._fill(FieldOp("reference_number", "SI4083", TYPE_KEYS), {})
+
+
+def test_fill_types_value_when_field_cleared(monkeypatch):
+    """(ب) حقل هوية فُرِّغ فعلًا (فارغ بعد المسح) → لا رفض، ويُكتب القيمة الجديدة."""
+    from core.writers.moneyado import screens as screens_mod
+    from core.writers.moneyado.fields import FieldOp, TYPE_KEYS
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({"sell_screen": {"fields": {"reference_number": {}}}}, step_delay=0)
+    ctrl = _ctrl_with_text("")                           # فُرِّغ بنجاح
+    scr._control = lambda cfg, method="": ctrl
+    monkeypatch.setattr(screens_mod.time, "sleep", lambda s: None)
+    scr._fill(FieldOp("reference_number", "SI4083", TYPE_KEYS), {})
+    assert any(c.args and c.args[0] == "SI4083" for c in ctrl.type_keys.call_args_list), \
+        "كُتبت القيمة الجديدة بعد تأكيد التفريغ"
