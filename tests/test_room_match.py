@@ -106,9 +106,11 @@ async def test_room_match_message_earlier_by_seconds(db):
 
 
 async def test_room_match_disabled_switch(db):
-    """المفتاح مطفأ → الطبقة معطّلة (لا حلّ من القروب)."""
+    """المفتاح مطفأ من الداشبورد (DetectionConfig.room_match_enabled=False) → الطبقة معطّلة."""
+    from core.models import DetectionConfig
     await _seed(db, room_msgs=[(f"X1301\n{PHONE}\nالقيمة 1000 دت\n149 زبون", 5)])
-    pipe = _pipe(db, room_match_enabled=False)
+    await db.detection.set(DetectionConfig(room_match_enabled=False))
+    pipe = _pipe(db)
     d = _deal(amount=1000.0)
     assert await pipe._room_match_treasury(d, NOW, await _treas(db), []) is False
     assert d.sell_leg.treasury is None
@@ -139,3 +141,25 @@ async def test_room_match_two_groups_closest_and_note(db):
     assert await pipe._room_match_treasury(d, NOW, await _treas(db), []) is True
     assert d.sell_leg.treasury.code == "83"                          # الأقرب زمنيًّا
     assert any("قروبات" in m for m in bus.admin_msgs)               # ملاحظة التعدّد
+
+
+async def test_room_match_window_controlled_by_dashboard_config(db):
+    """(أ) النافذة تُقرأ حيًّا من DetectionConfig (الداشبورد): نافذة ٥s → رسالة على +10s خارجها."""
+    from core.models import DetectionConfig
+    await _seed(db, room_msgs=[(f"X1301\n{PHONE}\nالقيمة 1000 دت", 10)])
+    await db.detection.set(DetectionConfig(room_match_enabled=True, room_match_window_seconds=5.0))
+    pipe = _pipe(db)
+    d = _deal(amount=1000.0)
+    assert await pipe._room_match_treasury(d, NOW, await _treas(db), []) is False   # 10s > نافذة 5s
+    # وسّع النافذة من الداشبورد → تُمسَك (hot-reload، بلا إعادة تشغيل)
+    await db.detection.set(DetectionConfig(room_match_enabled=True, room_match_window_seconds=50.0))
+    assert await pipe._room_match_treasury(_deal(amount=1000.0), NOW, await _treas(db), []) is True
+
+
+def test_transfers_resolved_by_helper():
+    """(ب) _resolved_by يشتقّ مصدر الحل من deviation_log للعرض/الفلترة في صفحة الحوالات."""
+    from dashboard.transfers import _resolved_by
+    assert _resolved_by({"deviation_log": [{"field": "treasury", "method": "room_match"}]}) == "room_match"
+    assert _resolved_by({"deviation_log": [{"field": "treasury", "method": "similarity"}]}) == "similarity"
+    assert _resolved_by({"deviation_log": [{"field": "amount", "method": "abs_negative"}]}) is None
+    assert _resolved_by({}) is None

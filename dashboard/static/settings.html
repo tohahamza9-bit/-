@@ -150,6 +150,20 @@
     <p class="muted" style="margin:8px 0 0">القيم بذرة متحفّظة موثّقة؛ تُحدَّث من التحليل التاريخي.</p>
   </div>
 
+  <!-- حلّ الخزينة من قروب الخزينة -->
+  <div class="card">
+    <h2>حلّ الخزينة من القروب <span class="muted">(عند فشل الخزينة من النص — مطابقة هاتف+قيمة)</span></h2>
+    <label style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <input type="checkbox" id="rm_enabled" style="flex:none;width:auto"> <span>تفعيل الحلّ من القروب</span></label>
+    <div class="row" style="gap:12px">
+      <label class="dfield">نافذة البحث (ثانية)<input id="rm_win" type="number" step="any"></label>
+      <label class="dfield">فترة إعادة الفحص (ثانية)<input id="rm_recheck" type="number" step="any"></label>
+      <button onclick="saveDetection()" style="align-self:flex-end">حفظ</button>
+    </div>
+    <p class="muted" style="margin:8px 0 0">يبحث في رسائل قروبات الخزائن المسجّلة عن هاتف+قيمة الحوالة
+      (الإجمالي أو الصافي ×0.99). سجّل قروب كل خزينة من صفحة «الغرف».</p>
+  </div>
+
   <!-- السجل التقنيّ (م٦) -->
   <div class="card">
     <h2>السجل التقنيّ <span class="muted">(دخول/خروج + تغييرات الإعدادات — الأثر الدائم)</span>
@@ -268,6 +282,9 @@ async function loadDetection(){
     $("d_min").value=c.discount_min_samples; $("d_scan").value=c.scan_window_hours;
     $("d_newent").value=c.new_entity_lookback_hours;
     $("d_dupref").value=c.duplicate_reference_window_minutes;
+    $("rm_enabled").checked = c.room_match_enabled !== false;
+    $("rm_win").value = c.room_match_window_seconds;
+    $("rm_recheck").value = c.room_match_recheck_seconds;
   }catch(e){}
 }
 async function saveDetection(){
@@ -282,6 +299,9 @@ async function saveDetection(){
     scan_window_hours:parseInt($("d_scan").value,10),
     new_entity_lookback_hours:parseInt($("d_newent").value,10),
     duplicate_reference_window_minutes:parseInt($("d_dupref").value,10),
+    room_match_enabled:$("rm_enabled").checked,
+    room_match_window_seconds:parseFloat($("rm_win").value),
+    room_match_recheck_seconds:parseFloat($("rm_recheck").value),
   });
   try{ await api("/settings/detection","PUT",c); window._det=c; toast("حُفظت الحدود ✓"); loadLog(); }catch(e){}
 }

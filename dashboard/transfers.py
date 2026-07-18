@@ -92,7 +92,17 @@ def _deal_summary(d: dict) -> dict:
         "cancelled_at": _iso(d.get("cancelled_at")),
         "cancellation_reason": d.get("cancellation_reason"),
         "deal_margin": d.get("deal_margin"),         # §8 عرض فقط (None حتى ربط التسعير)
+        "resolved_by": _resolved_by(lead),           # كيف حُلّت الخزينة: room_match/similarity أو None
     }
+
+
+def _resolved_by(leg: dict) -> Optional[str]:
+    """مصدرُ حلّ الخزينة من deviation_log (للعرض/الفلترة): «room_match» (من القروب) أو «similarity»
+    (تشابه جريء) أو None (صريح من النص)."""
+    for dv in (leg.get("deviation_log") or []):
+        if dv.get("field") == "treasury" and dv.get("method") in ("room_match", "similarity"):
+            return dv.get("method")
+    return None
 
 
 async def search_transfers(db: Database, q: str = "", limit: int = 50) -> list[dict]:

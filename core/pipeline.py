@@ -198,13 +198,15 @@ class Pipeline:
         return False
 
     async def _room_match_treasury(self, deal: Deal, now: datetime, treasuries: list,
-                                   suppliers: list) -> bool:
+                                   suppliers: list, window: Optional[float] = None) -> bool:
         """(طبقة قروب الخزينة، توجيه المالك) خزينةٌ لم تُحلّ من النص → ابحث رسائل **قروبات الخزائن**
         ضمن النافذة (±room_match_window) عن رسالة تطابق **هاتف + قيمة** الحوالة (الإجمالي أو ×0.99
         صافي، بهامش تقريب). المرجع تعزيزٌ لا شرط. المطابقة → خزينة القروب + تنزيل + تنبيه المسؤول
         «حُلّت من قروب» + resolved_by=room_match. تعدّد القروبات → الأقرب زمنيًّا + ملاحظة للمراجعة.
-        يُرجِع True إن حُلّت. الاسم الصريح في النص يغلب (لا نصل هنا إلا وخزينة الطرف None)."""
-        if not self._room_match_enabled:
+        يُرجِع True إن حُلّت. الاسم الصريح في النص يغلب (لا نصل هنا إلا وخزينة الطرف None). المفتاح
+        والنافذة من إعداد الداشبورد (db.detection، hot-reload)؛ `window` يتجاوزهما إن مُرِّر (للاختبار)."""
+        _cfg = await self.db.detection.get()
+        if not getattr(_cfg, "room_match_enabled", True):
             return False
         leg = deal.sell_leg or deal.buy_leg
         if leg is None or leg.treasury is not None or not leg.phone or leg.amount is None:
@@ -213,7 +215,8 @@ class Pipeline:
         if not tphone:
             return False
         anchor = _as_naive_utc(deal.first_received_at or deal.created_at or now)
-        win = timedelta(seconds=self._room_match_window)
+        _w = window if window is not None else getattr(_cfg, "room_match_window_seconds", self._room_match_window)
+        win = timedelta(seconds=_w)
         lo, hi = anchor - win, anchor + win
         rooms = [r for r in await self.db.rooms.all()
                  if r.type == RoomType.TREASURY and r.active and r.treasury_code]
@@ -980,14 +983,17 @@ class Pipeline:
             #   (هاتف+قيمة، ±نافذة) **قبل** أيّ تصعيد. النافذة (~50s) أقصر من مهلة التصعيد (90s) فلا توقف
             #   شيئًا؛ ضمنها بلا مطابقة → انتظار (النبضة تعيد)؛ بعدها بلا مطابقة → المسار الحاليّ (تصعيد).
             _lt = deal.sell_leg or deal.buy_leg
-            if self._room_match_enabled and _lt is not None and _lt.treasury is None and _lt.phone:
+            _rmcfg = await self.db.detection.get()   # يُقرأ حيًّا من الداشبورد (hot-reload، بلا إعادة تشغيل)
+            if (getattr(_rmcfg, "room_match_enabled", True)
+                    and _lt is not None and _lt.treasury is None and _lt.phone):
+                _win = getattr(_rmcfg, "room_match_window_seconds", 50.0)
                 _trs = await self.db.treasuries.all_active()
                 _sup = await self.db.suppliers.all_active()
-                if await self._room_match_treasury(deal, now, _trs, _sup):
+                if await self._room_match_treasury(deal, now, _trs, _sup, _win):
                     deal = await self.db.deals.get(deal.deal_id) or deal   # حُلّت → تابع المسار العادي
                 elif not _lt.is_si_format:      # الانتظار للمسار العام (مكرر ثم قروب)؛ SI خزينتها معنونة
                     _anchor = _as_naive_utc(deal.first_received_at or deal.created_at or now)
-                    if (_as_naive_utc(now) - _anchor).total_seconds() < self._room_match_window:
+                    if (_as_naive_utc(now) - _anchor).total_seconds() < _win:
                         return deal            # ضمن النافذة، رسالة القروب لم تصل بعد → انتظر النبضة
 
             # (6·SI) حوالة SI معنونة خزينتها مذكورة صراحةً دائمًا — فإن لم تُحلّ (نادر جدًّا:

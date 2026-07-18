@@ -366,6 +366,10 @@ class DetectionConfig(BaseModel):
     # تكرار المرجع (إعادة إرسال نفس الرقم الإشاري): رسالة بمرجع صفقة **غير منتظِرة** عولِجت خلال هذه
     #   النافذة تُتجاهَل no-op (بلا حوالة/تنبيه). 0 = تعطيل الفحص كاملًا.
     duplicate_reference_window_minutes: int = 5
+    # ── حلّ الخزينة من قروب الخزينة (مطابقة هاتف+قيمة) — يُدار من الداشبورد بضغطة (hot-reload) ──
+    room_match_enabled: bool = True              # تشغيل/إيقاف الطبقة كاملةً بيد المدير
+    room_match_window_seconds: float = 50.0      # نافذة البحث حول ختم الوصول (±)
+    room_match_recheck_seconds: float = 3.0      # فترة إعادة الفحص (تُنفَّذ عبر النبضة)
 
 
 class FxRatesConfig(BaseModel):

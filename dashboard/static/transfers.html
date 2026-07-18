@@ -69,6 +69,8 @@
   <div class="search">
     <input id="q" placeholder="بحث بالمرجع أو الهاتف أو الاسم…" autocomplete="off">
     <button id="btn">بحث</button>
+    <label style="display:flex;gap:6px;align-items:center;font-size:13px;white-space:nowrap">
+      <input type="checkbox" id="fRoom" style="width:auto"> الحلّ من القروب فقط</label>
   </div>
   <table><thead><tr><th>المرجع</th><th>الاسم</th><th>الهاتف</th><th>المبلغ</th><th>الخزينة</th><th>الحالة</th><th>التاريخ</th></tr></thead>
     <tbody id="body"></tbody></table>
@@ -95,19 +97,25 @@ function statusPill(d){
   if(d.status==="completed") return `<span class="pill done">مكتملة</span>`;
   return `<span class="pill">${esc(d.status||"—")}</span>`;
 }
+function resolvedBadge(d){
+  if(d.resolved_by==="room_match") return ' <span class="pill" style="background:#0a7d46;color:#fff;font-size:11px" title="حُلّت الخزينة من قروب الخزينة (مطابقة هاتف+قيمة)">قروب</span>';
+  if(d.resolved_by==="similarity") return ' <span class="pill" style="background:#b5820a;color:#fff;font-size:11px" title="حُلّت بتشابه اسم جريء — راجعها">تشابه</span>';
+  return '';
+}
 function rowHtml(d){
   return `<tr class="row" onclick="openDetail('${esc(d.deal_id)}')">
     <td><span class="mono">${esc(d.reference_number||"—")}</span></td>
     <td>${esc(d.customer_name||"—")}</td>
     <td><span class="mono">${esc(d.phone||"—")}</span></td>
     <td>${num(d.amount)} ${esc(d.currency||"")}</td>
-    <td>${esc(d.treasury_name||"—")}</td>
+    <td>${esc(d.treasury_name||"—")}${resolvedBadge(d)}</td>
     <td>${statusPill(d)}</td>
     <td class="meta">${esc((d.created_at||"").replace("T"," ").slice(0,16))}</td>
   </tr>`;
 }
 async function search(){
   let rows; try{ rows=await api("/transfers?q="+encodeURIComponent($("q").value.trim())); }catch(e){ return; }
+  if($("fRoom").checked) rows = rows.filter(d => d.resolved_by==="room_match");   // فلتر «الحل من القروب»
   $("empty").style.display = rows.length ? "none":"block";
   $("body").innerHTML = rows.map(rowHtml).join("");
 }
@@ -136,6 +144,7 @@ function renderTimeline(tl){
 
 const ROLE_AR={manager:"مدير",reviewer:"مراجع",data_entry:"مُدخل بيانات"};
 $("btn").onclick=search;
+$("fRoom").onchange=search;
 $("q").addEventListener("keydown",e=>{ if(e.key==="Enter") search(); });
 $("logoutBtn").onclick=async()=>{try{await fetch("/api/auth/logout",{method:"POST",credentials:"same-origin"});}catch(e){}location.replace("/login");};
 async function boot(){
