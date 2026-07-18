@@ -736,6 +736,56 @@ class QueueService:
                 return d
         return None
 
+    async def oldest_pending_for_sender(self, chat_jid: str | None, sender_jid: str | None,
+                                        now: datetime) -> Deal | None:
+        """(البند 1، الربط أولاً) **أقدم** صفقة معلّقة لنفس المُرسِل ضمن نافذة الربط — **بلا** تقييد نوع
+        المحتوى (بخلاف oldest_waiting_for_sender الذي يشترط _fragment_targets). أيّ رسالةٍ من مُرسِلٍ
+        عنده صفقة WAITING_SECOND_LEG تُربَط بأقدمها بغضّ النظر عن انحلال محتواها. FIFO حتميّ (درس X850:
+        سقوط/تعثّر وحدة لا يزيح الباقي — كلٌّ يُربَط بالأقدم المتبقّي)."""
+        if not chat_jid or not sender_jid:
+            return None
+        horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        for d in await self.db.deals.waiting_in_room(chat_jid):   # ASC = FIFO
+            if _as_naive_utc(d.created_at) < horizon:
+                continue
+            if self._leg_sender(d) == sender_jid:
+                return d
+        return None
+
+    @staticmethod
+    def is_completion_shaped(frag: ParsedLeg | None) -> bool:
+        """هل الرسالة **بشكل تكملة** (لا هدرزة/دردشة) حتى لو فشل حلّ اسمها؟ تحمل سعرًا أو خزينة/موردًا
+        (محلولًا أو غير محلول) أو كودًا/اسمًا. تمنع ربط «شكرًا» بصفقة معلّقة (البند 1: نربط التكملات لا الدردشة)."""
+        if frag is None:
+            return False
+        return bool(frag.price_normalized or frag.price_raw or frag.treasury is not None
+                    or frag.supplier is not None or frag.is_supplier_counterpart
+                    or frag.customer_code or (frag.customer_name or "").strip()
+                    or frag.unresolved_treasury)
+
+    async def link_orphan_completion(self, frag: ParsedLeg, chat_jid: str | None,
+                                     sender_jid: str | None, message_key: str,
+                                     now: datetime) -> Deal | None:
+        """(البند 1) يربط رسالة **بشكل تكملة قد يفشل حلّ اسمها** بأقدم صفقة معلّقة لنفس المُرسِل — قبل
+        وبغضّ النظر عن نجاح الحل. يطبّق ما انحلّ عبر _apply_fragment ويُعيدها PARSED (تُعالَج بالنبضة:
+        مطابقة/كتابة إن اكتملت، أو تصعيد غنيّ إن بقيت ناقصة). None إن لا صفقة معلّقة (تُترك للمسار العادي).
+        لا تمسّ حوالةً أولى مستقلّة (تُصنَّف transfer لا noise فلا تصل هنا)."""
+        if not self.is_completion_shaped(frag):
+            return None
+        target = await self.oldest_pending_for_sender(chat_jid, sender_jid, now)
+        if target is None:
+            return None
+        frag.sender_jid = sender_jid
+        frag.source_message_key = message_key
+        self._apply_fragment(target, frag)          # يطبّق الخزينة/المورد/الكود/السعر المحلول (إن وُجد)
+        if message_key and message_key not in target.source_message_keys:
+            target.source_message_keys.append(message_key)
+        target.status = Status.PARSED
+        target.waiting_deadline = None
+        await self.db.deals.upsert(target)
+        log.info("(البند 1) رُبطت رسالة تكملة %s بالصفقة المعلّقة %s", message_key, target.deal_id)
+        return target
+
     async def _pull_pending_reply(self, deal: Deal, chat_jid: str | None, now: datetime) -> bool:
         """رد معلّق سابق (الرسالة الثانية وصلت قبل الأولى) يُكمِّل هذه الصفقة الجديدة (Fix 2 + تصميم FIFO).
         يُرجع True إن اكتملت. القواعد الحتمية:

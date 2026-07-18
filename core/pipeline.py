@@ -122,6 +122,21 @@ class Pipeline:
         self._gate_throttle = getattr(_s, "moneyado_gate_alert_throttle", 300.0)
         self._moneyado_paused = False
         self._last_gate_alert: Optional[datetime] = None
+        # (البند 5) خنق الرسائل الإلزامية لكل مرجع: كامل مرّتين ثم مختصرة (ممنوع صفر). ذاكرة حيّة.
+        self._alert_counts: dict[str, int] = {}
+
+    async def _mandatory_alert(self, deal: Deal, detail: str, reply_key: Optional[str]) -> None:
+        """(البند 5) رسالة سبب **إلزامية** للمُرسِل مع كل ⚠️/🔴/❌ — مربوطةٌ بمرجع الصفقة، is_alert=True
+        (تُعفى من warm-up فلا تُحجب). خنقٌ لكل مرجع: النصّ الكامل أوّل مرّتين، ثم مختصر «(تكرار N)» من
+        الثالثة — **ممنوع صفر رسائل**."""
+        ref = self._ref(deal)
+        n = self._alert_counts.get(ref, 0) + 1
+        self._alert_counts[ref] = n
+        if n <= 2:
+            text = f"⚠️ {ref} — {detail}\nالمطلوب من المُرسِل: أرسِل التصحيح/التكملة مربوطًا بالحوالة."
+        else:
+            text = f"⚠️ {ref} (تكرار {n}) — {detail}"
+        await self.bus.reply_central(text, reply_key, is_alert=True)
 
     async def _matching_rooms_configured(self) -> bool:
         """
@@ -526,6 +541,25 @@ class Pipeline:
                 return await self.queue.absorb_fragment(
                     frag, raw.chat_jid, raw.message_key, now
                 )
+            # 🔴 (البند 1، الربط أولاً) لم تُصنَّف جزءًا **محلولًا** (فشل حلّ الخزينة/المورد: غريب/جديد/
+            #    إملائيّة خاطئة)، لكنّها **بشكل تكملة** (سعر/خزينة/مورد/كود) والمُرسِل عنده صفقة معلّقة →
+            #    تُربَط بأقدمها بغضّ النظر عن نجاح الحل (لا سقوط صامت). ما انحلّ يُطبَّق؛ ما بقي ناقصًا
+            #    يُصعَّد برسالة إلزامية مربوطة بمرجع الصفقة (اسم غير معروف: <حرفيًّا>) — روح 08adce8 للربط كلّه.
+            if raw.sender_jid:
+                frag2 = parse_completion_fragment(raw.text, treasuries, suppliers)
+                merged = await self.queue.link_orphan_completion(
+                    frag2, raw.chat_jid, raw.sender_jid, raw.message_key, now)
+                if merged is not None:
+                    missing = missing_mandatory_fields(merged.sell_leg or merged.buy_leg)
+                    if missing:
+                        await self._mandatory_alert(
+                            merged,
+                            f"وصلت تكملةٌ من الرسالة «{(raw.text or '').strip()[:60]}» وربطتُها، لكن ما "
+                            f"زال ناقصًا: {'، '.join(missing)} (اسم غير معروف/لم يُحلّ)",
+                            raw.message_key)
+                    log.info("(البند 1) رُبطت رسالة تكملة غير محلولة %s بالصفقة %s (ناقص=%s)",
+                             raw.message_key, merged.deal_id, missing)
+                    return merged
             # 🔴 «حوالة محتملة فشل استخراجها» (م: A292): رسالة تحمل مرجعًا (Axxxx/SIxxxx) لكنها
             #    سقطت noise (خطأ إملاء عملة/حقل) → **لا سقوط صامت**: تنبيه المالك (is_alert) + ⚠️.
             #    الهدرزة الحقيقية (بلا مرجع) تبقى تجاهلًا صامتًا كالسابق.
@@ -718,6 +752,12 @@ class Pipeline:
             # حوالة A ناقصة 15د بلا رسالة ثانية (قرار المستخدم): ❌ على المركزية فقط — بلا تصعيد
             # للمسؤول. الصفقة صارت ESCALATED (نهائية) في sweep_incomplete_a فلا تُعاد معالجتها.
             await self.matcher.apply_mark(deal, Mark.INCOMPLETE)
+            # 🔴 (البند 5) ❌ لا تُترك بلا نصّ: رسالة سبب إلزامية للمُرسِل (المطلوب لإصلاحها) — كانت
+            #    تفاعلًا صامتًا (react-بلا-send، pipeline.py:720 سابقًا).
+            _miss = missing_mandatory_fields(deal.sell_leg or deal.buy_leg)
+            _detail = "، ".join(_miss) if _miss else "بيانات الطرف الثاني"
+            await self._mandatory_alert(
+                deal, f"لم تصل الرسالة الثانية خلال ١٥ دقيقة؛ ناقص: {_detail}", self._deal_key(deal))
             log.warning("حوالة A ناقصة %s تجاوزت 15 دقيقة بلا رسالة ثانية → ❌ على المركزية",
                         self._ref(deal))
 

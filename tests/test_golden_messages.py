@@ -58,8 +58,11 @@ KNOWN_DIVERGENCES: dict[str, set[str]] = {
     "shape_06_msg2_two_rates#3": {"amount_gross", "treasury"},   # amount: «49,915»→49915 صحيح
     "comma_thousands#2": {"amount_gross", "treasury"},
     "arabic_comma_rate#2": {"treasury"},
-    # FIFO_EDGE (known_bad: رسالة ثانية لم تُدمَج — حافة نادرة؛ ننتظر مثال إنتاج قبل الإصلاح)
+    # FIFO_EDGE → أُصلِح بالبند 1 (الربط أولاً): الرسالة الثانية «كود اسم سعر» تُدمَج الآن بأقدم صفقة
+    #   معلّقة لنفس المُرسِل (A83). قيم الملف (None) تعكس السلوك القديم غير المدموج → تُتجاوَز الحقول
+    #   التي جلبها الدمج الصحيح (المورّد/السعر). لا خطأ محلّل — الدمج هو المطلوب.
     "shape_04_msg2_rate_only#2": {"supplier_code", "supplier_name", "rate"},
+    "shape_04_msg2_rate_only#3": {"supplier_code", "supplier_name", "rate", "treasury"},
     "amount_midsentence#1": {"supplier_code", "supplier_name", "rate"},
     "shape_06_msg2_two_rates#4": {"supplier_code", "supplier_name", "rate", "treasury"},
     "shape_06_msg2_two_rates#5": {"supplier_code", "supplier_name", "rate", "treasury"},
