@@ -26,12 +26,12 @@ ADMIN = "admin@g.us"
 # ═════════════════════════════════════════════════════════════════════════════
 # مستوى الشاشة — moneyado_readiness() يعيد استخدام _list/_visible_stock_pids
 # ═════════════════════════════════════════════════════════════════════════════
-def _screen_with_pids(list_pids, visible_pids, form_visible=False):
+def _screen_with_pids(list_pids, visible_pids, dirty_reason=None):
     """MoneyadoScreen بأدنى إعداد مع حقن نتائج جرد النسخ + فحص الفورم (بلا pywinauto حيّ)."""
     scr = MoneyadoScreen({"sell_screen": {"process_name": "stock.exe"}})
     scr._list_stock_pids = lambda process_name: list_pids
     scr._visible_stock_pids = lambda process_name, pids: visible_pids
-    scr._operation_form_visible = lambda pids: form_visible   # (د) لا تعداد نوافذ حيّ في الاختبار
+    scr._open_form_dirty_reason = lambda pids: dirty_reason   # (د) لا تعداد/ربط نوافذ حيّ في الاختبار
     return scr
 
 
@@ -60,16 +60,17 @@ def test_readiness_two_visible_returns_false_with_reason():
     assert "نسخت" in reason  # «نسختان» / «نسختين»
 
 
-def test_readiness_open_dirty_form_returns_false():
-    """(البند د) نسخة مرئية واحدة لكن فورم عملية مفتوح (بقايا/غير نظيف) → غير جاهز مع سبب."""
-    ready, reason = _screen_with_pids([111, 222], [111], form_visible=True).moneyado_readiness()
+def test_readiness_dirty_open_form_returns_false():
+    """(البند د، مُلَيَّن) فورم عملية مفتوح **فيه بيانات** → غير جاهز مع السبب."""
+    ready, reason = _screen_with_pids(
+        [111, 222], [111], dirty_reason="MONEYADO على فورم فيه بيانات (بقايا حوالة) — راجعه").moneyado_readiness()
     assert ready is False
-    assert "فورم" in reason and "نظيف" in reason
+    assert "بيانات" in reason
 
 
-def test_readiness_one_visible_clean_form_returns_true():
-    """نسخة مرئية واحدة بلا فورم عملية مفتوح (القائمة الرئيسية) → جاهز."""
-    ready, reason = _screen_with_pids([111, 222], [111], form_visible=False).moneyado_readiness()
+def test_readiness_clean_open_form_returns_true():
+    """(توجيه المالك) فورم عملية مفتوح **نظيف** (خزينة فقط/فارغ) → جاهز: الكاتب يستأنفه."""
+    ready, reason = _screen_with_pids([111, 222], [111], dirty_reason=None).moneyado_readiness()
     assert ready is True
     assert reason == ""
 

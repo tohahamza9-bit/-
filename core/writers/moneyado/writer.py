@@ -127,9 +127,9 @@ class MoneyadoWriter(Writer):
             #     البيع يفتح «بيع عملة»؛ الشراء يفتح «شراء عملة» (بعد أن يكون البيع قد خُزّن
             #     وأُغلقت شاشته بـ confirm_store_on_main، فالبوت الآن على القائمة الرئيسية).
             if op == OperationType.SELL:
-                screen.open_sell_screen()
+                reused_form = screen.open_sell_screen()
             else:
-                screen.open_buy_screen()
+                reused_form = screen.open_buy_screen()
             unexpected = screen.check_unexpected_window()
             if unexpected:
                 return self._unexpected(screen, op, job, unexpected)
@@ -152,6 +152,14 @@ class MoneyadoWriter(Writer):
                     continue
 
                 screen.fill(field_op, fcfg.get(field_op.key, {}))
+
+                # (توجيه المالك 1.ب) **فقط** على فورم مُعاد استخدامه (خزينة سابقة معبّأة): تحقّق أنّ كود
+                #    الخزينة قُبِل (الحقل غير فارغ بعد الإدخال+Enter) قبل بقيّة الحقول — لا حساب مجهول.
+                #    فورم جديد فارغ لا يحتاج (لا خزينة سابقة)، فلا قراءة إضافية على المسار الشائع.
+                if field_op.key == "foreign_account" and reused_form is True:
+                    acc_fail = self._verify_account_applied(screen, op, job, fcfg)
+                    if acc_fail is not None:
+                        return acc_fail
 
                 # منطق حقل الزبون (§11.2): بعد الكود+Enter يبحث MONEYADO تلقائيًا ويُظهر الاسم.
                 if field_op.key == "customer" and op == OperationType.SELL:
@@ -276,6 +284,32 @@ class MoneyadoWriter(Writer):
         except Exception as exc:
             log.warning("تعذّر حفظ لقطة الشاشة (job=%s): %s", job.job_id, exc)
             return None
+
+    def _verify_account_applied(self, screen: ScreenController, op: OperationType, job: WriteJob,
+                                fcfg: dict) -> Optional[WriteResult]:
+        """(توجيه المالك 1.ب) بعد كتابة كود الخزينة على «الحساب الأجنبي» — خاصّةً على فورم **مُعاد
+        استخدامه** كان يحمل خزينة سابقة (بلاس فون 74) لقيدٍ بخزينة مختلفة — نتحقّق أنّ الحساب **قُبِل**:
+          • الاستبدالُ المحقَّق (§ب) مسح القيمة القديمة قبل الكتابة (فلا تُبقى «74» ملتصقةً)، فالحقل الآن
+            يحمل الكود الجديد أو يُصبح **فارغًا** إن رُفض الكود.
+          • فارغ بعد الإدخال+Enter → لم تُقبَل الخزينة → STOP + مراجعة (لا نُكمل بقيّة الحقول على حساب
+            مجهول). القراءة best-effort: قيمة غير نصّية (mock)/تعذّر القراءة → لا نتحقّق."""
+        acc_cfg = fcfg.get("foreign_account", {})
+        shown = ""
+        for _ in range(max(1, self._NAME_POLL_RETRIES)):
+            try:
+                raw = screen.read_text(acc_cfg)
+            except Exception:
+                return None                       # تعذّر القراءة → best-effort، لا نحجب
+            if not isinstance(raw, str):
+                return None                       # قراءة غير نصّية (mock) → لا نتحقّق
+            shown = raw.strip()
+            if shown:
+                break
+            time.sleep(self._NAME_POLL_INTERVAL)  # مهلة كي يُظهر البرنامج الحساب بعد الكود+Enter
+        if not shown:
+            return self._safe_review(
+                screen, op, job, error="الحساب الأجنبي (الخزينة) فارغ بعد الإدخال — لم تُقبَل الخزينة")
+        return None
 
     def _try_stop(self, screen: ScreenController, op: OperationType) -> None:
         """STOP آمن best-effort — لا يرمي حتى لا يحجب نتيجة المراجعة."""

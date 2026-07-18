@@ -1494,3 +1494,80 @@ def test_fill_types_value_when_field_cleared(monkeypatch):
     scr._fill(FieldOp("reference_number", "SI4083", TYPE_KEYS), {})
     assert any(c.args and c.args[0] == "SI4083" for c in ctrl.type_keys.call_args_list), \
         "كُتبت القيمة الجديدة بعد تأكيد التفريغ"
+
+
+# ── استئناف الفورم المتبقّي + تغيير الخزينة (توجيه المالك: لا إغلاق للفورم النظيف) ──────────
+def test_form_with_treasury_only_is_clean():
+    """(توجيه المالك) فورم بخزينة فقط (foreign_account معبّأ «بلاس فون 74») وبقيّة الهوية فارغة =
+    **نظيف** — MONEYADO يُبقي الخزينة على الفورم الفارغ بعد كل تخزين؛ الكاتب يستأنفه لا يُغلقه."""
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({"sell_screen": {"fields": {
+        "reference_number": {"coord": [1, 1]}, "customer": {"coord": [2, 2]},
+        "foreign_account": {"coord": [3, 3]}, "foreign_amount": {"coord": [4, 4]}}}})
+
+    def ctrl_for(cfg, method=""):
+        return _ctrl_with_text("بلاس فون 74" if cfg.get("coord") == [3, 3] else "")
+
+    scr._control = ctrl_for
+    assert scr._form_is_clean(OperationType.SELL) is True   # الخزينة مُستثناة → نظيف
+
+
+def test_open_screen_reuses_clean_form_returns_true():
+    """(توجيه المالك) استئناف فورم مفتوح نظيف يُرجِع True (الكاتب يتحقّق من قبول الخزينة)."""
+    from core.writers.moneyado.screens import MoneyadoScreen
+    scr = MoneyadoScreen({"sell_screen": {}}, step_delay=0)
+    scr._connect_app = lambda op: None
+    scr._form_open_and_visible = lambda op: True
+    scr._bind_form = lambda op, timeout=None: None
+    scr._form_is_clean = lambda op: True
+    assert scr.open_sell_screen() is True
+
+
+def test_verify_account_applied_ok_when_nonempty(tmp_path):
+    """(1.ب) الحساب غير فارغ بعد الإدخال → قُبِل (None)."""
+    screen = make_screen()   # read_text → «فداء شاكونه» (غير فارغ)
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    assert writer._verify_account_applied(
+        screen, OperationType.SELL, make_job(make_sell_leg()), screen.field_config.return_value) is None
+
+
+def test_verify_account_applied_fails_when_empty(tmp_path):
+    """(1.ب) الحساب فارغ بعد الإدخال+Enter → لم تُقبَل الخزينة → مراجعة (لا نُكمل على حساب مجهول)."""
+    screen = make_screen()
+    screen.read_text.return_value = ""
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    res = writer._verify_account_applied(
+        screen, OperationType.SELL, make_job(make_sell_leg()), screen.field_config.return_value)
+    assert res is not None and res.ok is False and "الخزينة" in res.error
+
+
+def test_verify_account_applied_skips_on_nonstr_read(tmp_path):
+    """(1.ب) قراءة غير نصّية (mock/غير متاح) → best-effort skip (لا تحقّق، لا فشل)."""
+    screen = make_screen()
+    screen.read_text.return_value = MagicMock()          # قيمة غير نصّية
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    assert writer._verify_account_applied(
+        screen, OperationType.SELL, make_job(make_sell_leg()), screen.field_config.return_value) is None
+
+
+@pytest.mark.asyncio
+async def test_reused_form_fails_when_treasury_not_accepted(tmp_path):
+    """(المالك 1.ب) فورم مُعاد استخدامه (open→True) + حساب فارغ بعد كتابة الخزينة → فشل قبل الحفظ."""
+    screen = make_screen()
+    screen.open_sell_screen.return_value = True           # أُعيد استخدام الفورم
+    screen.read_text.return_value = ""                    # الخزينة لم تُقبَل
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    res = await writer.write(make_job(make_sell_leg()), commit=True)
+    assert res.ok is False and "الخزينة" in (res.error or "")
+    screen.press_store.assert_not_called()                # لم نصل «تخزين» (فشل مبكر)
+
+
+@pytest.mark.asyncio
+async def test_fresh_form_skips_treasury_verify(tmp_path):
+    """(المالك) فورم جديد (open→False) → لا تحقّق خزينة إضافيّ ولو كان القراءة فارغة (المسار الشائع)."""
+    screen = make_screen()
+    screen.open_sell_screen.return_value = False          # فورم جديد فارغ
+    screen.read_text.return_value = ""
+    writer = make_writer(screen, dry_run=False, tmp_path=tmp_path)
+    res = await writer.write(make_job(make_sell_leg()), commit=True)
+    assert res.ok is True                                 # لم يُفشِله فحص الخزينة (فورم جديد)

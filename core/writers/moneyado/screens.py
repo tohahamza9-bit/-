@@ -148,12 +148,12 @@ class ScreenController(ABC):
         """يضغط زرًّا في القائمة الرئيسية بنصّه (label) — أكثر استقرارًا من الإحداثيات (§11.3)."""
 
     @abstractmethod
-    def open_sell_screen(self) -> None:
-        """يفتح شاشة «بيع عملة» من القائمة الرئيسية (نص الزر) وينتظر ظهور الفورم (§11.3)."""
+    def open_sell_screen(self) -> bool:
+        """يفتح «بيع عملة» (نص الزر) وينتظر الفورم (§11.3). True إن أُعيد استخدام فورم نظيف مفتوح."""
 
     @abstractmethod
-    def open_buy_screen(self) -> None:
-        """يفتح شاشة «شراء عملة» من القائمة الرئيسية (نص الزر) وينتظر ظهور الفورم (§11.3)."""
+    def open_buy_screen(self) -> bool:
+        """يفتح «شراء عملة» (نص الزر) وينتظر الفورم (§11.3). True إن أُعيد استخدام فورم نظيف مفتوح."""
 
     @abstractmethod
     def check_unexpected_window(self) -> Optional[str]:
@@ -249,9 +249,14 @@ class MoneyadoScreen(ScreenController):
     # الخانات الأخيرة قبل «تخزين» (الهاتف/الملاحظات) → مهلة step_delay إضافية لتثبيت القيمة قبل
     # الضغط على «تخزين» في شاشتَي البيع والشراء (§11.3).
     _EXTRA_SETTLE_BEFORE_STORE = {"payment_method", "notes"}
-    # 🔴 حقول الهوية الحرجة (§0): الرقم الإشاري/الزبون/الحساب/المبلغ. فورم فيه أيّها غير فارغ = بقايا
-    #    حوالة سابقة (م: SI408x «SI4082SI4083»). تُستخدم لفحص نظافة الفورم (أ) والاستبدال المحقَّق (ب).
-    _IDENTITY_FIELDS = ("reference_number", "customer", "foreign_account", "foreign_amount", "quantity")
+    # 🔴 حقول **النظافة** (البند أ/د): تخصّ حوالةً بعينها. الخزينة (foreign_account) **مُستثناة عمدًا**:
+    #    MONEYADO يُبقيها معبّأة على الفورم الفارغ الذي يفتحه تلقائيًّا بعد كل تخزين (بلاس فون 74) —
+    #    وهذا **طبيعيّ لا بقايا** (توجيه المالك): فورم بخزينة فقط وبقيّة الهوية فارغة = **نظيف قابل
+    #    للاستئناف**، والكاتب يغيّر خزينته عند الحاجة. وجود أيٍّ من هذه غير فارغ = بقايا حوالة سابقة.
+    _CLEANLINESS_FIELDS = ("reference_number", "customer", "foreign_amount", "quantity")
+    # 🔴 حقول **الاستبدال المحقَّق** (البند ب): تشمل الخزينة — نمسحها ونتحقّق قبل كتابة كود جديد كي لا
+    #    يلتصق كودان (74+77=«7477») على فورم مُعاد استخدامه. (نظافةً لا تُحسَب، لكن استبدالًا تُتحقَّق.)
+    _VERIFY_CLEAR_FIELDS = ("reference_number", "customer", "foreign_account", "foreign_amount", "quantity")
 
     def __init__(
         self,
@@ -381,10 +386,12 @@ class MoneyadoScreen(ScreenController):
                 return False, "MONEYADO مغلق/مصغّر (لا نافذة مرئية)"
             if len(visible) > 1:
                 return False, f"نسختان مرئيتان من MONEYADO ({len(visible)}) — التباس"
-            # (البند د §11.3) فورم عملية مفتوح وقت فحص البوابة = غير نظيف/بقايا (المفترض: القائمة
-            #   الرئيسية بين الحوالات) → غير جاهز، فلا تُكتب فوق بقايا؛ يُغلَق الفورم للقائمة فتُستأنَف.
-            if self._operation_form_visible(visible):
-                return False, "MONEYADO على فورم عملية مفتوح (غير نظيف/بقايا) — أغلقه للقائمة الرئيسية"
+            # (البند د، مُلَيَّن — توجيه المالك) فورم عملية مفتوح **نظيف** (خزينة فقط/فارغ) = جاهز:
+            #   الكاتب يستأنفه ويغيّر خزينته بأمان (لا إغلاق/رجوع للقائمة). فورم **فيه بيانات** = غير
+            #   جاهز مع السبب (لا نكتب فوق بقايا حوالة).
+            dirty = self._open_form_dirty_reason(visible)
+            if dirty:
+                return False, dirty
             return True, ""
         except Exception as exc:                        # فحص متعذّر → جاهز (fail-open)
             log.warning("فحص جاهزية MONEYADO تعذّر (%s) — يُعامَل جاهزًا (fail-open).", exc)
@@ -595,7 +602,7 @@ class MoneyadoScreen(ScreenController):
             fields = self.field_config(operation)
         except Exception:
             return True                    # لا إعداد حقول (اختبار/إعداد ناقص) → لا فحص (fail-open)
-        for key in self._IDENTITY_FIELDS:
+        for key in self._CLEANLINESS_FIELDS:
             cfg = fields.get(key)
             if cfg is None:                # الحقل غير مُعرَّف في الإعداد → تخطٍّ (لا نحجب بذريعته)
                 continue
@@ -609,16 +616,14 @@ class MoneyadoScreen(ScreenController):
                 return False
         return True
 
-    def _operation_form_visible(self, pids) -> bool:
-        """أهناك فورم عملية (بيع/شراء) مرئيّ لأيّ من نسخ MONEYADO؟ (البند د §11.3 — خفيف: تعداد نوافذ
-        بلا ربط/قراءة حقول). عند فحص البوابة يجب أن يكون MONEYADO على القائمة الرئيسية؛ فورم عملية
-        مفتوح = بقايا/غير نظيف. fail-open (تعذّر الفحص → False، لا نحجب بذريعة)."""
+    def _visible_operation_form(self, pids) -> Optional[OperationType]:
+        """عمليّة الفورم المرئيّ (SELL/BUY) لأيّ من نسخ MONEYADO إن وُجد، وإلا None. تعداد نوافذ خفيف
+        بلا ربط/قراءة حقول — نميّز بزرّ العملية المميّز (بيع «ايصال قبض» / شراء «ايصال صرف» §0)."""
         if not _PYWINAUTO_AVAILABLE:
-            return False
+            return None
         try:
-            markers = {_norm_btn(self._form_marker(OperationType.SELL)),
-                       _norm_btn(self._form_marker(OperationType.BUY))}
-            markers.discard("")
+            marker_sell = _norm_btn(self._form_marker(OperationType.SELL))
+            marker_buy = _norm_btn(self._form_marker(OperationType.BUY))
             btn_class = self._main_menu_cfg().get("button_class", self._DEFAULT_MAIN_BUTTON_CLASS)
             pidset = set(pids or [])
             for w in Desktop(backend="win32").windows(class_name=self._DEFAULT_FORM_CLASS):
@@ -627,13 +632,31 @@ class MoneyadoScreen(ScreenController):
                         continue
                     texts = {_norm_btn(b.window_text() or "")
                              for b in w.descendants(class_name=btn_class)}
-                    if markers & texts:
-                        return True
+                    if marker_sell and marker_sell in texts:
+                        return OperationType.SELL
+                    if marker_buy and marker_buy in texts:
+                        return OperationType.BUY
                 except Exception:
                     continue
         except Exception:
-            return False
-        return False
+            return None
+        return None
+
+    def _open_form_dirty_reason(self, pids) -> Optional[str]:
+        """(البند د، مُلَيَّن — توجيه المالك) فورم عملية مرئيّ **فيه بيانات** (حقول هوية غير فارغة، عدا
+        الخزينة) → سبب عدم الجاهزية؛ فورم **نظيف** (خزينة فقط/فارغ) أو لا فورم → None (جاهز: الكاتب
+        يستأنفه ويغيّر خزينته). fail-open (تعذّر الربط/الفحص → None، لا نحجب — الكاتب يحرس عند الكتابة)."""
+        op = self._visible_operation_form(pids)
+        if op is None:
+            return None
+        try:
+            self._connect_app(op)
+            self._bind_form(op, timeout=self._open_timeout)
+        except Exception:
+            return None                    # تعذّر الربط → لا نحجب (الكاتب سيحرس)
+        if self._form_is_clean(op):
+            return None                    # نظيف (خزينة فقط) → جاهز للاستئناف
+        return "MONEYADO على فورم فيه بيانات (بقايا حوالة) — راجعه أو أكمِله"
 
     def _wait_form_open(self, operation: OperationType) -> bool:
         """ينتظر ظهور فورم العملية حتى `_open_retry_wait` (سبر كل 0.25s). True إن ظهر."""
@@ -644,9 +667,12 @@ class MoneyadoScreen(ScreenController):
             time.sleep(0.25)
         return self._form_open_and_visible(operation)
 
-    def _open_screen(self, operation: OperationType, label: str) -> None:
+    def _open_screen(self, operation: OperationType, label: str) -> bool:
         """يفتح فورم العملية من القائمة الرئيسية: اتصال بالتطبيق → (فورم مفتوح مسبقًا؟ استخدمه) →
-        تأكّد القائمة → ضغط الزر بالنص مع إعادة إن ابتُلع النقر → ربط الفورم (§11.3)."""
+        تأكّد القائمة → ضغط الزر بالنص مع إعادة إن ابتُلع النقر → ربط الفورم (§11.3).
+
+        يُرجِع **True إن أُعيد استخدام فورم مفتوح نظيف** (استئناف — قد يحمل خزينةً سابقة يغيّرها
+        الكاتب)، وFalse إن فُتِح فورمٌ **جديد فارغ**. الكاتب يستعمله ليقرّر التحقّق من قبول الخزينة."""
         self._connect_app(operation)
 
         # فورم العملية **نفسها** مفتوح ومرئي مسبقًا → يُستأنَف **فقط إن كان نظيفًا** (البند أ §0):
@@ -656,7 +682,7 @@ class MoneyadoScreen(ScreenController):
             self._bind_form(operation, timeout=self._open_timeout)
             if self._form_is_clean(operation):
                 log.info("فورم «%s» مفتوح ونظيف → استئناف مباشر (بلا ضغط §11.3).", label)
-                return
+                return True                     # أُعيد استخدام فورم نظيف (قد يحمل خزينة سابقة)
             log.warning("فورم «%s» مفتوح لكنه غير نظيف (بقايا حوالة) → إغلاق وفتح جديد (البند أ §0).", label)
             self._close_stray_forms()
             self._window = None
@@ -700,14 +726,15 @@ class MoneyadoScreen(ScreenController):
             raise RuntimeError(
                 f"فورم «{label}» الجديد ليس فارغًا (بقايا غير متوقّعة) — لا كتابة فوق بقايا (البند أ §0)."
             )
+        return False                            # فورم جديد فارغ (لا خزينة سابقة تحتاج تحقّقًا)
 
-    def open_sell_screen(self) -> None:
+    def open_sell_screen(self) -> bool:
         label = self._main_menu_cfg().get("sell_button", self._DEFAULT_SELL_BUTTON)
-        self._open_screen(OperationType.SELL, label)
+        return self._open_screen(OperationType.SELL, label)
 
-    def open_buy_screen(self) -> None:
+    def open_buy_screen(self) -> bool:
         label = self._main_menu_cfg().get("buy_button", self._DEFAULT_BUY_BUTTON)
-        self._open_screen(OperationType.BUY, label)
+        return self._open_screen(OperationType.BUY, label)
 
     def _tab_to(self, tab_index: int):
         """
@@ -843,7 +870,7 @@ class MoneyadoScreen(ScreenController):
         # (البند ب §0) استبدال **محقَّق** للحقول الحرجة (الرقم الإشاري/الزبون/الحساب/المبلغ): تأكّد أن
         #   الحقل فُرِّغ فعلًا قبل الكتابة — يمنع التصاق قيمتين على فورم أُعيد استخدامه ببقايا
         #   («SI4082»+«SI4083»). لم يُفرَّغ → مسح أقوى (تحديد كامل ثم حذف) ثم رفض صريح (لا كتابة فوق بقايا).
-        if field_op.key in self._IDENTITY_FIELDS and self._safe_read(ctrl):
+        if field_op.key in self._VERIFY_CLEAR_FIELDS and self._safe_read(ctrl):
             ctrl.type_keys("{END}+{HOME}{BACKSPACE}", set_foreground=True)   # مسح أقوى (Shift+Home ثم حذف)
             if self._safe_read(ctrl):
                 raise RuntimeError(
