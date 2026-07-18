@@ -26,11 +26,12 @@ ADMIN = "admin@g.us"
 # ═════════════════════════════════════════════════════════════════════════════
 # مستوى الشاشة — moneyado_readiness() يعيد استخدام _list/_visible_stock_pids
 # ═════════════════════════════════════════════════════════════════════════════
-def _screen_with_pids(list_pids, visible_pids):
-    """MoneyadoScreen بأدنى إعداد مع حقن نتائج جرد النسخ (بلا pywinauto حيّ)."""
+def _screen_with_pids(list_pids, visible_pids, form_visible=False):
+    """MoneyadoScreen بأدنى إعداد مع حقن نتائج جرد النسخ + فحص الفورم (بلا pywinauto حيّ)."""
     scr = MoneyadoScreen({"sell_screen": {"process_name": "stock.exe"}})
     scr._list_stock_pids = lambda process_name: list_pids
     scr._visible_stock_pids = lambda process_name, pids: visible_pids
+    scr._operation_form_visible = lambda pids: form_visible   # (د) لا تعداد نوافذ حيّ في الاختبار
     return scr
 
 
@@ -57,6 +58,20 @@ def test_readiness_two_visible_returns_false_with_reason():
     ready, reason = _screen_with_pids([111, 222], [111, 222]).moneyado_readiness()
     assert ready is False
     assert "نسخت" in reason  # «نسختان» / «نسختين»
+
+
+def test_readiness_open_dirty_form_returns_false():
+    """(البند د) نسخة مرئية واحدة لكن فورم عملية مفتوح (بقايا/غير نظيف) → غير جاهز مع سبب."""
+    ready, reason = _screen_with_pids([111, 222], [111], form_visible=True).moneyado_readiness()
+    assert ready is False
+    assert "فورم" in reason and "نظيف" in reason
+
+
+def test_readiness_one_visible_clean_form_returns_true():
+    """نسخة مرئية واحدة بلا فورم عملية مفتوح (القائمة الرئيسية) → جاهز."""
+    ready, reason = _screen_with_pids([111, 222], [111], form_visible=False).moneyado_readiness()
+    assert ready is True
+    assert reason == ""
 
 
 def test_readiness_fail_open_on_exception():
