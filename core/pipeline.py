@@ -57,7 +57,8 @@ from .parsing import (
     parse_message,
 )
 from .ai_understanding import (
-    OpenRouterClient, validate_corrections, validate_proposal, with_ephemeral_alias,
+    OpenRouterClient, _num_in_text, apply_text_corrections, validate_corrections,
+    validate_proposal, validate_text_corrections, with_ephemeral_alias,
 )
 from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
@@ -296,6 +297,59 @@ class Pipeline:
             if raw is not None and (raw.text or "").strip():
                 parts.append(raw.text.strip())
         return "\n".join(parts) if parts else None
+
+    async def _ai_rescue_parse(self, raw: RawMessage, treasuries: list, suppliers: list):
+        """(الفهم الذكي — توسعة X1325) رسالة أولى تحمل مرجعًا وفشل تفكيكها → صحّح كلمة العملة
+        ثم أعِد التفكيك حتميًّا. يُرجِع ParseResult ناجحًا أو None (فيمضي التصعيد كما هو).
+
+        🔴 الضوابط: النموذج **لا يعيد صياغة النصّ** — يقترح استبدالات رمزيّة فقط، والكود يتحقّق
+           أن الخام موجود حرفيًّا وأن البديل من قائمة عملات مغلقة وأنه امتداد للخام (جني→جنيه).
+           وبعد إعادة التفكيك: **المبلغ المستخرَج يجب أن يكون موجودًا في النصّ الأصليّ** — فلا
+           يخلق «تصحيحٌ» رقمًا لم يكتبه الموظّف.
+        """
+        cfg = await self.db.detection.get()
+        if not getattr(cfg, "ai_enabled", False):
+            return None
+        text = (raw.text or "").strip()
+        if not text:
+            return None
+        client = self._ai_client or OpenRouterClient(
+            api_key=get_settings().openrouter_api_key,
+            model=getattr(cfg, "ai_model", "google/gemini-2.5-flash"),
+            timeout=float(getattr(cfg, "ai_timeout_seconds", 10.0)))
+        try:
+            prop = await client.propose(text, treasuries, suppliers)
+        except Exception as exc:      # T5 — الصمود: لا رسالة تتوقّف على API خارجيّ
+            log.warning("(الفهم الذكي) استثناء في نداء إنقاذ التفكيك: %s", exc)
+            return None
+        if prop is None:
+            return None
+        threshold = float(getattr(cfg, "ai_confidence_threshold", 0.9))
+        fixes = validate_text_corrections(prop, text, threshold)
+        if not fixes:
+            return None
+        fixed_text = apply_text_corrections(text, fixes)
+        if fixed_text == text:
+            return None
+        res = parse_message(fixed_text, treasuries, suppliers)
+        if res.kind != "transfer" or res.leg is None or res.leg.amount is None:
+            log.info("(الفهم الذكي) تصحيح العملة لم يُنتج حوالةً مفكَّكة (%s) — تصعيد عاديّ",
+                     raw.message_key)
+            return None
+        # 🔴 الخط الأحمر: المبلغ الناتج موجود في النصّ **الأصليّ** (لا رقم مخترَع)
+        if not _num_in_text(res.leg.amount, text):
+            log.warning("(الفهم الذكي) رُفض إنقاذ التفكيك: المبلغ %s ليس في النصّ الأصليّ",
+                        res.leg.amount)
+            return None
+        names = "، ".join(f"«{a}» ← «{b}»" for a, b in fixes)
+        await self.bus.notify_admin(
+            f"⚠️ {res.leg.reference_number or '؟'} فُهمت بالذكاء الاصطناعي ({prop.model}): "
+            f"صُحّحت كلمة العملة {names}، ثم أُعيد التفكيك حتميًّا — "
+            f"مبلغ {res.leg.amount:g} {getattr(res.leg.currency, 'value', '؟')}.",
+            raw.message_key)
+        log.info("(الفهم الذكي) أُنقِذ تفكيك %s بتصحيح %s (مبلغ=%s)",
+                 raw.message_key, names, res.leg.amount)
+        return res
 
     async def _ai_replay_with_corrections(self, deal: Deal, corrections: list,
                                           prop, now: datetime) -> bool:
@@ -753,6 +807,16 @@ class Pipeline:
         treasuries = await self.db.treasuries.all_active()
         suppliers = await self.db.suppliers.all_active()
         result = parse_message(raw.text, treasuries, suppliers)
+
+        # ═══ (طبقة الفهم الذكي — توسعة: الرسالة الأولى الفاشلة تفكيكًا، م: X1325) ═══
+        # رسالةٌ تحمل مرجعًا لكن التفكيك أخفق ⇒ مصيرها التصعيد حتمًا (لا صفقة تُنشَأ، وتكملتها
+        # تصير يتيمة فتنزاح على جارتها). فرصة أخيرة **قبل** أيّ تفرّع: النموذج يصحّح كلمة العملة
+        # فقط (قائمة مغلقة، استبدال رمزيّ إضافيّ)، ثم يُعاد التفكيك **حتميًّا** على النصّ المصحَّح.
+        # نجح ⇒ يمضي المسار الطبيعيّ كأن الموظّف كتبها صحيحة. أخفق ⇒ لا شيء يتغيّر (تصعيد عاديّ).
+        if result.kind != "transfer" and _has_reference(raw.text or ""):
+            _fixed = await self._ai_rescue_parse(raw, treasuries, suppliers)
+            if _fixed is not None:
+                result = _fixed
 
         # 🔴 مبلغ بصيغة «ألف/آلاف» (§3.5): وُسِّع تلقائيًّا (32 ألف→32000) ويُسجَّل بالمبلغ المصحَّح
         #    عبر المسار العادي — تنبيه المركزية (Reply) + المسؤول للتأكيد/التصحيح. حسابٌ مع إشعار، بلا إيقاف.

@@ -115,7 +115,7 @@ _SCHEMA_HINT = """أعِد JSON بهذا الشكل بالضبط:
   "reference_number": "<الرقم الإشاري>" | null,
   "corrections": [
     {"raw": "<الاسم كما ورد في الرسالة حرفيًّا>",
-     "entity_type": "supplier" | "treasury",
+     "entity_type": "supplier" | "treasury" | "currency",
      "official": "<الاسم المسجَّل المقابل من القائمة>",
      "confidence": 0.0}
   ],
@@ -352,6 +352,62 @@ def with_ephemeral_alias(records: list, rec, raw_token: str) -> list:
             out.append(clone)
         else:
             out.append(r)
+    return out
+
+
+# كلمات العملة المسموح التصحيح إليها — قائمة مغلقة (النموذج لا يخترع كلمةً خارجها).
+CURRENCY_WORDS = (
+    "جنيه", "جنيه مصري", "ج.م", "جم", "دينار تونسي", "دينار", "د.ت", "دت",
+    "دينار ليبي", "د.ل", "دولار",
+)
+
+
+def validate_text_corrections(prop: AiProposal, text: str,
+                              threshold: float = 0.9) -> list[tuple[str, str]]:
+    """تصحيحات **كلمة العملة** فقط، للرسالة الأولى التي فشل تفكيكها (م: X1325 «جني م»).
+
+    القيود (كلها إلزاميّة):
+      1. النصّ الخام موجود حرفيًّا في الرسالة.
+      2. البديل من `CURRENCY_WORDS` حصرًا — لا كلمات من عند النموذج.
+      3. الثقة ≥ العتبة.
+      4. التصحيح **إضافيّ لا حذفيّ**: البديل يبدأ بالخام (جني→جنيه) — فلا يُستبدَل رقمٌ أو اسم.
+    """
+    out: list[tuple[str, str]] = []
+    items = prop.data.get("corrections")
+    if not isinstance(items, list):
+        return out
+    norm_text = normalize_ar(text)
+    for it in items:
+        if not isinstance(it, dict) or (it.get("entity_type") or "").lower() != "currency":
+            continue
+        raw = (it.get("raw") or "").strip()
+        official = (it.get("official") or "").strip()
+        try:
+            conf = float(it.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if not raw or not official or conf < threshold:
+            continue
+        if normalize_ar(raw) not in norm_text:
+            log.warning("(الفهم الذكي) رُفض تصحيح عملة: «%s» غير موجود في النصّ", raw)
+            continue
+        if normalize_ar(official) not in [normalize_ar(w) for w in CURRENCY_WORDS]:
+            log.warning("(الفهم الذكي) رُفض تصحيح عملة: «%s» خارج القائمة المغلقة", official)
+            continue
+        # (4) إضافيّ لا حذفيّ — يمنع «تصحيحًا» يبتلع رقمًا أو اسمًا
+        if not normalize_ar(official).startswith(normalize_ar(raw)):
+            log.warning("(الفهم الذكي) رُفض تصحيح عملة: «%s»←«%s» ليس امتدادًا للخام",
+                        raw, official)
+            continue
+        out.append((raw, official))
+    return out
+
+
+def apply_text_corrections(text: str, fixes: list[tuple[str, str]]) -> str:
+    """يطبّق الاستبدالات الرمزيّة على النصّ الأصليّ (أوّل ظهور لكلٍّ) — بلا إعادة صياغة."""
+    out = text
+    for raw, official in fixes:
+        out = out.replace(raw, official, 1)
     return out
 
 

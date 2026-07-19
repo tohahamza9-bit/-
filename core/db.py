@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
-from .constants import RoomType, Status
+from .constants import Role, RoomType, Status
 from .logging_setup import get_logger
 from .models import (
     AuthEventRecord,
@@ -493,9 +493,27 @@ class EmployeeListRepo(_Repo):
         return [EmployeeRecord(**d) async for d in cur]
 
     async def is_authorized(self, whatsapp_number: str) -> bool:
-        """«تم»/الإلغاء تُقبل من المعتمدين فقط (§8.3 §10)."""
+        """«تم»/الإلغاء/«أعد» تُقبل من المعتمدين فقط (§8.3 §10).
+
+        🔴 (م: X1323، قرار المالك) **المدراء معتمدون تلقائيًّا**: قائمة الموظفين قد تكون فارغة
+        (كما كانت لحظة الحادثة) فتُرفض أوامر المالك نفسه. الإضافة اليدويّة تبقى كما هي، ويُضاف
+        إليها مطابقةُ معرّفات المدراء المسجَّلين في اللوحة. تُفحَص القائمة أولًا (الأرخص).
+        """
         doc = await self.col.find_one({"whatsapp_number": whatsapp_number, "active": True})
-        return doc is not None
+        if doc is not None:
+            return True
+        if not whatsapp_number:
+            return False
+        try:
+            mdoc = await self.col.database["users"].find_one({
+                "whatsapp_jid": whatsapp_number,
+                "role": Role.MANAGER.value,
+                "active": {"$ne": False},
+            })
+            return mdoc is not None
+        except Exception as exc:   # T5 — لا نبتلع؛ فشل القراءة لا يمنح صلاحية
+            log.warning("تعذّر فحص المدراء لاعتماد «%s» (%s) — يُعامَل غير معتمد", whatsapp_number, exc)
+            return False
 
 
 class UnknownTermRepo(_Repo):
