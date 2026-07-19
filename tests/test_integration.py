@@ -156,13 +156,14 @@ async def test_synthesize_buy_leg_for_sell_and_buy_with_supplier(db):
     assert buy.treasury.code == "90"           # نفس الخزينة الخارجية
     assert buy.reference_number == "SI1417"    # نفس الرقم الإشاري
     assert buy.phone == "01037354643"          # نفس الهاتف
-    # 🔴 قاعدة الطرفين: طرف البيع أيضًا بالصافي (NET) بلا عمولة (كالشراء المشتقّ)
-    assert deal.sell_leg.amount == 20271 and deal.sell_leg.commission is None
+    # 🔴 (حكم المالك، م: X1322) طرف **البيع** بالإجمالي (GROSS) + عمولة سالبة — MONEYADO
+    #    يشتقّ الصافي (20475 − 204 = 20271). طرف الشراء يبقى بالصافي بلا عمولة.
+    assert deal.sell_leg.amount == 20475 and deal.sell_leg.commission == -204.0
 
 
-async def test_resolve_two_leg_both_net_no_commission(db):
-    """🔴 المسار A المباشر (_resolve_two_leg، طرفان بشراء صريح موجود): قاعدة الطرفين → كلا القيدين
-    بالصافي (NET) بلا عمولة — يوثّق المسار A مباشرةً (نظير المسار B أعلاه)."""
+async def test_resolve_two_leg_sell_gross_with_negative_commission(db):
+    """🔴 (حكم المالك، م: X1322) المسار A المباشر (_resolve_two_leg، طرفان بشراء صريح موجود):
+    قيد **البيع** بالإجمالي (GROSS) + عمولة سالبة، وطرف الشراء بالصافي بلا عمولة."""
     from core.constants import Currency
     from core.models import Deal, TreasuryRef
     pipe = _make_pipeline(db)
@@ -179,7 +180,8 @@ async def test_resolve_two_leg_both_net_no_commission(db):
 
     await pipe._resolve_two_leg(deal)
 
-    assert deal.sell_leg.amount == 1000.0 and deal.sell_leg.commission is None
+    # البيع: الإجمالي 1010 + عمولة −10 ⇒ MONEYADO يشتقّ الصافي 1000. الشراء: صافي بلا عمولة.
+    assert deal.sell_leg.amount == 1010.0 and deal.sell_leg.commission == -10.0
     assert deal.buy_leg.amount == 1000.0 and deal.buy_leg.commission is None
 
 
@@ -201,10 +203,10 @@ async def test_synthesize_buy_leg_uses_supplier_code_and_rate(db):
     assert buy.is_supplier_counterpart is True
     assert buy.supplier is not None and buy.supplier.code == "760"
     assert buy.supplier_price_raw is None           # استُهلك في البناء
-    # طرف البيع: سعره وكوده كما هما؛ 🔴 عمولته أُلغيت (قاعدة الطرفين: كلاهما NET بلا عمولة)
+    # طرف البيع: سعره وكوده كما هما؛ 🔴 وعمولته السالبة **محفوظة** (حكم المالك، م: X1322)
     assert deal.sell_leg.price_normalized == "5.9"
     assert deal.sell_leg.customer_code == "570"
-    assert deal.sell_leg.commission is None
+    assert deal.sell_leg.commission == -204.0
 
 
 async def test_synthesized_supplier_buy_leg_screen_fields(db):
@@ -791,9 +793,10 @@ async def test_two_leg_grouping_and_order(db):
     assert len(completed) == 1, "الطرفان يجب أن يندمجا في صفقة واحدة (§7.3)"
     d = completed[0]
     assert d.is_two_legged and d.sell_leg is not None and d.buy_leg is not None
-    # 🔴 قاعدة الطرفين: كلاهما بالصافي (NET=8391) بلا عمولة (بغضّ النظر عن اشتقاق الشراء §6.1)
-    assert d.sell_leg.amount == 8391 and d.buy_leg.amount == 8391
-    assert d.sell_leg.commission is None
+    # 🔴 (حكم المالك، م: X1322) البيع بالإجمالي 8475 + عمولة −84 ⇒ MONEYADO يشتقّ الصافي 8391.
+    #    الشراء يبقى بالصافي بلا عمولة (عرف MONEYADO القائم).
+    assert d.sell_leg.amount == 8475 and d.sell_leg.commission == -84.0
+    assert d.buy_leg.amount == 8391 and d.buy_leg.commission is None
     # خزينة الطرفين = «فودافون بالخصم» (85) — الافتراضية لطرف مورد حوالة A الثانية (§6.1)
     assert d.sell_leg.treasury.code == "85" and d.buy_leg.treasury.code == "85"
 
