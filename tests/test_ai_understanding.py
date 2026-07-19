@@ -186,6 +186,116 @@ async def test_resolved_treasury_is_never_overwritten(db):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# حالة XI1321 الحقيقيّة: تصحيح إملاء المورد ثم **إعادة التفكيك الحتميّ**
+# ═══════════════════════════════════════════════════════════════════════════
+# المورد المسجَّل فعلًا في الإنتاج: الاسم «عز الدين » بكود 300 وإملاءات بديلة.
+_EZZ = SupplierRecord(name="عز الدين ", code="300",
+                      aliases=["عز الدين لعجيلي", "عزالدين العجيلي"])
+# الرسالة الثانية كما وردت حرفيًّا (لاحظ «عد الدين» — سقط حرف الزاي).
+XI_SECOND = "591نبيل البقار 34.5\n\n\nعد الدين العجيلي 34.5"
+XI_FIRST = "XI1321\n\n55292852\nالمهدي\n320د.ت\n\nجربه/ميدون"
+XI_K1, XI_K2 = "xi-1", "xi-2"
+
+
+def _xi_correction_proposal() -> dict:
+    """ما يُفترَض أن يعيده النموذج: تصحيح الإملاء فقط — بلا أيّ قيمة ماليّة."""
+    return {
+        "operation": "بيع", "customer_code": "591", "customer_name": "نبيل البقار",
+        "amount": None, "currency": None, "treasury": None, "supplier": "عز الدين ",
+        "price": 34.5, "reference_number": "XI1321",
+        "corrections": [{"raw": "عد الدين العجيلي", "entity_type": "supplier",
+                         "official": "عز الدين ", "confidence": 0.96}],
+        "confidence": _conf(treasury=0.0),
+    }
+
+
+async def _seed_xi(db, *, ai_enabled=True):
+    from core.constants import Currency
+    await db.suppliers.upsert(_EZZ)
+    await db.treasuries.upsert(
+        TreasuryRecord(name="فودافون بالخصم", code="85", type=TreasuryType.SELL_AND_BUY))
+    await db.detection.set(DetectionConfig(ai_enabled=ai_enabled, ai_model="fake/model",
+                                           ai_confidence_threshold=0.9))
+    for k, t in ((XI_K1, XI_FIRST), (XI_K2, XI_SECOND)):
+        await db.raw.col.insert_one({"message_key": k, "chat_jid": CENTRAL, "text": t,
+                                     "received_at": NOW.replace(tzinfo=None), "processed": True})
+    leg = ParsedLeg(operation=OperationType.SELL, reference_number="XI1321",
+                    customer_code="591", customer_name="نبيل البقار", amount=320.0,
+                    currency=Currency.TND, price_raw="34.5", price_normalized="34.5",
+                    treasury=None, phone="55292852", sender_jid="emp@lid",
+                    source_message_key=XI_K1)
+    d = Deal(deal_id="d-xi", status=Status.PARSED, sell_leg=leg, created_at=NOW, updated_at=NOW,
+             first_received_at=NOW, chat_jid=CENTRAL, source_message_keys=[XI_K1, XI_K2])
+    await db.deals.upsert(d)
+    return d
+
+
+async def test_xi1321_supplier_typo_is_rescued_by_replay(db):
+    """XI1321: «عد الدين العجيلي» ← المورد المسجَّل «عز الدين» ⇒ إعادة التفكيك تبني طرف الشراء
+    وتشتقّ الخزينة، فتنزل الحوالة بدل التصعيد — والزبون 591 نبيل البقار يبقى بدوره."""
+    deal = await _seed_xi(db)
+    bus, ai = _RecBus(), _FakeAi(_xi_correction_proposal())
+    assert await _pipe(db, bus, ai)._ai_rescue(deal, NOW) is True
+    lg = deal.sell_leg or deal.buy_leg
+    assert lg.treasury is not None, "الخزينة لم تُشتقّ بعد إعادة التفكيك"
+    assert deal.sell_leg.customer_code == "591"
+    assert deal.sell_leg.customer_name == "نبيل البقار"
+    assert any("فُهمت بالذكاء الاصطناعي" in m and "عد الدين العجيلي" in m for m in bus.admin_msgs)
+    assert any(dv.get("method") == "ai" for dv in lg.deviation_log)
+
+
+async def test_correction_never_persisted_as_alias(db):
+    """🔴 التصحيح مؤقّت: لا يُكتب إملاءً دائمًا في قاعدة البيانات (لا تعلّم صامت)."""
+    deal = await _seed_xi(db)
+    await _pipe(db, _RecBus(), _FakeAi(_xi_correction_proposal()))._ai_rescue(deal, NOW)
+    rec = [s for s in await db.suppliers.all_active() if s.code == "300"][0]
+    assert "عد الدين العجيلي" not in rec.aliases
+
+
+async def test_model_may_not_assign_treasury_role(db):
+    """🔴 الخطر الحيّ الملاحَظ في XI1321: النموذج اقترح خزينة «صالح جربة تونس» من سطر الموقع
+    «جربه/ميدون» بثقة 1.0. القاعدة: بلا رمز خزينة موسوم حتميًّا (unresolved_treasury) لا تُقبَل
+    خزينةٌ من النموذج إطلاقًا — النموذج يصحّح الهجاء ولا يُسنِد الأدوار."""
+    deal = await _seed_xi(db)
+    await db.treasuries.upsert(
+        TreasuryRecord(name="صالح جربة تونس", code="29", type=TreasuryType.SELL_ONLY))
+    prop = _xi_correction_proposal()
+    prop["corrections"] = []                       # لا تصحيح مورد ⇒ لا مسار إعادة
+    prop["treasury"], prop["treasury_code"] = "صالح جربة تونس", "29"
+    prop["confidence"] = _conf()
+    assert deal.sell_leg.unresolved_treasury is None
+    assert await _pipe(db, _RecBus(), _FakeAi(prop))._ai_rescue(deal, NOW) is False
+    assert deal.sell_leg.treasury is None, "أُسنِدت خزينة من النموذج بلا رمز موسوم — خطر ماليّ"
+
+
+async def test_correction_of_unregistered_target_escalates(db):
+    """تصحيح نحو اسم غير مسجَّل → يُرفض ولا تُعاد التفكيك (تصعيد)."""
+    deal = await _seed_xi(db)
+    prop = _xi_correction_proposal()
+    prop["corrections"][0]["official"] = "مورد وهميّ غير مسجَّل"
+    assert await _pipe(db, _RecBus(), _FakeAi(prop))._ai_rescue(deal, NOW) is False
+    assert (deal.sell_leg or deal.buy_leg).treasury is None
+
+
+async def test_correction_of_absent_token_escalates(db):
+    """النموذج «صحّح» نصًّا لا وجود له في الرسالة → يُرفض (منع اختراع الكلمات)."""
+    deal = await _seed_xi(db)
+    prop = _xi_correction_proposal()
+    prop["corrections"][0]["raw"] = "اسم لم يرد في الرسالة إطلاقًا"
+    assert await _pipe(db, _RecBus(), _FakeAi(prop))._ai_rescue(deal, NOW) is False
+    assert (deal.sell_leg or deal.buy_leg).treasury is None
+
+
+async def test_low_confidence_correction_escalates(db):
+    """ثقة التصحيح دون العتبة → يُرفض التصحيح (تصعيد)."""
+    deal = await _seed_xi(db)
+    prop = _xi_correction_proposal()
+    prop["corrections"][0]["confidence"] = 0.71
+    assert await _pipe(db, _RecBus(), _FakeAi(prop))._ai_rescue(deal, NOW) is False
+    assert (deal.sell_leg or deal.buy_leg).treasury is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # وحدة التحقّق الحتميّ — مباشرةً
 # ═══════════════════════════════════════════════════════════════════════════
 def _recs():

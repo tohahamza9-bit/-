@@ -29,6 +29,7 @@ import httpx
 
 from core.models import Currency, SupplierRecord, TreasuryRecord
 from core.parsing.normalize import normalize_ar
+from core.parsing.resolve import normalize_arabic_for_matching
 
 log = logging.getLogger(__name__)
 
@@ -84,11 +85,18 @@ class AiVerdict:
 # (1) النداء — OpenRouter (متوافق OpenAI)
 # ═════════════════════════════════════════════════════════════════════════════
 _SYSTEM_PROMPT = (
-    "أنت محلّل رسائل حوالات ماليّة عربيّة. مهمّتك **الفهم فقط**: تستخرج بيانات منظَّمة من نصّ "
-    "رسالة واحدة. لا تخترع أيّ رقم أو اسم غير موجود في النصّ. إن لم تجد حقلًا فاتركه null "
-    "وضع ثقته 0. كل كيان (خزينة/مورد) يجب أن يكون **حرفيًّا من القوائم المعطاة** — إن كان "
-    "الاسم في الرسالة خطأً إملائيًّا لكيان في القائمة فأعِد **الاسم الرسميّ من القائمة**؛ وإن "
-    "لم تجد ما يطابقه في القائمة فأعِد null. أعِد JSON فقط بلا أيّ شرح."
+    "أنت محلّل رسائل حوالات ماليّة عربيّة (تونس/مصر/ليبيا). مهمّتك **الفهم فقط**: تستخرج بيانات "
+    "منظَّمة من نصّ رسالة. لا تخترع أيّ رقم أو اسم غير موجود في النصّ. إن لم تجد حقلًا فاتركه "
+    "null وضع ثقته 0.\n\n"
+    "🔴 الأهمّ: **الأخطاء الإملائيّة في أسماء الخزائن والموردين واردة جدًّا** — الموظّف يكتب بسرعة "
+    "فيسقط حرف أو يلتصق حرفان أو تُبدَل حروف متقاربة النطق/الرسم (مثال: «عد الدين» يقصد «عزالدين»، "
+    "«محموذ» يقصد «محمود»). مهمّتك الأساسيّة هي ردّ الاسم المكتوب خطأً إلى **الاسم المسجَّل الأقرب "
+    "معنىً ونطقًا** من القوائم المعطاة أدناه.\n\n"
+    "قواعد ملزِمة: كل كيان (خزينة/مورد) تُعيده يجب أن يكون **منسوخًا حرفيًّا من القوائم المعطاة** "
+    "— لا تعيد اسمًا من عندك ولا تعيد ما كُتب في الرسالة إن كان مخالفًا للقائمة. وإن لم تجد في "
+    "القائمة اسمًا تثق أنه المقصود فأعِد null (لا تخمّن على العمياء). "
+    "ولكل اسم صحّحته أضِف مدخلًا في «corrections» يوضّح النصّ كما ورد في الرسالة حرفيًّا مقابل "
+    "الاسم المسجَّل. أعِد JSON فقط بلا أيّ شرح."
 )
 
 _SCHEMA_HINT = """أعِد JSON بهذا الشكل بالضبط:
@@ -105,6 +113,12 @@ _SCHEMA_HINT = """أعِد JSON بهذا الشكل بالضبط:
   "price": <رقم السعر كما ورد> | null,
   "phone": "<رقم الهاتف>" | null,
   "reference_number": "<الرقم الإشاري>" | null,
+  "corrections": [
+    {"raw": "<الاسم كما ورد في الرسالة حرفيًّا>",
+     "entity_type": "supplier" | "treasury",
+     "official": "<الاسم المسجَّل المقابل من القائمة>",
+     "confidence": 0.0}
+  ],
   "confidence": {"operation": 0.0, "amount": 0.0, "currency": 0.0,
                  "treasury": 0.0, "supplier": 0.0, "price": 0.0, "customer": 0.0}
 }"""
@@ -261,6 +275,84 @@ def _match_registered(name: Optional[str], code: Optional[str], records: list):
         if q in [f for f in forms if f]:
             return r
     return None
+
+
+@dataclass
+class VerifiedCorrection:
+    """تصحيح إملائيّ **مُتحقَّق منه**: نصٌّ ورد حرفيًّا في الرسالة ⇒ سجلّ كيان مسجَّل فعلًا.
+
+    هذا كل ما نأخذه من النموذج في مسار الإعادة: **تصحيح اسم فقط، لا قيمة ماليّة**. المبالغ
+    والأسعار والأدوار والخزينة يستخرجها المفكِّك الحتميّ من النصّ كما لو كُتب الاسم صحيحًا.
+    """
+    raw: str                 # النصّ كما ورد في الرسالة (مُتحقَّق من وجوده حرفيًّا)
+    official: str            # اسم السجلّ المسجَّل
+    entity_type: str         # "supplier" | "treasury"
+    record: object           # SupplierRecord | TreasuryRecord
+    confidence: float
+
+
+def validate_corrections(prop: AiProposal, text: str, treasuries: list[TreasuryRecord],
+                         suppliers: list[SupplierRecord],
+                         threshold: float = 0.9) -> list[VerifiedCorrection]:
+    """يتحقّق حتميًّا من تصحيحات الإملاء المقترحة. يُرجِع المقبولة فقط (قد تكون فارغة).
+
+    شروط القبول الثلاثة (كلها إلزاميّة):
+      1. النصّ الخام `raw` موجود **حرفيًّا** في الرسالة (بعد التطبيع) — فلا يخترع النموذج كلمةً.
+      2. `official` يطابق سجلًّا مسجَّلًا **مطابقةً تامّة** (كود/اسم رسميّ/إملاء بديل) — لا fuzzy.
+      3. ثقة التصحيح ≥ العتبة.
+    """
+    out: list[VerifiedCorrection] = []
+    items = prop.data.get("corrections")
+    if not isinstance(items, list):
+        return out
+    norm_text = normalize_arabic_for_matching(text)
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        raw = (it.get("raw") or "").strip()
+        official = (it.get("official") or "").strip()
+        etype = (it.get("entity_type") or "").strip().lower()
+        if not raw or not official or etype not in ("supplier", "treasury"):
+            continue
+        try:
+            conf = float(it.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if conf < threshold:
+            log.info("(الفهم الذكي) رُفض تصحيح «%s»→«%s»: ثقة %.2f < %.2f",
+                     raw, official, conf, threshold)
+            continue
+        # (1) النصّ الخام موجود فعلًا في الرسالة — لا كلمات مخترعة
+        if normalize_arabic_for_matching(raw) not in norm_text:
+            log.warning("(الفهم الذكي) رُفض تصحيح: «%s» غير موجود حرفيًّا في نصّ الرسالة", raw)
+            continue
+        # (2) الوجهة كيان مسجَّل فعلًا — مطابقة تامّة
+        records = suppliers if etype == "supplier" else treasuries
+        rec = _match_registered(official, None, records)
+        if rec is None:
+            log.warning("(الفهم الذكي) رُفض تصحيح: «%s» ليس كيانًا مسجَّلًا (%s)", official, etype)
+            continue
+        out.append(VerifiedCorrection(raw=raw, official=rec.name, entity_type=etype,
+                                      record=rec, confidence=conf))
+    return out
+
+
+def with_ephemeral_alias(records: list, rec, raw_token: str) -> list:
+    """نسخة **مؤقّتة في الذاكرة** من القائمة، مضافًا فيها `raw_token` إملاءً بديلًا للسجلّ `rec`.
+
+    🔴 لا تُكتب في قاعدة البيانات إطلاقًا: التصحيح صالح لهذه الرسالة وحدها. التعلّم الدائم قرارُ
+    مالكٍ يدويّ من اللوحة (كما أُلغي تعلّم التشابه) — فلا يترسّخ خطأ نموذجٍ إملاءً معتمدًا للأبد.
+    """
+    out = []
+    for r in records:
+        if r is rec or (r.name == rec.name and r.code == rec.code):
+            clone = r.model_copy(deep=True)
+            if raw_token not in clone.aliases:
+                clone.aliases = list(clone.aliases) + [raw_token]
+            out.append(clone)
+        else:
+            out.append(r)
+    return out
 
 
 def validate_proposal(prop: AiProposal, text: str, treasuries: list[TreasuryRecord],
