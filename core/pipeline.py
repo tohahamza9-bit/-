@@ -56,9 +56,11 @@ from .parsing import (
     parse_completion_fragment,
     parse_message,
 )
+from .ai_context import build_sender_context
 from .ai_understanding import (
     OpenRouterClient, _num_in_text, apply_text_corrections, validate_corrections,
-    validate_proposal, validate_text_corrections, with_ephemeral_alias,
+    validate_line_parse, validate_postal, validate_proposal, validate_text_corrections,
+    with_ephemeral_alias,
 )
 from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
@@ -317,16 +319,56 @@ class Pipeline:
             api_key=get_settings().openrouter_api_key,
             model=getattr(cfg, "ai_model", "google/gemini-2.5-flash"),
             timeout=float(getattr(cfg, "ai_timeout_seconds", 10.0)))
+        # السياق الحيّ (قاموس حيّ + تاريخ المُرسِل) — يُبنى من DB لحظة النداء، بلا cache.
+        sctx = await build_sender_context(self.db, raw.sender_jid, _as_naive_utc(raw.received_at))
         try:
-            prop = await client.propose(text, treasuries, suppliers)
+            prop = await client.propose(text, treasuries, suppliers, sender_context=sctx)
         except Exception as exc:      # T5 — الصمود: لا رسالة تتوقّف على API خارجيّ
             log.warning("(الفهم الذكي) استثناء في نداء إنقاذ التفكيك: %s", exc)
             return None
         if prop is None:
             return None
         threshold = float(getattr(cfg, "ai_confidence_threshold", 0.9))
+
+        # ═══ (ج) السطر الملتصق: «1160عبد السلام زكري6.04» → {كود، اسم، سعر} ═══
+        # التحقّق الحتميّ يضمن أن كل جزء **مقطعٌ من السطر نفسه** (تفكيك لا اختراع). نطبّقه
+        # كفصلٍ بالمسافات على النصّ، ثم يُعيد المفكِّك الحتميّ قراءته كأنه كُتب مفصولًا.
+        lines = validate_line_parse(prop, text, threshold, entities=suppliers + treasuries)
+        if lines:
+            spaced = text
+            for ln in lines:
+                repl = " ".join(p for p in (ln.code, ln.name, ln.price) if p)
+                spaced = spaced.replace(ln.raw, repl, 1)
+            if spaced != text:
+                res_l = parse_message(spaced, treasuries, suppliers)
+                if res_l.kind == "transfer" and res_l.leg is not None \
+                        and res_l.leg.amount is not None and _num_in_text(res_l.leg.amount, text):
+                    _names = "، ".join(f"«{l.raw}» → {l.code} {l.name} {l.price or ''}".strip()
+                                       for l in lines)
+                    await self.bus.notify_admin(
+                        f"⚠️ {res_l.leg.reference_number or '؟'} فُهمت بالذكاء الاصطناعي "
+                        f"({prop.model}): فُكّ سطر ملتصق — {_names}.", raw.message_key)
+                    log.info("(الفهم الذكي) فُكّ سطر ملتصق في %s: %s", raw.message_key, _names)
+                    return res_l
+
         fixes = validate_text_corrections(prop, text, threshold)
         if not fixes:
+            # ═══ حوالة بريد (بلا رقم مستلم) — يُحسم بتاريخ المُرسِل لا بالتخمين ═══
+            postal = validate_postal(prop, threshold)
+            if postal is True and not sctx.is_new_sender() and sctx.no_phone_ratio > 0:
+                log.info("(الفهم الذكي) %s: نمط «بريد بلا رقم» مرجَّح بتاريخ المُرسِل "
+                         "(نسبة %.0f%%) — تُكمَل بلا هاتف", raw.message_key,
+                         sctx.no_phone_ratio * 100)
+                await self.bus.notify_admin(
+                    f"⚠️ فُهمت بالذكاء الاصطناعي ({prop.model}): حوالة **بريد بلا رقم مستلم** "
+                    f"(المُرسِل {sctx.no_phone_ratio:.0%} من حوالاته بريد) — تُسجَّل بلا هاتف. راجعها.",
+                    raw.message_key, forward_key=raw.message_key)
+                return None      # الحسم للمسار الحتميّ؛ هذا تنبيهٌ لا تعديل بيانات
+            if postal is not None or prop.data.get("is_postal") is not None:
+                await self.bus.notify_admin(
+                    f"⚠️ رسالة بلا رقم مستلم ({raw.message_key}) — **هل هذه حوالة بريد؟** "
+                    f"(المُرسِل {'جديد بلا تاريخ' if sctx.is_new_sender() else 'تاريخه لا يرجّح البريد'})"
+                    f" — لم تُكمَل تلقائيًّا.", raw.message_key, forward_key=raw.message_key)
             return None
         fixed_text = apply_text_corrections(text, fixes)
         if fixed_text == text:
@@ -438,10 +480,13 @@ class Pipeline:
             model=getattr(cfg, "ai_model", "google/gemini-2.5-flash"),
             timeout=float(getattr(cfg, "ai_timeout_seconds", 10.0)),
         )
+        # 🔴 القوائم تُقرأ من DB **لحظة النداء** (لا cache): خزينة/مورد أُضيف قبل ثانية يظهر هنا.
         treasuries = await self.db.treasuries.all_active()
         suppliers = await self.db.suppliers.all_active()
+        _sender = (leg.sender_jid if leg is not None else None) or deal.chat_jid
+        sctx = await build_sender_context(self.db, _sender, _as_naive_utc(now))
         try:
-            prop = await client.propose(text, treasuries, suppliers)
+            prop = await client.propose(text, treasuries, suppliers, sender_context=sctx)
         except Exception as exc:      # T5 — الصمود: لا حوالة تتوقّف على API خارجيّ
             log.warning("(الفهم الذكي) استثناء غير متوقّع في النداء: %s — تصعيد عاديّ", exc)
             return False
