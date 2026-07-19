@@ -57,6 +57,7 @@
     <nav>
       <a href="/attention">الانتباه</a>
       <a href="/transfers">سجل الحوالات</a>
+      <a href="/queue">الطابور</a>
       <a href="/connect">الاتصال</a>
       <a href="/settings" class="active">الإعدادات</a>
       <a href="/">الرئيسية</a>
@@ -95,6 +96,29 @@
       </select>
       <span class="muted">قرار الإلغاء/التعديل على المكتملة (قيد الدفتر شرطٌ دائم) · SQL للتدقيق الدوري فقط · الافتراضي: فوريّ</span>
     </div>
+  </div>
+
+  <!-- الميزة ١: تشغيل النظام (pm2) — حالة حيّة + أزرار لكل مكوّن -->
+  <div class="card">
+    <h2>تشغيل النظام</h2>
+    <div id="sysUnavailable" class="muted" style="display:none;margin-bottom:8px">
+      ⚠️ pm2 غير متاح — تعذّرت قراءة حالة المكوّنات.
+    </div>
+    <table style="width:100%">
+      <thead><tr><th>المكوّن</th><th>الحالة</th><th>↺</th><th>PID</th><th>إجراءات</th></tr></thead>
+      <tbody id="sys_body"><tr><td colspan="5" class="muted">…</td></tr></tbody>
+    </table>
+    <div class="kill" style="margin-top:10px">
+      <span class="muted">الكل:</span>
+      <button class="ghost" onclick="sysAction('all','restart')">إعادة تشغيل الكل</button>
+      <button class="ghost" onclick="sysAction('all','start')">تشغيل الكل</button>
+      <button onclick="sysAction('all','stop')">إيقاف الكل</button>
+    </div>
+    <p class="muted" style="margin:10px 0 0">
+      إيقاف الكيرنل يوقف معالجة الوارد والكتابة في MONEYADO (الجسر يظلّ يلتقط الرسائل).
+      أوامر الكيرنل تُنفَّذ بعد وصول الردّ بثوانٍ — الصفحة ستفقد الاتصال، وهذا متوقَّع.
+      تشغيل الكيرنل وهو مطفأ لا يعمل من هنا (لا خادم): استخدم <code>pm2 start moneyado-kernel</code>.
+    </p>
   </div>
 
   <!-- إدارة المستخدمين (م٠ — واجهة م٦) -->
@@ -206,6 +230,40 @@ async function loadControl(){
 $("toggleBtn").onclick=async()=>{ await api("/control/toggle","POST"); await loadControl(); loadLog(); };
 $("autoTrustBtn").onclick=async()=>{ await api("/control/auto_trust","POST"); await loadControl(); loadLog(); };
 $("cancModeSel").onchange=async(e)=>{ await api("/control/cancellation_mode","POST",{mode:e.target.value}); await loadControl(); loadLog(); };
+
+// ── الميزة ١: تشغيل النظام (pm2) ──
+const SYS_AR={"moneyado-kernel":"الكيرنل (المعالجة والكتابة)","moneyado-wa":"الجسر (واتساب)"};
+const ST_AR={online:"يعمل",stopped:"موقوف",errored:"خطأ",launching:"يُقلع"};
+async function loadSystem(){
+  let d; try{ d=await api("/system/processes"); }catch(e){ return; }
+  $("sysUnavailable").style.display=d.available?"none":"block";
+  const rows=d.processes||[];
+  $("sys_body").innerHTML = rows.length ? rows.map(p=>{
+    const on=p.status==="online";
+    return `<tr>
+      <td>${esc(SYS_AR[p.name]||p.name)}</td>
+      <td><span class="pill ${on?'on':'off'}">${esc(ST_AR[p.status]||p.status||"?")}</span></td>
+      <td>${p.restarts??0}</td><td class="muted">${p.pid??"—"}</td>
+      <td>
+        <button class="ghost" onclick="sysAction('${esc(p.name)}','restart')">إعادة تشغيل</button>
+        <button class="ghost" onclick="sysAction('${esc(p.name)}','start')">تشغيل</button>
+        <button onclick="sysAction('${esc(p.name)}','stop')">إيقاف</button>
+      </td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="muted">لا مكوّنات — pm2 غير متاح.</td></tr>`;
+}
+async function sysAction(target,action){
+  // تأكيد قبل كل إيقاف (وقبل إعادة تشغيل الكل — انقطاع فعليّ للخدمة)
+  if(action==="stop"||(action==="restart"&&target==="all")){
+    const what = target==="all" ? "كل المكوّنات" : (SYS_AR[target]||target);
+    const verb = action==="stop" ? "إيقاف" : "إعادة تشغيل";
+    if(!confirm(`تأكيد ${verb}: ${what}\n\nإيقاف الكيرنل يوقف معالجة الوارد والكتابة في MONEYADO.`)) return;
+  }
+  try{
+    const r=await api(`/system/processes/${encodeURIComponent(target)}/${encodeURIComponent(action)}`,"POST");
+    toast(r.deferred ? "نُفِّذ الأمر منفصلًا — قد تفقد الصفحة الاتصال ✓" : (r.ok?"تمّ ✓":"فشل الأمر"));
+  }catch(e){ return; }
+  setTimeout(()=>{ loadSystem(); loadLog(); }, 4000);
+}
 
 // ── المستخدمون ──
 async function loadUsers(){
@@ -326,8 +384,9 @@ async function boot(){
   const rb=$("roleBadge"); rb.textContent=ROLE_AR[ROLE]||ROLE; rb.style.display="inline-block";
   $("logoutBtn").style.display="inline-block";
   if(ROLE!=="manager"){ document.body.classList.add("no-access"); return; }  // الإعدادات للمدير فقط
-  loadControl(); loadUsers(); loadEmployees(); loadDetection(); loadLog();
+  loadControl(); loadSystem(); loadUsers(); loadEmployees(); loadDetection(); loadLog();
   setInterval(loadControl,15000);
+  setInterval(loadSystem,15000);      // حالة حيّة للمكوّنات
 }
 boot();
 </script>

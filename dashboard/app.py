@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +42,7 @@ from core.models import (
     UserRecord,
 )
 
-from . import auth, stats, transfers
+from . import auth, queue_admin, stats, transfers
 
 log = get_logger(__name__)
 
@@ -846,6 +847,78 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         log.info("تحديث حدود كشف الاحتيال (م٢) عبر اللوحة")
         return body.model_dump(mode="json")
 
+    # ══ الميزة ١: تشغيل النظام (pm2) — عرض للقارئ، تنفيذ للمدير فقط ══════════════
+    @router.get("/system/processes", dependencies=[reader])
+    async def system_processes() -> dict:
+        """حالة حيّة لمكوّني البوت (الكيرنل/الجسر) من pm2: online/stopped + عدّاد ↺.
+
+        pm2 غير متاح → available=False بقائمة فارغة (لا 500) — نمط /connection نفسه.
+        """
+        from core import process_control as pc
+        procs = await asyncio.to_thread(pc.list_processes)
+        return {"available": bool(procs), "processes": procs}
+
+    @router.post("/system/processes/{target}/{action}", dependencies=[manager])
+    async def system_process_action(target: str, action: str,
+                                    request: Request,
+                                    actor: UserRecord = Depends(require_manager_audited)) -> dict:
+        """ينفّذ pm2 على مكوّن — **قائمة مغلقة**: target ∈ {moneyado-kernel, moneyado-wa, all}
+        و action ∈ {start, stop, restart}. أي قيمة أخرى → 400 قبل أي تنفيذ (لا shell injection).
+
+        الأوامر التي تمسّ الكيرنل تُجدوَل منفصلةً مؤجَّلة (SELF_KILL_DELAY) فيعود هذا الردّ أولًا
+        ثم يموت الخادم — وإلا لانقطع الاتصال قبل أن يعرف المتصفّح النتيجة.
+        """
+        from core import process_control as pc
+        if action not in pc.ACTIONS or target not in pc.TARGETS:
+            raise HTTPException(status_code=400, detail="أمر غير مسموح")
+        # سجلّ تقنيّ صريح (أدقّ من سطر require_manager_audited العامّ: مَن/ماذا/على أيّ مكوّن)
+        try:
+            await db.auth_events.log(
+                username=actor.username, event="process_control",
+                ip=auth.client_ip(request), now=utcnow(),
+                detail=f"pm2 {action} {target}")
+        except Exception as exc:                                  # T5 — لا يوقف العملية
+            log.warning("تعذّر تسجيل تدقيق التحكّم بالعمليات (متابعة): %s", exc)
+        result = await asyncio.to_thread(pc.run_action, action, target)
+        log.info("تحكّم تشغيل: %s طلب «pm2 %s %s» → %s", actor.username, action, target, result)
+        return {"target": target, "action": action, **result}
+
+    # ══ الميزة ٢: إدارة الطابور — عرض للقارئ، استبعاد/إرجاع للمدير فقط ═══════════
+    @router.get("/queue", dependencies=[reader])
+    async def queue_list() -> dict:
+        """المنتظرات (parsed/ready/matched/sell_done) + المستبعدات يدويًّا — للعرض والفرز."""
+        return await queue_admin.list_queue(db)
+
+    @router.post("/queue/exclude", dependencies=[manager])
+    async def queue_exclude(body: queue_admin.QueueExcludeIn, request: Request,
+                            actor: UserRecord = Depends(require_manager_audited)) -> dict:
+        """استبعاد من التنزيل = manual_completed بسبب **إلزاميّ**. لا حذف من القاعدة إطلاقًا.
+
+        الصفقة ذات قيود الدفتر تُوسَم needs_review (البوت كتب نصفها — أثر §11.4 لا يُمحى).
+        """
+        try:
+            await db.auth_events.log(
+                username=actor.username, event="queue_exclude", ip=auth.client_ip(request),
+                now=utcnow(), detail=f"{len(body.deal_ids)} صفقة — {body.reason[:120]}")
+        except Exception as exc:
+            log.warning("تعذّر تسجيل تدقيق الاستبعاد (متابعة): %s", exc)
+        return await queue_admin.exclude(db, body, actor.username)
+
+    @router.post("/queue/restore", dependencies=[manager])
+    async def queue_restore(body: queue_admin.QueueRestoreIn, request: Request,
+                            actor: UserRecord = Depends(require_manager_audited)) -> dict:
+        """إرجاع مستبعدة للطابور (ضغطة خاطئة) — **بشرط صفر قيود دفتر** لها (§9).
+
+        ذات القيود تُرفَض بالاسم في `rejected` مع السبب: إرجاعها يعيد تنزيلها فيزدوج القيد.
+        """
+        try:
+            await db.auth_events.log(
+                username=actor.username, event="queue_restore", ip=auth.client_ip(request),
+                now=utcnow(), detail=f"{len(body.deal_ids)} صفقة")
+        except Exception as exc:
+            log.warning("تعذّر تسجيل تدقيق الإرجاع (متابعة): %s", exc)
+        return await queue_admin.restore(db, body, actor.username)
+
     # ── إعداد نظام الأسعار (FX_RATES_SPEC §12) — عرض للقارئ، تعديل للمدير فقط ─────
     @router.get("/settings/fx-rates", dependencies=[reader])
     async def get_fx_rates() -> dict:
@@ -980,6 +1053,11 @@ def create_app(db: Database, settings: Optional[Settings] = None) -> FastAPI:
     async def transfers_page() -> FileResponse:
         """سجل الحوالات (لوحة V2 م١)."""
         return FileResponse(str(STATIC_DIR / "transfers.html"), headers=_HTML_NOCACHE)
+
+    @app.get("/queue")
+    async def queue_page() -> FileResponse:
+        """إدارة الطابور (الميزة ٢) — للمدير فقط (الحارس في الـAPI والواجهة)."""
+        return FileResponse(str(STATIC_DIR / "queue.html"), headers=_HTML_NOCACHE)
 
     @app.get("/connect")
     async def connect_page() -> FileResponse:

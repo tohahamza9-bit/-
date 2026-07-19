@@ -274,6 +274,12 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         html = ROOT / "dashboard" / "static" / "transfers.html"
         return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
+    @app.get("/queue")
+    async def queue_page():  # noqa: ANN201
+        """إدارة الطابور (الميزة ٢) — عرض المنتظرات + استبعاد موثَّق/إرجاع. للمدير فقط."""
+        html = ROOT / "dashboard" / "static" / "queue.html"
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
+
     @app.get("/connect")
     async def connect_page():  # noqa: ANN201
         """صفحة الاتصال + QR + صحة MONEYADO (لوحة V2 م٥)."""

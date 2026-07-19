@@ -160,6 +160,10 @@ class Status(str, Enum):
     READY = "ready"                # في Outbox، جاهزة للكتابة
     SELL_DONE = "sell_done"        # بيع نزل (فشل نصفي محتمل §11.4)
     COMPLETED = "completed"        # ✅ تمّت وتأكّدت
+    # 🖐️ أُدخلت **يدويًّا** في MONEYADO خارج البوت (تسوية طابور/استبعاد من التنزيل، قرار المالك).
+    #    حالة نهائيّة: لا تدخل الطابور ولا تُنزَّل في أي إعادة تشغيل. التفاصيل في Deal.manual_settlement
+    #    (السبب الإلزاميّ، مَن، متى، وهل كان نصف البيع مكتوبًا من البوت — أثر §11.4 لا يُمحى).
+    MANUAL_COMPLETED = "manual_completed"
     CANCELLING = "cancelling"      # قيد الإلغاء — انتقال ذرّي من completed قبل كتابة العكس (ميزة الإلغاء)
     CANCELLED = "cancelled"        # ملغاة (قيد عكسي منزّل)
     TECH_FAILED = "tech_failed"    # 🔴 فشل تقني (dead-letter)

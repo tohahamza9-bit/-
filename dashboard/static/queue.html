@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>الطابور — MONEYADO</title>
+<style>
+  :root { --bg:#0f1420; --card:#1a2233; --line:#2c3853; --txt:#e7ecf5; --muted:#8a99b5;
+          --accent:#3b82f6; --ok:#22c55e; --warn:#ef4444; --chip:#243049; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",Tahoma,system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); font-size:15px; line-height:1.6; }
+  header { padding:16px 20px; background:var(--card); border-bottom:1px solid var(--line);
+           display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+  header h1 { margin:0; font-size:20px; }
+  nav { display:flex; gap:6px; flex-wrap:wrap; margin-top:2px; }
+  nav a { color:var(--muted); text-decoration:none; font-size:14px; padding:4px 10px; border-radius:8px; }
+  nav a:hover, nav a.active { color:var(--txt); background:var(--chip); }
+  .userbox { display:flex; gap:10px; align-items:center; }
+  .role-badge { font-size:12px; font-weight:700; padding:2px 10px; border-radius:999px;
+                background:rgba(59,130,246,.15); color:var(--accent); border:1px solid var(--accent); }
+  .wrap { max-width:1200px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:18px; }
+  .card h2 { margin:0 0 12px; font-size:17px; border-bottom:1px solid var(--line); padding-bottom:8px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  input, select, button { font-family:inherit; font-size:14px; padding:8px 10px; border-radius:8px;
+          border:1px solid var(--line); background:var(--bg); color:var(--txt); }
+  button { cursor:pointer; background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.ghost { background:transparent; color:var(--txt); }
+  button.danger { background:var(--warn); border-color:var(--warn); }
+  table { width:100%; border-collapse:collapse; margin-top:10px; }
+  th, td { text-align:right; padding:8px; border-bottom:1px solid var(--line); font-size:14px; }
+  th { color:var(--muted); font-weight:600; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:13px; }
+  .pill.on { background:rgba(34,197,94,.15); color:var(--ok); }
+  .pill.off { background:rgba(239,68,68,.15); color:var(--warn); }
+  .pill.warn { background:rgba(234,179,8,.15); color:#eab308; }
+  .muted { color:var(--muted); font-size:13px; }
+  .num { font-variant-numeric:tabular-nums; }
+  #noaccess { display:none; text-align:center; color:var(--muted); padding:64px 16px; font-size:16px; }
+  body.no-access .wrap { display:none; } body.no-access #noaccess { display:block; }
+  #msg { position:fixed; bottom:16px; inset-inline-start:16px; background:var(--card);
+         border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:9; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>الطابور</h1>
+    <nav>
+      <a href="/attention">الانتباه</a>
+      <a href="/transfers">سجل الحوالات</a>
+      <a href="/queue" class="active">الطابور</a>
+      <a href="/connect">الاتصال</a>
+      <a href="/settings">الإعدادات</a>
+      <a href="/">الرئيسية</a>
+    </nav>
+  </div>
+  <div class="userbox">
+    <span id="roleBadge" class="role-badge" style="display:none"></span>
+    <span id="whoami" class="muted">…</span>
+  </div>
+</header>
+
+<div id="noaccess">إدارة الطابور للمدير فقط.<br>تواصل مع المسؤول.</div>
+<div class="wrap">
+
+  <div class="card">
+    <h2>المنتظرات — <span id="pendCount">…</span></h2>
+    <div class="row" style="margin-bottom:8px">
+      <label class="muted">الحالة:
+        <select id="fStatus" onchange="render()">
+          <option value="">الكل</option>
+          <option value="parsed">parsed</option>
+          <option value="ready">ready</option>
+          <option value="matched">matched</option>
+          <option value="sell_done">sell_done</option>
+        </select>
+      </label>
+      <label class="muted">أقدم من (ساعة): <input id="fAge" type="number" min="0" style="width:90px" oninput="render()"></label>
+      <button class="ghost" onclick="selectAll(true)">تحديد الكل</button>
+      <button class="ghost" onclick="selectAll(false)">إلغاء التحديد</button>
+      <span class="muted">المحدَّد: <b id="selCount">0</b></span>
+      <button class="danger" onclick="excludeSelected()">استبعاد من التنزيل</button>
+    </div>
+    <p class="muted" style="margin:0">
+      الاستبعاد لا يحذف شيئًا: تُعلَّم <code>manual_completed</code> بسبب إلزاميّ وتبقى بالسجلّ.
+      الصفقة ذات قيود دفتر (البوت نزّل نصفها) تُوسَم 🔴 للمراجعة ولا يمكن إرجاعها.
+    </p>
+    <table>
+      <thead><tr>
+        <th></th><th>المرجع</th><th>الزبون</th><th>المبلغ</th><th>الحالة</th>
+        <th>العمر (ساعة)</th><th>قيود الدفتر</th>
+      </tr></thead>
+      <tbody id="p_body"><tr><td colspan="7" class="muted">…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>المستبعدة يدويًّا — <span id="excCount">…</span></h2>
+    <table>
+      <thead><tr>
+        <th>المرجع</th><th>المبلغ</th><th>السبب</th><th>بواسطة</th><th>الأثر</th><th></th>
+      </tr></thead>
+      <tbody id="e_body"><tr><td colspan="6" class="muted">…</td></tr></tbody>
+    </table>
+  </div>
+
+</div>
+<div id="msg"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let ROLE=null, DATA={pending:[],excluded:[]}, SEL=new Set();
+function toast(t){ const m=$("msg"); m.textContent=t; m.style.display="block";
+  clearTimeout(window._tt); window._tt=setTimeout(()=>m.style.display="none",3500); }
+function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function num(v){ return v==null?"—":Number(v).toLocaleString("en-US",{maximumFractionDigits:0}); }
+async function api(path, method="GET", body=null){
+  const opt={method,headers:{},credentials:"same-origin"};
+  if(body){opt.headers["Content-Type"]="application/json";opt.body=JSON.stringify(body);}
+  const r=await fetch("/api"+path,opt);
+  if(r.status===401){location.replace("/login");throw new Error(401);}
+  if(!r.ok){let d="";try{d=(await r.json()).detail;}catch(e){}toast("خطأ "+r.status+(d?": "+d:""));throw new Error(r.status);}
+  return r.status===204?null:r.json();
+}
+const ROLE_AR={manager:"مدير",reviewer:"مراجع",data_entry:"مُدخل بيانات"};
+
+function filtered(){
+  const st=$("fStatus").value, age=parseFloat($("fAge").value);
+  return DATA.pending.filter(r=>(!st||r.status===st) && (isNaN(age)||(r.age_hours??0)>=age));
+}
+function render(){
+  const rows=filtered();
+  $("pendCount").textContent=DATA.pending.length+" صفقة";
+  $("p_body").innerHTML = rows.length ? rows.map(r=>`<tr>
+    <td><input type="checkbox" ${SEL.has(r.deal_id)?"checked":""} onchange="toggle('${esc(r.deal_id)}',this.checked)"></td>
+    <td>${esc(r.reference||"—")}</td>
+    <td>${esc(r.customer_code||"")} ${esc(r.customer_name||"")}</td>
+    <td class="num">${num(r.amount)} ${esc(r.currency||"")}</td>
+    <td><span class="pill off">${esc(r.status)}</span></td>
+    <td class="num">${r.age_hours??"—"}</td>
+    <td class="num">${r.ledger_entries>0?`<span class="pill warn">🔴 ${r.ledger_entries}</span>`:"0"}</td>
+  </tr>`).join("") : `<tr><td colspan="7" class="muted">لا منتظرات — الطابور فارغ.</td></tr>`;
+  $("selCount").textContent=SEL.size;
+  $("excCount").textContent=DATA.excluded.length+" صفقة";
+  $("e_body").innerHTML = DATA.excluded.length ? DATA.excluded.map(r=>`<tr>
+    <td>${esc(r.reference||"—")}</td>
+    <td class="num">${num(r.amount)} ${esc(r.currency||"")}</td>
+    <td class="muted">${esc(r.settlement_reason||"—")}</td>
+    <td class="muted">${esc(r.settled_by||"—")}</td>
+    <td>${r.sell_was_written?`<span class="pill warn">🔴 نصفها مكتوب (${r.ledger_entries})</span>`:`<span class="pill off">استُبعد يدويًّا</span>`}</td>
+    <td>${r.ledger_entries>0?`<span class="muted">لا يُرجَع (له قيد)</span>`
+        :`<button class="ghost" onclick="restore('${esc(r.deal_id)}')">أعد للتنفيذ</button>`}</td>
+  </tr>`).join("") : `<tr><td colspan="6" class="muted">لا مستبعدات.</td></tr>`;
+}
+function toggle(id,on){ on?SEL.add(id):SEL.delete(id); $("selCount").textContent=SEL.size; }
+function selectAll(on){ SEL=on?new Set(filtered().map(r=>r.deal_id)):new Set(); render(); }
+
+async function excludeSelected(){
+  if(!SEL.size){ toast("لم تحدّد شيئًا"); return; }
+  const reason=prompt(`سبب استبعاد ${SEL.size} صفقة من التنزيل (إلزاميّ):`,"");
+  if(reason==null) return;
+  if(reason.trim().length<3){ toast("السبب إلزاميّ (٣ أحرف فأكثر)"); return; }
+  if(!confirm(`تأكيد: استبعاد ${SEL.size} صفقة من التنزيل نهائيًّا؟\nلن تُنزَّل في أي إعادة تشغيل.`)) return;
+  try{
+    const r=await api("/queue/exclude","POST",{deal_ids:[...SEL],reason:reason.trim()});
+    toast(`استُبعدت ${r.excluded_count} صفقة ✓`+(r.skipped.length?` (تُخطّيت ${r.skipped.length})`:""));
+    SEL=new Set(); await load();
+  }catch(e){}
+}
+async function restore(id){
+  if(!confirm("إرجاع الصفقة للطابور؟ ستُنزَّل في المعالجة التالية.")) return;
+  try{
+    const r=await api("/queue/restore","POST",{deal_ids:[id]});
+    if(r.restored_count) toast("أُرجعت للطابور ✓");
+    else toast("رُفض الإرجاع: "+esc((r.rejected[0]||{}).why||""));
+    await load();
+  }catch(e){}
+}
+async function load(){ DATA=await api("/queue"); render(); }
+
+async function boot(){
+  let me; try{ const r=await fetch("/api/auth/me",{credentials:"same-origin"}); if(!r.ok){location.replace("/login");return;} me=await r.json(); }
+  catch(e){ location.replace("/login"); return; }
+  ROLE=me.role; $("whoami").textContent=me.username;
+  const rb=$("roleBadge"); rb.textContent=ROLE_AR[ROLE]||ROLE; rb.style.display="inline-block";
+  if(ROLE!=="manager"){ document.body.classList.add("no-access"); return; }
+  load(); setInterval(load,20000);
+}
+boot();
+</script>
+</body>
+</html>

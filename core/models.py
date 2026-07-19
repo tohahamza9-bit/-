@@ -127,6 +127,21 @@ class ParseResult(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 # 3) الصفقة — وحدة المعالجة (بيع فقط أو بيع + شراء) — §5 §7.3
 # ─────────────────────────────────────────────────────────────────────────────
+class ManualSettlement(BaseModel):
+    """توثيق تسوية يدويّة (Status.MANUAL_COMPLETED / الاستبعاد من التنزيل).
+
+    🔴 لا تُمحى آثار §11.4: `sell_was_written` + `ledger_entries` تحفظان أنّ البوت كان قد نزّل
+    نصف الصفقة (البيع) قبل التسوية اليدويّة — فالمالك يفحص الازدواج المحتمل ويعكسه يدويًّا.
+    """
+    reason: str                                  # سبب إلزاميّ يكتبه المدير (لا تسوية بلا سبب)
+    settled_at: datetime
+    settled_by: str                              # مستخدم اللوحة أو اسم أداة التسوية
+    sell_was_written: bool = False               # كان للصفقة قيدُ بيعٍ منزّل من البوت
+    ledger_entries: int = 0                      # عدد قيود الدفتر وقت التسوية (دليل الازدواج)
+    needs_review: bool = False                   # 🔴 ازدواج مرجَّح — يفحصه المالك ويعكسه
+    previous_status: Optional[str] = None         # الحالة قبل التسوية (للإرجاع «أعد للتنفيذ»)
+
+
 class Deal(BaseModel):
     deal_id: str
     status: Status = Status.RAW
@@ -171,6 +186,8 @@ class Deal(BaseModel):
     # نظام الأسعار (§8): هامش الصفقة sell_rate−buy_rate — **عرض فقط** حاليًّا (يُعبَّأ في خطوة
     #   ربط التسعير لاحقًا، مسيّجة بـ fx_rates_enabled). None حتى ذلك الحين.
     deal_margin: Optional[float] = None
+    # تسوية يدويّة (Status.MANUAL_COMPLETED أو IGNORED بالاستبعاد) — التوثيق الإلزاميّ.
+    manual_settlement: Optional[ManualSettlement] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
