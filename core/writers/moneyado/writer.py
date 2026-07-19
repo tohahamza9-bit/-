@@ -223,6 +223,20 @@ class MoneyadoWriter(Writer):
 
             do_store = commit   # dry_run=False مؤكّد هنا → التخزين يحكمه Kill Switch وحده
 
+            # (4.5) 🔴 (م: X1323) **تحقّق الامتلاء بعد التعبئة** — قبل أيّ ضغط.
+            #   الحادثة: طرف الشراء وصل بلا سعر (price=None بسبب «مومن عريبي6.02» الملتصقة)، فتُرك
+            #   حقل السعر (rate_divide) فارغًا، فلم يقبل MONEYADO الحفظ، فانتهت المحاولة بـ«غير
+            #   مؤكّد التخزين» — تشخيصٌ مضلّل مرّتين. الفحص القائم كان يتحقّق من **إفراغ** الحقول
+            #   قبل الكتابة (_VERIFY_CLEAR_FIELDS)، ولا شيء يتحقّق من **امتلائها** بعدها.
+            #   القاعدة الآن: (أ) السعر إلزاميّ — قيمة فارغة = رفض مبكر بلا لمس الشاشة؛
+            #                (ب) كل قيمة قصدنا كتابتها يجب أن تُقرأ غير فارغة من الحقل نفسه.
+            _blank = self._verify_filled(screen, fcfg, ops)
+            if _blank:
+                msg = f"حقول إلزامية بقيت فارغة بعد التعبئة: {'، '.join(_blank)} — لم يُضغط «تخزين»"
+                log.error("رفض %s (job=%s): %s", op.value, job.job_id, msg)
+                self._try_stop(screen, op)
+                return WriteResult(ok=False, needs_review=True, error=msg)
+
             if do_store:
                 # (0.5) 🔴 قاعدة صارمة (§11.3): بعد التعبئة وقبل الضغط — «تخزين» يجب أن يكون **مفعَّلًا**
                 #       (الحقول اكتملت فقَبِل البرنامجُ الإدخال). إن بقي باهتًا خلال المهلة فالإدخال
@@ -336,6 +350,25 @@ class MoneyadoWriter(Writer):
             return self._safe_review(
                 screen, op, job, error="الحساب الأجنبي (الخزينة) فارغ بعد الإدخال — لم تُقبَل الخزينة")
         return None
+
+    # 🔴 حقول **إلزامية** لقبول الحفظ في الشاشتين — فراغُ أيٍّ منها يمنع تفعيل/قبول «تخزين».
+    #    السعر (rate_divide) أُضيف بعد حادثة X1323: كان خارج كل فحص فمرّ تخطّيه صامتًا مرّتين.
+    _MANDATORY_FILLED = ("rate_divide", "foreign_account", "foreign_amount", "quantity")
+
+    def _verify_filled(self, screen: "ScreenController", fcfg: dict, ops: list) -> list[str]:
+        """يُرجِع أسماء الحقول الإلزاميّة التي **لا قيمة لها** في بيانات الحوالة.
+
+        فحصٌ نقيّ على البيانات المُعدّة للكتابة — **بلا أيّ قراءة من الشاشة**: عطل X1323 كان
+        بالضبط «قيمة غير موجودة» (price=None) لا «قيمة لم تصل». والقراءة الرجعيّة لكل حقل تضيف
+        عشرات استعلامات GUI قبل كل تخزين بلا عائد يوازيها. الشاشة تُمرَّر للتوقيع فقط.
+        """
+        blank: list[str] = []
+        for o in ops:
+            if o.method == ENTER_ONLY or o.key not in self._MANDATORY_FILLED:
+                continue
+            if not (o.value or "").strip():
+                blank.append(f"{o.key} (لا قيمة في بيانات الحوالة)")
+        return blank
 
     def _try_stop(self, screen: ScreenController, op: OperationType) -> None:
         """STOP آمن best-effort — لا يرمي حتى لا يحجب نتيجة المراجعة."""
