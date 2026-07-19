@@ -119,6 +119,12 @@ _SCHEMA_HINT = """أعِد JSON بهذا الشكل بالضبط:
      "official": "<الاسم المسجَّل المقابل من القائمة>",
      "confidence": 0.0}
   ],
+  "line_parse": [
+    {"raw": "<السطر الملتصق كما ورد>", "code": "<كود>", "name": "<الاسم>",
+     "price": "<السعر>", "confidence": 0.0}
+  ],
+  "is_postal": true | false,
+  "postal_confidence": 0.0,
   "confidence": {"operation": 0.0, "amount": 0.0, "currency": 0.0,
                  "treasury": 0.0, "supplier": 0.0, "price": 0.0, "customer": 0.0}
 }"""
@@ -126,8 +132,13 @@ _SCHEMA_HINT = """أعِد JSON بهذا الشكل بالضبط:
 
 def build_prompt(text: str, treasuries: list[TreasuryRecord],
                  suppliers: list[SupplierRecord],
-                 known_shapes: Optional[list[str]] = None) -> str:
-    """يبني الـprompt المنظَّم: نصّ الرسالة + قوائم الكيانات المسجَّلة + أشكال الرسائل المعروفة."""
+                 known_shapes: Optional[list[str]] = None,
+                 sender_context: Optional[object] = None) -> str:
+    """يبني الـprompt المنظَّم: نصّ الرسالة + الكيانات المسجَّلة **لحظة النداء** + سياق المُرسِل.
+
+    🔴 القوائم تُمرَّر من المُستدعي بعد قراءتها من DB في هذه اللحظة — لا نسخة محفوظة هنا ولا
+       cache يحتاج إبطالًا. كيانٌ أُضيف قبل ثانية يظهر في هذا النداء.
+    """
     t_lines = [
         f"- {t.name} (كود {t.code}, {getattr(t.currency, 'value', t.currency) or '؟'})"
         + (f" [أيضًا: {'، '.join(t.aliases)}]" if getattr(t, "aliases", None) else "")
@@ -148,6 +159,8 @@ def build_prompt(text: str, treasuries: list[TreasuryRecord],
         f"قائمة الخزائن المسجَّلة (لا شيء خارجها مقبول):\n" + ("\n".join(t_lines) or "- (فارغة)") +
         f"\n\nقائمة الموردين المسجَّلين (لا شيء خارجها مقبول):\n" + ("\n".join(s_lines) or "- (فارغة)") +
         f"\n\nأشكال الرسائل المعروفة:\n" + "\n".join(f"- {s}" for s in shapes) +
+        (f"\n\n{sender_context.as_prompt_block()}"
+         if sender_context is not None and hasattr(sender_context, "as_prompt_block") else "") +
         f"\n\n{_SCHEMA_HINT}"
     )
 
@@ -164,7 +177,8 @@ class OpenRouterClient:
 
     async def propose(self, text: str, treasuries: list[TreasuryRecord],
                       suppliers: list[SupplierRecord],
-                      known_shapes: Optional[list[str]] = None) -> Optional[AiProposal]:
+                      known_shapes: Optional[list[str]] = None,
+                      sender_context: Optional[object] = None) -> Optional[AiProposal]:
         if not self.api_key or not self.model:
             log.info("(الفهم الذكي) بلا مفتاح/نموذج — تخطٍّ (تصعيد عاديّ).")
             return None
@@ -174,7 +188,8 @@ class OpenRouterClient:
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": build_prompt(text, treasuries, suppliers, known_shapes)},
+                {"role": "user", "content": build_prompt(text, treasuries, suppliers, known_shapes,
+                                                          sender_context)},
             ],
         }
         headers = {"Authorization": f"Bearer {self.api_key}",
@@ -409,6 +424,82 @@ def apply_text_corrections(text: str, fixes: list[tuple[str, str]]) -> str:
     for raw, official in fixes:
         out = out.replace(raw, official, 1)
     return out
+
+
+@dataclass
+class VerifiedLine:
+    """سطر ملتصق فُكّ إلى (كود، اسم، سعر) — **بعد** التحقّق الحتميّ."""
+    raw: str
+    code: str
+    name: str
+    price: Optional[str]
+    confidence: float
+
+
+def validate_line_parse(prop: AiProposal, text: str, threshold: float = 0.9,
+                        entities: Optional[list] = None) -> list[VerifiedLine]:
+    """(نقطة الاستدعاء ج) يتحقّق من تفكيك النموذج لسطرٍ ملتصق («1160عبد السلام زكري6.04»).
+
+    الشروط (كلها إلزاميّة):
+      1. السطر الخام موجود حرفيًّا في الرسالة.
+      2. الكود والاسم والسعر **كلها مقاطع من السطر الخام نفسه** بعد إزالة الفراغات —
+         أي أن النموذج **فكّك** ولم **يخترع**. (أقوى ضمان ممكن هنا.)
+      3. الثقة ≥ العتبة.
+      4. إن مُرِّرت `entities` فالكود أو الاسم يجب أن يطابق كيانًا مسجَّلًا (كود/اسم/إملاء بديل).
+    """
+    out: list[VerifiedLine] = []
+    items = prop.data.get("line_parse")
+    if not isinstance(items, list):
+        return out
+    norm_text = normalize_ar(text)
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        raw = (it.get("raw") or "").strip()
+        code = str(it.get("code") or "").strip()
+        name = (it.get("name") or "").strip()
+        price = (str(it.get("price")).strip() if it.get("price") not in (None, "") else None)
+        try:
+            conf = float(it.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if not raw or not code or not name or conf < threshold:
+            continue
+        if normalize_ar(raw) not in norm_text:
+            log.warning("(الفهم الذكي) رُفض تفكيك سطر: «%s» غير موجود في الرسالة", raw)
+            continue
+        # (2) كل جزء مقطعٌ من الخام — التفكيك لا يضيف حرفًا
+        compact = re.sub(r"\s+", "", normalize_ar(raw))
+        parts_ok = all(
+            re.sub(r"\s+", "", normalize_ar(p)) in compact
+            for p in (code, name) + ((price,) if price else ())
+        )
+        if not parts_ok:
+            log.warning("(الفهم الذكي) رُفض تفكيك سطر «%s»: جزءٌ ليس من السطر نفسه", raw)
+            continue
+        if entities is not None and _match_registered(name, code, entities) is None:
+            log.warning("(الفهم الذكي) رُفض تفكيك سطر «%s»: (%s/%s) ليس كيانًا مسجَّلًا",
+                        raw, code, name)
+            continue
+        out.append(VerifiedLine(raw=raw, code=code, name=name, price=price, confidence=conf))
+    return out
+
+
+def validate_postal(prop: AiProposal, threshold: float = 0.9) -> Optional[bool]:
+    """(نمط البريد) هل الرسالة حوالة **بلا رقم مستلم** بثقة كافية؟
+
+    يُرجِع True (بريد مؤكَّد) / False (ليست بريدًا) / None (لا حسم ⇒ تصعيد بسؤال).
+    """
+    val = prop.data.get("is_postal")
+    if not isinstance(val, bool):
+        return None
+    try:
+        conf = float(prop.data.get("postal_confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf < threshold:
+        return None
+    return val
 
 
 def validate_proposal(prop: AiProposal, text: str, treasuries: list[TreasuryRecord],

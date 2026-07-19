@@ -42,7 +42,8 @@ class _FakeAi:
         self.data, self.fail, self.model = data, fail, model
         self.calls = 0
 
-    async def propose(self, text, treasuries, suppliers, known_shapes=None):
+    async def propose(self, text, treasuries, suppliers, known_shapes=None,
+                      sender_context=None):
         self.calls += 1
         if self.fail:
             return None
