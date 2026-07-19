@@ -56,7 +56,9 @@ from .parsing import (
     parse_completion_fragment,
     parse_message,
 )
-from .ai_understanding import OpenRouterClient, validate_proposal
+from .ai_understanding import (
+    OpenRouterClient, validate_corrections, validate_proposal, with_ephemeral_alias,
+)
 from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
 from .parsing.parser import _has_reference
@@ -295,6 +297,67 @@ class Pipeline:
                 parts.append(raw.text.strip())
         return "\n".join(parts) if parts else None
 
+    async def _ai_replay_with_corrections(self, deal: Deal, corrections: list,
+                                          prop, now: datetime) -> bool:
+        """(المسار أ) يعيد تفكيك **الرسالة الثانية** بعد تصحيح إملاء الكيان — حتميًّا بالكامل.
+
+        الحالة النموذجيّة (م: XI1321): رسالة ثانية بسطرَي «كود+اسم+سعر» (زبون + مورد) فشل فيها
+        سطرُ المورد لخطأ إملائيّ («عد الدين العجيلي» ← «عز الدين»)، فاستُخرج سطرٌ واحد بدل سطرين،
+        فلم يُبنَ طرف الشراء ولا اشتُقّت الخزينة ⇒ «لا خزينة محلولة» وتصعيد.
+
+        العلاج: نضيف النصّ الخام إملاءً بديلًا **مؤقّتًا في الذاكرة فقط**، ثم نستدعي نفس الدالة
+        التي كان المسار العاديّ سيستدعيها (`absorb_customer_supplier`) — فتُحسَب الأسعار والعمولة
+        والخزينة بالمنطق الحتميّ القائم، لا بالنموذج. يُرجِع True إن نجحت الإعادة فعلًا.
+        """
+        sup_fixes = [c for c in corrections if c.entity_type == "supplier"]
+        if not sup_fixes or deal.sell_leg is None:
+            return False
+        treasuries = await self.db.treasuries.all_active()
+        suppliers = await self.db.suppliers.all_active()
+        for c in sup_fixes:
+            suppliers = with_ephemeral_alias(suppliers, c.record, c.raw)
+
+        # الرسالة الثانية = آخر مفتاح مصدر يحمل نصًّا بسطرَي كود+اسم+سعر بعد التصحيح
+        for key in reversed(deal.source_message_keys or []):
+            raw = await self.db.raw.get(key)
+            if raw is None or not (raw.text or "").strip():
+                continue
+            pairs = extract_code_name_price_lines(raw.text, suppliers)
+            if len(pairs) < 2:
+                continue
+            before_code = deal.sell_leg.customer_code
+            merged = await self.queue.absorb_customer_supplier(
+                deal, pairs[0], pairs[1], key, treasuries, now)
+            merged = await self.db.deals.get(merged.deal_id) or merged
+            lg = merged.sell_leg or merged.buy_leg
+            if lg is None or lg.treasury is None:
+                # الإعادة لم تُنتج خزينة ⇒ لا إنقاذ (التصعيد يمضي). لا نصمت (T5).
+                log.info("(الفهم الذكي) إعادة التفكيك لم تُنتج خزينة للصفقة %s — تصعيد عاديّ",
+                         deal.deal_id)
+                return False
+            names = "، ".join(f"«{c.raw}» ← «{c.official}»" for c in sup_fixes)
+            lg.deviation_log.append({
+                "field": "treasury", "raw_value": c.raw, "extracted_value": lg.treasury.name,
+                "method": "ai", "confidence": int(c.confidence * 100), "model": prop.model,
+                "correction": names,
+            })
+            await self.db.deals.upsert(merged)
+            await self.bus.notify_admin(
+                f"⚠️ {self._ref(merged)} فُهمت بالذكاء الاصطناعي ({prop.model}): "
+                f"صُحّح الإملاء {names}، ثم أُعيد التفكيك حتميًّا — "
+                f"زبون {merged.sell_leg.customer_code or '؟'} "
+                f"{merged.sell_leg.customer_name or ''}، خزينة «{lg.treasury.name}».",
+                self._deal_key(merged),
+            )
+            log.info("(الفهم الذكي) أُعيد تفكيك %s بعد تصحيح %s (زبون %s→%s، خزينة %s، نموذج %s)",
+                     deal.deal_id, names, before_code, merged.sell_leg.customer_code,
+                     lg.treasury.name, prop.model)
+            # حدِّث المرجع الحيّ في المُستدعي
+            deal.sell_leg, deal.buy_leg = merged.sell_leg, merged.buy_leg
+            deal.is_two_legged, deal.status = merged.is_two_legged, merged.status
+            return True
+        return False
+
     async def _ai_rescue(self, deal: Deal, now: datetime) -> bool:
         """(طبقة الفهم الذكي — إنقاذ فقط) الصفقة على وشك التصعيد لعدم حلّ الخزينة؟ اسأل النموذج
         عبر OpenRouter، ثم **تحقّق حتميًّا** من اقتراحه قبل استعماله.
@@ -332,6 +395,26 @@ class Pipeline:
             return False
 
         threshold = float(getattr(cfg, "ai_confidence_threshold", 0.9))
+
+        # ═══ المسار (أ) — تصحيح إملاء + **إعادة التفكيك الحتميّ** (المفضَّل) ═══
+        # النموذج يردّ الاسم المكتوب خطأً إلى سجلّ مسجَّل؛ ثم نُعيد تشغيل نفس مكانيكا الدمج
+        # القائمة على النصّ الأصليّ كما لو كتبه الموظّف صحيحًا. النموذج لا يقدّم أيّ رقم هنا:
+        # المبالغ والأسعار والأدوار والخزينة كلها من المفكِّك الحتميّ (§0).
+        corrections = validate_corrections(prop, text, treasuries, suppliers, threshold)
+        if corrections and await self._ai_replay_with_corrections(deal, corrections, prop, now):
+            return True
+
+        # ═══ المسار (ب) — تعبئة الخزينة مباشرةً، **مقيَّدة بشدّة** ═══
+        # 🔴 قاعدة مبدئيّة (بعد ملاحظة حيّة على XI1321): النموذج **لا يُسنِد دورًا** أبدًا، بل
+        #    يصحّح إملاء رمزٍ أسنَد المفكِّكُ الحتميّ دورَه سلفًا. في XI1321 اقترح النموذج بثقة 1.0
+        #    خزينة «صالح جربة تونس» من سطر الموقع «جربه/ميدون» — وهي ليست خزينة الحوالة. لذلك
+        #    لا نقبل خزينةً من النموذج إلا إذا كان المفكِّك قد وسم رمزًا بأنه **اسم خزينة تعذّر
+        #    حلّه** (unresolved_treasury) — أي الدور محسوم حتميًّا والنموذج يصحّح الهجاء فقط.
+        if not (leg.unresolved_treasury or "").strip():
+            log.info("(الفهم الذكي) لا رمز خزينة موسوم للصفقة %s — لا تُقبَل خزينة من النموذج "
+                     "(منع إسناد الأدوار) ⇒ تصعيد عاديّ", deal.deal_id)
+            return False
+
         verdict = validate_proposal(prop, text, treasuries, suppliers, threshold,
                                     require=("treasury",))
         if not verdict.ok:
