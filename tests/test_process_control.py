@@ -46,7 +46,10 @@ def test_kernel_touching_commands_are_deferred(target, expected):
 
 
 def test_deferred_command_is_detached_and_delayed(monkeypatch):
-    """أمر الكيرنل: Popen منفصل (DETACHED) وفيه تأخير — لا subprocess.run يقتل الخادم فورًا."""
+    """أمر الكيرنل: Popen منفصل (DETACHED) وفيه تأخير — لا تنفيذ متزامن يقتل الخادم قبل الردّ.
+
+    (المُنفِّذ صار schtasks بعد إخراج الكيرنل من pm2؛ العقد المُختبَر هنا هو **التأجيل والانفصال**
+    لا الأداة — أداة الكيرنل يغطّيها test_kernel_commands_go_to_schtasks_not_pm2.)"""
     seen = {}
 
     class _P:
@@ -59,7 +62,7 @@ def test_deferred_command_is_detached_and_delayed(monkeypatch):
     res = pc.run_action("restart", "moneyado-kernel")
     assert res["ok"] and res["deferred"] is True
     joined = " ".join(seen["cmd"])
-    assert "pm2 restart moneyado-kernel" in joined
+    assert "moneyado-kernel" in joined
     assert "timeout" in joined                       # تأخير يسمح بعودة الردّ
     assert seen["kw"].get("creationflags", 0) != 0    # منفصل عن العملية الأمّ
 
@@ -79,16 +82,18 @@ def test_immediate_command_runs_inline(monkeypatch):
 
 # ── القراءة: pm2 غير متاح لا يكسر اللوحة (T5) ────────────────────────────────────
 def test_list_processes_survives_pm2_failure(monkeypatch):
-    """فشل pm2 → قائمة فارغة وتسجيل، لا استثناء يكسر الصفحة."""
+    """فشل pm2 لا يكسر الصفحة — ولا يُخفي الكيرنل (مُشرِفه مستقلّ عن pm2)."""
     def _boom(*a, **k):
         raise OSError("pm2 not found")
 
     monkeypatch.setattr(pc.subprocess, "run", _boom)
-    assert pc.list_processes() == []
+    out = pc.list_processes()
+    assert [p["name"] for p in out] == ["moneyado-kernel"]   # الجسر وحده غاب
+    assert out[0]["supervisor"] == "scheduled-task"
 
 
 def test_list_processes_filters_foreign_apps(monkeypatch):
-    """عمليات pm2 الأخرى لا تُعرَض — المكوّنان فقط."""
+    """عمليات pm2 الأخرى لا تُعرَض — الجسر من pm2 + الكيرنل من المنفذ (مُشرِفان مختلفان)."""
     class _R:
         returncode = 0
         stderr = ""
@@ -97,5 +102,48 @@ def test_list_processes_filters_foreign_apps(monkeypatch):
 
     monkeypatch.setattr(pc.subprocess, "run", lambda *a, **k: _R())
     out = pc.list_processes()
-    assert [p["name"] for p in out] == ["moneyado-wa"]
+    assert [p["name"] for p in out] == ["moneyado-wa", "moneyado-kernel"]
     assert out[0]["status"] == "online" and out[0]["restarts"] == 2
+    assert out[0]["supervisor"] == "pm2" and out[1]["supervisor"] == "scheduled-task"
+
+
+# ── الكيرنل خارج pm2: مهمّة ويندوز مجدولة (2026-07-19) ────────────────────────────
+def test_kernel_commands_go_to_schtasks_not_pm2(monkeypatch):
+    """🔴 أوامر الكيرنل تذهب لـschtasks — pm2 كان يقتله كل دقيقة (CTRL_C 3221225786)."""
+    seen = {}
+
+    class _P:
+        def __init__(self, cmd, **kw):
+            seen["cmd"] = " ".join(cmd)
+            seen["kw"] = kw
+
+    monkeypatch.setattr(pc.subprocess, "Popen", _P)
+    monkeypatch.setattr(pc.subprocess, "run", lambda *a, **k: pytest.fail("لا pm2 للكيرنل"))
+    res = pc.run_action("restart", "moneyado-kernel")
+    assert res["ok"] and res["deferred"] is True
+    assert "schtasks" in seen["cmd"] and "moneyado-kernel" in seen["cmd"]
+    assert "pm2" not in seen["cmd"]                  # لا رجعة لـpm2 للكيرنل
+    assert seen["kw"].get("creationflags", 0) != 0    # منفصل
+
+
+def test_kernel_status_comes_from_the_port_not_a_supervisor(monkeypatch):
+    """حالة الكيرنل تُقرأ من المنفذ 8000 — لا نصدّق مُشرِفًا يقول online والعملية تتقلّب."""
+    class _R:
+        returncode = 0
+        stderr = ""
+        stdout = "  TCP    0.0.0.0:8000     0.0.0.0:0     LISTENING       4242\n"
+
+    monkeypatch.setattr(pc.subprocess, "run", lambda *a, **k: _R())
+    st = pc._kernel_status()
+    assert st["status"] == "online" and st["pid"] == 4242 and st["supervisor"] == "scheduled-task"
+
+
+def test_kernel_reported_stopped_when_port_free(monkeypatch):
+    """لا مستمع على 8000 → stopped (مهما قال أي مُشرِف)."""
+    class _R:
+        returncode = 0
+        stderr = ""
+        stdout = "  TCP    0.0.0.0:3001     0.0.0.0:0     LISTENING       77\n"
+
+    monkeypatch.setattr(pc.subprocess, "run", lambda *a, **k: _R())
+    assert pc._kernel_status()["status"] == "stopped"
