@@ -1,8 +1,10 @@
 """
-الجزء 1 — الحل التلقائي الجريء للأسماء + الجزء 2 — dedup بالمحتوى (قرار المالك).
+الجزء 1 — 🔴 **إلغاء** الحل التلقائي بالتشابه (قرار المالك 2026-07-19) + الجزء 2 — dedup بالمحتوى.
 
-الجزء 1: خزينة/مورد لم يُحلّ بالصارم → أفضل مرشّح (WRatio≥70 بعد التطبيع) → تنزيل فوريّ + تنبيه
-المسؤول + تعلّم alias. تصعيد فقط عند لا مرشّح. خطّان أحمران: العملاء ليسوا مرشّحين، والعامّ وحده لا يطابق.
+الجزء 1: مسار التشابه (resolve_bold) معطَّل بالكامل (bold_resolve_enabled=False): اسمٌ لا يُحلّ
+صارمًا → يبقى unresolved فيُصعَّد بالرسالة الإلزامية — لا تخمين ولا alias متعلَّم. يبقى شغّالاً:
+الحل الصارم + aliases اليدوية + التطبيع الحتميّ + طبقة القروب (test_room_match).
+دوالّ resolve_bold نفسها تبقى مختبَرةً (أداة محفوظة غير موصولة) لتوثيق ما كانت تفعله.
 الجزء 2: نفس المرجع+نفس الجوهر = تكرار (تجاهل+ريأكشن)؛ نفس المرجع+جوهر مختلف = صفقة جديدة+تنبيه.
 """
 from __future__ import annotations
@@ -90,22 +92,50 @@ def _leg(unresolved=None, ref="X1", amount=5000.0, phone="01011", code="100"):
                      unresolved_treasury=unresolved, sender_jid=S1)
 
 
-async def test_auto_resolve_applies_alerts_and_learns(db):
-    """«ابو بوسف» → تُحلّ «أبو يوسف جديد» + تُطبَّق + تنبيه مسؤول + alias متعلَّم (يحلّ صارمًا لاحقًا)."""
+async def test_similarity_path_disabled_name_escalates(db):
+    """🔴 (قرار المالك 2026-07-19) «ابو بوسف» يشبه «أبو يوسف جديد» — ومع ذلك **لا يُحلّ**:
+    المسار ملغى (bold_resolve_enabled=False)، فيبقى unresolved بلا تنبيه حلّ ولا alias متعلَّم → تصعيد."""
     await db.treasuries.seed_if_empty([{"name": t.name, "code": t.code, "type": t.type.value} for t in _TRS])
     bus = _RecBus()
     pipe = _pipe(db, bus)
+    assert pipe._bold_resolve_enabled is False                                  # المفتاح مطفأ افتراضًا
     leg = _leg(unresolved="ابو بوسف")
     raw = RawMessage(message_key="k", chat_jid=CENTRAL, sender_jid=S1, text="...", received_at=NOW)
-    trs = await db.treasuries.all_active()
-    await pipe._auto_resolve_treasury(leg, raw, trs)
-    assert leg.treasury is not None and leg.treasury.name == "أبو يوسف جديد"   # طُبِّقت
-    assert leg.unresolved_treasury is None
-    assert any(d.get("method") == "similarity" for d in leg.deviation_log)      # سُجِّلت
-    assert bus.admin_msgs and "تشابه اسم خزينة" in bus.admin_msgs[0]            # نُبِّه المسؤول
-    # تعلّم: نفس الإملاء يُحلّ الآن صارمًا (بلا قياس)
+    await pipe._auto_resolve_treasury(leg, raw, await db.treasuries.all_active())
+    assert leg.treasury is None and leg.unresolved_treasury == "ابو بوسف"       # لم يُخمَّن
+    assert not any(d.get("method") == "similarity" for d in leg.deviation_log)
+    assert not bus.admin_msgs                                                   # لا تنبيه حلّ
+    # ولا alias متعلَّم: الإملاء الخاطئ يظلّ غير محلول صارمًا
     from core.parsing.resolve import resolve_treasury
-    assert resolve_treasury("ابو بوسف", await db.treasuries.all_active()).name == "أبو يوسف جديد"
+    assert resolve_treasury("ابو بوسف", await db.treasuries.all_active()) is None
+
+
+async def test_similarity_path_disabled_supplier_escalates(db):
+    """نظير الخزينة للموردين: اسم مورّد مشابه لا يُحلّ تلقائيًّا — يبقى unresolved → تصعيد."""
+    await db.suppliers.seed_if_missing([{"name": "شركة النور", "code": "12"}])
+    bus = _RecBus()
+    pipe = _pipe(db, bus)
+    leg = _leg()
+    leg.unresolved_supplier = "شركه النوور"
+    raw = RawMessage(message_key="k", chat_jid=CENTRAL, sender_jid=S1, text="...", received_at=NOW)
+    await pipe._auto_resolve_supplier(leg, raw, await db.suppliers.all_active())
+    assert leg.supplier is None and leg.unresolved_supplier == "شركه النوور"
+    assert not bus.admin_msgs
+
+
+async def test_manual_alias_still_resolves_strictly(db):
+    """ما يبقى شغّالاً: alias **يدويّ** مسجَّل يُحلّ صارمًا (ليس تخمينًا)."""
+    await db.treasuries.seed_if_empty([{"name": t.name, "code": t.code, "type": t.type.value} for t in _TRS])
+    await db.treasuries.add_alias("أبو يوسف جديد", "ابو يوسف")
+    from core.parsing.resolve import resolve_treasury
+    assert resolve_treasury("ابو يوسف", await db.treasuries.all_active()).name == "أبو يوسف جديد"
+
+
+def test_deterministic_normalization_still_works():
+    """ما يبقى شغّالاً: التطبيع الحتميّ (همزات/ياءات/ة-ه/مسافات) — حتميّ لا تخمين."""
+    from core.parsing.resolve import resolve_treasury
+    assert resolve_treasury("ابو يوسف جديد", _TRS).name == "أبو يوسف جديد"   # همزة الوصل
+    assert resolve_treasury("  محمود   صفاقس  ", _TRS).name == "محمود صفاقس"  # مسافات
 
 
 async def test_auto_resolve_no_candidate_escalates_not_resolved(db):

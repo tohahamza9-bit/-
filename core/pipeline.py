@@ -124,8 +124,10 @@ class Pipeline:
         self._last_gate_alert: Optional[datetime] = None
         # (البند 5) خنق الرسائل الإلزامية لكل مرجع: كامل مرّتين ثم مختصرة (ممنوع صفر). ذاكرة حيّة.
         self._alert_counts: dict[str, int] = {}
-        # (الجزء 1، قرار المالك) عتبة الحل الجريء للأسماء (WRatio بعد التطبيع) — منخفضة عمدًا.
-        self._AUTO_RESOLVE_THRESHOLD = 70
+        # 🔴 (قرار المالك 2026-07-19) الحلّ التلقائي بالتشابه **ملغى**: default=off ولا يُفعَّل.
+        #    الاسم الذي لا يُحلّ صارمًا (أو من القروب) → تصعيد بالرسالة الإلزامية، لا تخمين.
+        self._bold_resolve_enabled = getattr(_s, "bold_resolve_enabled", False)
+        self._AUTO_RESOLVE_THRESHOLD = 70   # يبقى للتوثيق — لا أثر له والمسار معطَّل
         # (طبقة قروب الخزينة) — من الإعدادات (مفتاح المالك + النافذة).
         self._room_match_enabled = getattr(_s, "room_match_enabled", True)
         self._room_match_window = getattr(_s, "room_match_window_seconds", 50.0)
@@ -135,7 +137,12 @@ class Pipeline:
         """(الجزء 1، قرار المالك) خزينةٌ لم تُحلّ بالمطابقة الصارمة → **حلّ جريء** (WRatio ≥ ٧٠ بعد
         التطبيع) على قائمة الخزائن وحدها: يأخذ أفضل مرشّح، يطبّقه، يُنزّل الحوالة فورًا، ويُنبّه المسؤول
         + يسجّل في الصفقة (deviation_log) + يتعلّم alias (نفس الغلطة تُحلّ صارمًا لاحقًا). لا مرشّح فوق
-        العتبة → يبقى unresolved (يُلتقط مجهولًا ويُصعَّد). الخطّان الأحمران داخل resolve_bold."""
+        العتبة → يبقى unresolved (يُلتقط مجهولًا ويُصعَّد). الخطّان الأحمران داخل resolve_bold.
+
+        🔴 **ملغى بقرار المالك (2026-07-19)**: المفتاح bold_resolve_enabled=False افتراضًا ولا يُفعَّل.
+           التخمين في الأسماء أنزل حوالات على خزائن خاطئة → عاد النظام لِما قبل التشابه: تصعيد."""
+        if not self._bold_resolve_enabled:
+            return                              # ملغى — لا تخمين، الاسم يبقى unresolved فيُصعَّد
         if leg is None or not leg.unresolved_treasury:
             return
         original = leg.unresolved_treasury
@@ -164,7 +171,11 @@ class Pipeline:
                                      suppliers: list) -> None:
         """(بند 4، متابعة الأولوية 2) مورّدٌ معنون لم يُحلّ صارمًا (`unresolved_supplier`) → **حلّ جريء**
         (WRatio ≥ ٧٠) نظيرَ الخزينة: يطبّق أفضل مرشّح + تنبيه المسؤول + deviation_log + تعلّم alias.
-        الخطّان الأحمران داخل resolve_bold (الموردون قائمة مستقلّة، والعامّ وحده لا يطابق). «فكهتني»."""
+        الخطّان الأحمران داخل resolve_bold (الموردون قائمة مستقلّة، والعامّ وحده لا يطابق). «فكهتني».
+
+        🔴 **ملغى بقرار المالك (2026-07-19)** — نظير الخزينة: bold_resolve_enabled=False، تصعيد لا تخمين."""
+        if not self._bold_resolve_enabled:
+            return                              # ملغى — لا تخمين، الاسم يبقى unresolved فيُصعَّد
         if leg is None or not leg.unresolved_supplier:
             return
         original = leg.unresolved_supplier
@@ -589,10 +600,10 @@ class Pipeline:
             )
             return None
 
-        # 🔴 (الجزء 1، قرار المالك) حلّ الاسم الجريء: خزينة لم تُحلّ بالصارم → أفضل مرشّح ≥٧٠ + تنزيل
-        #    فوريّ + تنبيه المسؤول + تعلّم — **قبل** الربط/التصنيف كي تُعامَل الحوالة محلولةً لا مجهولة.
+        # 🔴 (قرار المالك 2026-07-19) الحلّ بالتشابه **ملغى** — الاستدعاءان يخرجان فورًا ما لم يُفعَّل
+        #    المفتاح (default=off، ولا يُفعَّل). الاسم غير المحلول صارمًا/من القروب → تصعيد إلزاميّ.
         await self._auto_resolve_treasury(result.leg, raw, treasuries)
-        await self._auto_resolve_supplier(result.leg, raw, suppliers)   # (بند 4) نظير الخزينة للموردين
+        await self._auto_resolve_supplier(result.leg, raw, suppliers)
 
         # ═══ ربط الرسالة الثانية — حتميّ بطبقتين (§7.3، بلا قرب/تجاور/تصعيد) ═══
         # الطبقة ١ (مرجع صريح): الرسالة تحمل ref يطابق صفقة منتظِرة → تُربَط به مباشرة (الشكل الجديد،

@@ -209,17 +209,16 @@ async def test_rerun_control_requeues_tech_failed(db):
     assert any("أُعيدت للطابور" in m for m in bus.central_msgs)
 
 
-# ── بند 4: حل الموردين الجريء ──────────────────────────────────────────────────────────
-async def test_auto_resolve_supplier_bold(db):
-    """(بند 4) مورّد معنون لم يُحلّ صارمًا → أقرب مورّد مسجّل + تطبيق + تنبيه + تعلّم (نظير الخزينة)."""
+# ── بند 4: حل الموردين بالتشابه — 🔴 ملغى (قرار المالك 2026-07-19) ───────────────────────
+async def test_supplier_similarity_disabled_no_guessing(db):
+    """مورّد معنون لم يُحلّ صارمًا **لا يُخمَّن** بالتشابه: يبقى unresolved بلا تنبيه ولا تعلّم → تصعيد."""
     await db.suppliers.seed_if_missing([{"name": "أبو يوسف", "code": "1290", "aliases": []}])
     bus = _RecBus()
     pipe = _pipe(db, _W(WriteResult(ok=True)), bus)
     leg = ParsedLeg(operation=OperationType.SELL, reference_number="X9", unresolved_supplier="ابو بوسف")
     raw = RawMessage(message_key="k", chat_jid=CENTRAL, sender_jid=EMP, text="...", received_at=NOW)
     await pipe._auto_resolve_supplier(leg, raw, await db.suppliers.all_active())
-    assert leg.supplier is not None and leg.supplier.name == "أبو يوسف"
-    assert leg.unresolved_supplier is None
-    assert any("تشابه اسم مورّد" in m for m in bus.admin_msgs)
+    assert leg.supplier is None and leg.unresolved_supplier == "ابو بوسف"
+    assert not any("تشابه اسم مورّد" in m for m in bus.admin_msgs)
     from core.parsing.resolve import resolve_supplier
-    assert resolve_supplier("ابو بوسف", await db.suppliers.all_active()).name == "أبو يوسف"  # تُعلّم
+    assert resolve_supplier("ابو بوسف", await db.suppliers.all_active()) is None   # لم يُتعلَّم شيء

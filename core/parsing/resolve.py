@@ -107,29 +107,10 @@ def _loose_match(token: Optional[str], records: list):
     if hits:
         return hits[0] if len(hits) == 1 else _ambiguous(token, hits)
 
-    # (٥) fuzzy (rapidfuzz WRatio) — تتخطّى النصوص < 3 أحرف والمُسجِّل المعطّل.
-    # 🔴 تُقارَن الأجزاء المميِّزة وحدها (بعد تجريد الكلمات العامّة شركة/مكتب/…) كي لا تُطابَق
-    #    هويّتان مختلفتان بسبب كلمة عامّة مشتركة («شركة القن» ⇔ «شركة النور»). لو لم يبقَ جزءٌ
-    #    مميِّزٌ كافٍ (نصّ عامّ فقط) → لا تخمين تقريبيّ (§0).
-    if fuzz is None or len(qn) < _MATCH_MIN_LEN:
-        return None
-    q_core = _strip_generic(qn)
-    if len(q_core) < _MATCH_MIN_LEN:
-        return None
-    scored = []
-    for r in records:
-        best = 0.0
-        for c in _match_forms(r):
-            c_core = _strip_generic(c)
-            if len(c_core) >= _MATCH_MIN_LEN:
-                best = max(best, fuzz.WRatio(q_core, c_core))
-        if best >= _FUZZY_THRESHOLD:
-            scored.append(r)
-    hits = _distinct(scored)
-    if len(hits) == 1:
-        return hits[0]
-    if len(hits) > 1:
-        return _ambiguous(token, hits)
+    # (٥) 🔴 **مرحلة fuzzy مُلغاة** (قرار المالك 2026-07-19): درجةُ تشابهٍ (WRatio) على اسمٍ
+    #     = تخمينٌ في الهويّة، وقد أنزلت حوالات على كيانات خاطئة. الخزائن كانت ملغاةً أصلًا
+    #     (مطابقة تامّة فقط)؛ الموردون يلحقون بها الآن. البدائل بلا تخمين: alias يدويّ من
+    #     اللوحة، أو طبقة القروب (room_match)، وإلّا **تصعيد** بالرسالة الإلزامية.
     return None
 
 
