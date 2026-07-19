@@ -46,6 +46,9 @@ from . import auth, stats, transfers
 log = get_logger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# صفحات HTML: no-cache (يُعاد التحقّق عبر ETag دائمًا) — كي يرى المدير تعديلات الواجهة فور النشر
+#   بلا Ctrl+F5 (م: بطاقة «حلّ الخزينة من القروب» لم تظهر بسبب نسخة المتصفّح المخبّأة).
+_HTML_NOCACHE = {"Cache-Control": "no-cache"}
 
 # ترتيب عرض الغرف في اللوحة حسب النوع (§13 عرض): مركزية → مسؤول → زبون → خزينة → مورد → غير مصنّفة → متجاهَلة
 _ROOM_TYPE_ORDER = {
@@ -956,47 +959,47 @@ def create_app(db: Database, settings: Optional[Settings] = None) -> FastAPI:
 
     @app.get("/")
     async def index() -> FileResponse:
-        return FileResponse(str(STATIC_DIR / "index.html"))
+        return FileResponse(str(STATIC_DIR / "index.html"), headers=_HTML_NOCACHE)
 
     @app.get("/login")
     async def login_page() -> FileResponse:
         """صفحة تسجيل الدخول (§14.3) — تُقدَّم بلا مصادقة؛ البوّابة تتمّ في الواجهة/الـ API."""
-        return FileResponse(str(STATIC_DIR / "login.html"))
+        return FileResponse(str(STATIC_DIR / "login.html"), headers=_HTML_NOCACHE)
 
     @app.get("/rooms")
     async def rooms_page() -> FileResponse:
         """صفحة إدارة الغرف البسيطة (§2.2) — تصنيف بالأسماء فقط، بلا إدخال JID يدوي."""
-        return FileResponse(str(STATIC_DIR / "rooms.html"))
+        return FileResponse(str(STATIC_DIR / "rooms.html"), headers=_HTML_NOCACHE)
 
     @app.get("/attention")
     async def attention_page() -> FileResponse:
         """قائمة الانتباه (لوحة V2 م١) — البوّابة في الواجهة/الـ API."""
-        return FileResponse(str(STATIC_DIR / "attention.html"))
+        return FileResponse(str(STATIC_DIR / "attention.html"), headers=_HTML_NOCACHE)
 
     @app.get("/transfers")
     async def transfers_page() -> FileResponse:
         """سجل الحوالات (لوحة V2 م١)."""
-        return FileResponse(str(STATIC_DIR / "transfers.html"))
+        return FileResponse(str(STATIC_DIR / "transfers.html"), headers=_HTML_NOCACHE)
 
     @app.get("/connect")
     async def connect_page() -> FileResponse:
         """صفحة الاتصال + QR + صحة MONEYADO (لوحة V2 م٥) — البوّابة في الواجهة/الـ API."""
-        return FileResponse(str(STATIC_DIR / "connect.html"))
+        return FileResponse(str(STATIC_DIR / "connect.html"), headers=_HTML_NOCACHE)
 
     @app.get("/fx-rates")
     async def fx_rates_page() -> FileResponse:
         """صفحة إدارة الأسعار (FX §15) — المصادقة/الصلاحيات تُفرَض في الـAPI."""
-        return FileResponse(str(STATIC_DIR / "fx_rates.html"))
+        return FileResponse(str(STATIC_DIR / "fx_rates.html"), headers=_HTML_NOCACHE)
 
     @app.get("/entity-aliases")
     async def entity_aliases_page() -> FileResponse:
         """صفحة إدارة الكيانات الموحّدة (§4)."""
-        return FileResponse(str(STATIC_DIR / "entity_aliases.html"))
+        return FileResponse(str(STATIC_DIR / "entity_aliases.html"), headers=_HTML_NOCACHE)
 
     @app.get("/settings")
     async def settings_page() -> FileResponse:
         """مركز الإعدادات (لوحة V2 م٦): مستخدمون + Kill Switch + موظفون + كشف + سجل تقنيّ."""
-        return FileResponse(str(STATIC_DIR / "settings.html"))
+        return FileResponse(str(STATIC_DIR / "settings.html"), headers=_HTML_NOCACHE)
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
