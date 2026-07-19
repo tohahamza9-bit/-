@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     customer_room_jids: str = Field(default="")  # مفصولة بفواصل
     treasury_room_jids: str = Field(default="")
 
+    # ── الفهم الذكي (OpenRouter) — طبقة إنقاذ قبل التصعيد ──
+    # 🔴 المفتاح **سرّ**: يوضع في .env فقط (OPENROUTER_API_KEY=sk-or-v1-…) ولا يُعرَض في اللوحة.
+    #    فارغ ⇒ الطبقة معطَّلة فعليًّا مهما كان إعداد اللوحة (تصعيد عاديّ، بلا نداء).
+    openrouter_api_key: str = Field(default="")
+
     # ── جسر WhatsApp (Baileys ↔ Python) ──
     whatsapp_bridge_url: str = Field(default="http://localhost:3001")
     internal_token: str = Field(default="")     # SEC-002 X-Internal-Token

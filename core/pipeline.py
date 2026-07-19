@@ -47,13 +47,16 @@ from .db import Database, utcnow
 from .guard import Guard, build_reversal, is_out_of_active_window
 from .logging_setup import get_logger
 from .matching.service import MatchingService
-from .models import Deal, LedgerEntry, ParsedLeg, RawMessage, TreasuryRef, WriteJob
+from .models import (
+    Deal, LedgerEntry, ParsedLeg, RawMessage, SupplierRef, TreasuryRef, WriteJob,
+)
 from .parsing import (
     detect_control,
     extract_code_name_price_lines,
     parse_completion_fragment,
     parse_message,
 )
+from .ai_understanding import OpenRouterClient, validate_proposal
 from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
 from .parsing.parser import _has_reference
@@ -96,7 +99,10 @@ class Pipeline:
         guard: Optional[Guard] = None,
         customer_room_jids: Optional[list[str]] = None,
         treasury_room_jids: Optional[list[str]] = None,
+        ai_client: Optional[object] = None,
     ):
+        # (الفهم الذكي) عميل قابل للحقن في الاختبارات؛ None ⇒ يُبنى حيًّا من .env + إعداد اللوحة.
+        self._ai_client = ai_client
         self.db = db
         self.bus = bus
         self.writer = writer
@@ -267,6 +273,97 @@ class Pipeline:
             f"(مطابقة هاتف+قيمة، resolved_by=room_match).", self._deal_key(deal))
         log.info("(قروب الخزينة) حُلّت %s ← قروب «%s» (code %s، Δ%.1fs)",
                  leg.reference_number, rname, code, dt)
+        return True
+
+    async def _deal_source_text(self, deal: Deal) -> Optional[str]:
+        """نصّ الرسالة (أو الرسالتين) التي وُلِدت منها الصفقة — مدخل الفهم الذكي والتحقّق من الأرقام."""
+        keys: list[str] = []
+        for lg in (deal.sell_leg, deal.buy_leg):
+            if lg is not None and lg.source_message_key:
+                keys.append(lg.source_message_key)
+        for k in deal.source_message_keys:
+            if k not in keys:
+                keys.append(k)
+        parts: list[str] = []
+        for k in keys:
+            try:
+                raw = await self.db.raw.get(k)
+            except Exception as exc:      # T5 — لا نبتلع؛ بلا نصّ ⇒ لا فهم ذكيّ (تصعيد عاديّ)
+                log.warning("(الفهم الذكي) تعذّر جلب نصّ الرسالة %s: %s", k, exc)
+                continue
+            if raw is not None and (raw.text or "").strip():
+                parts.append(raw.text.strip())
+        return "\n".join(parts) if parts else None
+
+    async def _ai_rescue(self, deal: Deal, now: datetime) -> bool:
+        """(طبقة الفهم الذكي — إنقاذ فقط) الصفقة على وشك التصعيد لعدم حلّ الخزينة؟ اسأل النموذج
+        عبر OpenRouter، ثم **تحقّق حتميًّا** من اقتراحه قبل استعماله.
+
+        🔴 الحدود المطلقة (§0): لا تُستدعى إلا على مسارٍ كان سيُصعَّد أصلًا؛ لا تلمس حقلًا حسمه الفهم
+           الحتميّ (تُملأ الخزينة فقط إن كانت None)؛ الكيان لازم مسجَّل؛ الرقم لازم في النصّ؛ الثقة
+           فوق العتبة. أيّ إخفاق (نداء/ردّ/تحقّق) → False ⇒ التصعيد يمضي كأن الطبقة غير موجودة.
+
+        يُرجِع True إن أُنقِذت الصفقة (خزينة محلولة + تنبيه المسؤول + resolved_by=ai).
+        """
+        cfg = await self.db.detection.get()          # hot-reload من اللوحة (بلا إعادة تشغيل)
+        if not getattr(cfg, "ai_enabled", False):
+            return False
+        leg = deal.sell_leg or deal.buy_leg
+        if leg is None or leg.treasury is not None:  # لا شيء لإنقاذه
+            return False
+        text = await self._deal_source_text(deal)
+        if not text:
+            log.info("(الفهم الذكي) بلا نصّ مصدر للصفقة %s — تصعيد عاديّ", deal.deal_id)
+            return False
+
+        client = self._ai_client or OpenRouterClient(
+            api_key=get_settings().openrouter_api_key,
+            model=getattr(cfg, "ai_model", "google/gemini-2.5-flash"),
+            timeout=float(getattr(cfg, "ai_timeout_seconds", 10.0)),
+        )
+        treasuries = await self.db.treasuries.all_active()
+        suppliers = await self.db.suppliers.all_active()
+        try:
+            prop = await client.propose(text, treasuries, suppliers)
+        except Exception as exc:      # T5 — الصمود: لا حوالة تتوقّف على API خارجيّ
+            log.warning("(الفهم الذكي) استثناء غير متوقّع في النداء: %s — تصعيد عاديّ", exc)
+            return False
+        if prop is None:
+            return False
+
+        threshold = float(getattr(cfg, "ai_confidence_threshold", 0.9))
+        verdict = validate_proposal(prop, text, treasuries, suppliers, threshold,
+                                    require=("treasury",))
+        if not verdict.ok:
+            # فشل التحقّق → تصعيد **مع إرفاق اقتراح النموذج** مساعدةً للمسؤول (بند 3).
+            log.warning("(الفهم الذكي) رُفض اقتراح %s للصفقة %s: %s",
+                        prop.model, deal.deal_id, verdict.reason)
+            await self.bus.notify_admin(
+                f"🤖 {self._ref(deal)} — الفهم الذكي لم يُعتمَد ({verdict.reason}).\n"
+                f"اقتراح النموذج ({prop.model}) للاستئناس فقط: {prop.summary()}",
+                self._deal_key(deal),
+            )
+            return False
+
+        trec = verdict.treasury
+        leg.treasury = TreasuryRef(code=trec.code, name=trec.name,
+                                   type=trec.type, currency=trec.currency)
+        if leg.currency is None:
+            leg.currency = verdict.currency or trec.currency
+        leg.unresolved_treasury = None
+        if verdict.supplier is not None and leg.supplier is None:
+            leg.supplier = SupplierRef(code=verdict.supplier.code, name=verdict.supplier.name)
+        leg.deviation_log.append({
+            "field": "treasury", "raw_value": "ai", "extracted_value": trec.name,
+            "method": "ai", "confidence": int(threshold * 100), "model": prop.model,
+        })
+        await self.db.deals.upsert(deal)
+        await self.bus.notify_admin(
+            f"⚠️ {self._ref(deal)} فُهمت بالذكاء الاصطناعي ({prop.model}): {prop.summary()}",
+            self._deal_key(deal),
+        )
+        log.info("(الفهم الذكي) أُنقِذت %s ← خزينة «%s» (نموذج %s، %dms)",
+                 deal.deal_id, trec.name, prop.model, prop.latency_ms)
         return True
 
     async def _mandatory_alert(self, deal: Deal, detail: str, reply_key: Optional[str]) -> None:
@@ -1006,6 +1103,20 @@ class Pipeline:
                     _anchor = _as_naive_utc(deal.first_received_at or deal.created_at or now)
                     if (_as_naive_utc(now) - _anchor).total_seconds() < _win:
                         return deal            # ضمن النافذة، رسالة القروب لم تصل بعد → انتظر النبضة
+
+            # ═══ (طبقة الفهم الذكي — إنقاذ فقط، بديل التخمين الملغى) ═══
+            # وصلنا هنا وخزينة الطرف غير محلولة ⇒ فشِل الحلّ الصارم **وطبقة القروب**، والمسار التالي
+            # تصعيدٌ حتميّ (SI أدناه، أو بوابة الثقة). فرصةٌ أخيرة: النموذج يقترح، والكود يتحقّق.
+            # نجاح التحقّق → تُحلّ الخزينة ويكمل المسار العاديّ؛ أيّ إخفاق → التصعيد يمضي كما هو.
+            # مطفأة افتراضيًّا (ai_enabled=False) ⇒ سلوك اليوم مطابق تمامًا ما لم يشغّلها المالك.
+            _at = deal.sell_leg or deal.buy_leg
+            if _at is not None and _at.treasury is None:
+                try:
+                    if await self._ai_rescue(deal, now):
+                        deal = await self.db.deals.get(deal.deal_id) or deal
+                except Exception as exc:   # T5 — الصمود: الطبقة لا تُسقط حوالة أبدًا
+                    log.warning("(الفهم الذكي) أخفقت الطبقة للصفقة %s: %s — تصعيد عاديّ",
+                                deal.deal_id, exc)
 
             # (6·SI) حوالة SI معنونة خزينتها مذكورة صراحةً دائمًا — فإن لم تُحلّ (نادر جدًّا:
             # اسم خزينة خارج القوائم/خطأ إملائي) فهي حالة شاذّة تحتاج إنسانًا: تُصعَّد لغرفة

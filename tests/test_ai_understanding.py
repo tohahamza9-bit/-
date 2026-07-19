@@ -1,0 +1,230 @@
+"""
+طبقة الفهم الذكي (OpenRouter) — إنقاذ أخير قبل التصعيد.
+
+القاعدة: النموذج يقترح، والكود يتحقّق حتميًّا. كيان غير مسجَّل، أو رقم غير موجود في النصّ، أو
+ثقة دون العتبة، أو فشل نداء — كلّها تُصعَّد كما لو أن الطبقة غير موجودة. لا نداء إطلاقًا وهي مطفأة.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+
+from core.ai_understanding import AiProposal, validate_proposal
+from core.constants import OperationType, Status, TreasuryType
+from core.models import Deal, DetectionConfig, ParsedLeg, SupplierRecord, TreasuryRecord
+
+NOW = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
+CENTRAL = "central@g.us"
+ADMIN = "admin@g.us"
+MSG_KEY = "ai-1"
+# نصّ رسالة حقيقيّ الشكل: خزينة مكتوبة بخطأ إملائيّ («اوسـ» بدل «قروب اوس») فيفشل الحلّ الصارم.
+TEXT = "X9001\n149 زبون تجريبي\nالمبلغ 1000\nالسعر 6.0\nخزينة: قروب اوسي\n01012345678"
+
+
+class _RecBus:
+    def __init__(self):
+        self.central_jid = CENTRAL
+        self.admin_jid = ADMIN
+        self.admin_msgs: list[str] = []
+
+    async def notify_admin(self, text, reply_to_key=None, forward_key=None):
+        self.admin_msgs.append(text)
+
+    async def reply_central(self, text, reply_to_key=None, *, is_alert=False):
+        pass
+
+
+class _FakeAi:
+    """عميل نموذج وهميّ — يُرجِع اقتراحًا مُعدًّا سلفًا، أو None لمحاكاة فشل النداء/المهلة."""
+
+    def __init__(self, data, *, fail=False, model="fake/model"):
+        self.data, self.fail, self.model = data, fail, model
+        self.calls = 0
+
+    async def propose(self, text, treasuries, suppliers, known_shapes=None):
+        self.calls += 1
+        if self.fail:
+            return None
+        return AiProposal(data=self.data, model=self.model, latency_ms=42)
+
+
+def _conf(**over) -> dict:
+    base = {"operation": 1.0, "amount": 1.0, "currency": 1.0,
+            "treasury": 1.0, "supplier": 1.0, "price": 1.0, "customer": 1.0}
+    base.update(over)
+    return base
+
+
+def _proposal(**over) -> dict:
+    d = {"operation": "بيع", "customer_code": "149", "customer_name": "زبون تجريبي",
+         "amount": 1000, "currency": "TND", "treasury": "قروب اوس", "price": 6.0,
+         "phone": "01012345678", "reference_number": "X9001", "confidence": _conf()}
+    d.update(over)
+    return d
+
+
+async def _seed(db, *, ai_enabled=True, threshold=0.9):
+    await db.treasuries.upsert(
+        TreasuryRecord(name="قروب اوس", code="82", type=TreasuryType.SELL_ONLY))
+    await db.suppliers.upsert(SupplierRecord(name="طه", code="S1"))
+    cfg = DetectionConfig(ai_enabled=ai_enabled, ai_model="fake/model",
+                          ai_confidence_threshold=threshold)
+    await db.detection.set(cfg)
+    await db.raw.col.insert_one({
+        "message_key": MSG_KEY, "chat_jid": CENTRAL, "text": TEXT,
+        "received_at": NOW.replace(tzinfo=None), "processed": True})
+
+
+def _deal() -> Deal:
+    leg = ParsedLeg(operation=OperationType.SELL, reference_number="X9001", customer_code="149",
+                    customer_name="زبون تجريبي", amount=1000.0, phone="01012345678",
+                    price_normalized="6.0", treasury=None, unresolved_treasury="قروب اوسي",
+                    sender_jid="emp@lid", source_message_key=MSG_KEY)
+    return Deal(deal_id="d-ai", status=Status.PARSED, sell_leg=leg, created_at=NOW,
+                updated_at=NOW, first_received_at=NOW, chat_jid=CENTRAL,
+                source_message_keys=[MSG_KEY])
+
+
+def _pipe(db, bus, ai_client):
+    from core.pipeline import Pipeline
+
+    class _W:
+        name = "w"
+        async def write(self, job, *, commit): ...
+    return Pipeline(db, bus, _W(), None, customer_room_jids=[], treasury_room_jids=[],
+                    ai_client=ai_client)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# المسار السعيد: فهم مُتحقَّق منه → إكمال + تنبيه + resolved_by=ai
+# ═══════════════════════════════════════════════════════════════════════════
+async def test_verified_understanding_completes_and_alerts(db):
+    """اقتراح صحيح لكيان مسجَّل بأرقام موجودة وثقة عالية → تُحلّ الخزينة + تنبيه «فُهمت بالذكاء»."""
+    await _seed(db)
+    bus, ai = _RecBus(), _FakeAi(_proposal())
+    deal = _deal()
+    assert await _pipe(db, bus, ai)._ai_rescue(deal, NOW) is True
+    assert deal.sell_leg.treasury is not None and deal.sell_leg.treasury.code == "82"
+    assert deal.sell_leg.unresolved_treasury is None
+    assert any("فُهمت بالذكاء الاصطناعي" in m for m in bus.admin_msgs)
+    assert any(dv.get("method") == "ai" and dv.get("field") == "treasury"
+               for dv in deal.sell_leg.deviation_log)
+
+
+async def test_resolved_by_ai_surfaces_as_badge(db):
+    """الحوالة المُنقَذة تُعرَض في اللوحة بشارة «ذكاء» (resolved_by=ai)."""
+    from dashboard.transfers import _resolved_by
+    await _seed(db)
+    deal = _deal()
+    await _pipe(db, _RecBus(), _FakeAi(_proposal()))._ai_rescue(deal, NOW)
+    assert _resolved_by(deal.sell_leg.model_dump()) == "ai"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# الخطوط الحمراء: كل إخفاق ⇒ تصعيد (False) ولا تُلمَس الخزينة
+# ═══════════════════════════════════════════════════════════════════════════
+async def test_unregistered_entity_escalates(db):
+    """خزينة يقترحها النموذج لكنها غير مسجَّلة → لا تُعتمَد (تصعيد) + اقتراحها يُرسَل للاستئناس."""
+    await _seed(db)
+    bus, ai = _RecBus(), _FakeAi(_proposal(treasury="خزينة وهمية لا وجود لها"))
+    deal = _deal()
+    assert await _pipe(db, bus, ai)._ai_rescue(deal, NOW) is False
+    assert deal.sell_leg.treasury is None
+    assert any("غير مسجَّلة" in m for m in bus.admin_msgs)
+
+
+async def test_low_confidence_escalates(db):
+    """ثقة حقل جوهريّ دون العتبة → تصعيد، مع إرفاق اقتراح النموذج كمساعدة للمسؤول."""
+    await _seed(db)
+    bus, ai = _RecBus(), _FakeAi(_proposal(confidence=_conf(treasury=0.62)))
+    deal = _deal()
+    assert await _pipe(db, bus, ai)._ai_rescue(deal, NOW) is False
+    assert deal.sell_leg.treasury is None
+    assert any("اقتراح النموذج" in m for m in bus.admin_msgs)
+
+
+async def test_invented_number_escalates(db):
+    """رقم غير موجود في نصّ الرسالة (مبلغ مخترع) → تصعيد ولا يُسجَّل شيء."""
+    await _seed(db)
+    bus, ai = _RecBus(), _FakeAi(_proposal(amount=987654))
+    deal = _deal()
+    assert await _pipe(db, bus, ai)._ai_rescue(deal, NOW) is False
+    assert deal.sell_leg.treasury is None
+
+
+async def test_call_failure_escalates(db):
+    """فشل/مهلة النداء → تصعيد عاديّ كأن الطبقة غير موجودة (ممنوع أن تقف حوالة على API)."""
+    await _seed(db)
+    bus, ai = _RecBus(), _FakeAi(None, fail=True)
+    deal = _deal()
+    assert await _pipe(db, bus, ai)._ai_rescue(deal, NOW) is False
+    assert deal.sell_leg.treasury is None
+    assert bus.admin_msgs == []          # لا ضجيج عند فشل البنية التحتية
+
+
+async def test_disabled_layer_never_calls_model(db):
+    """الطبقة مطفأة → لا نداء إطلاقًا (لا كلفة، لا زمن) والسلوك مطابق لما قبلها."""
+    await _seed(db, ai_enabled=False)
+    ai = _FakeAi(_proposal())
+    deal = _deal()
+    assert await _pipe(db, _RecBus(), ai)._ai_rescue(deal, NOW) is False
+    assert ai.calls == 0
+
+
+async def test_resolved_treasury_is_never_overwritten(db):
+    """خزينة حسمها الفهم الحتميّ → الطبقة لا تُستدعى ولا تلمسها (الكود الحتميّ يغلب دائمًا)."""
+    from core.models import TreasuryRef
+    await _seed(db)
+    ai = _FakeAi(_proposal(treasury="قروب اوس"))
+    deal = _deal()
+    deal.sell_leg.treasury = TreasuryRef(code="99", name="خزينة صريحة",
+                                         type=TreasuryType.SELL_ONLY)
+    assert await _pipe(db, _RecBus(), ai)._ai_rescue(deal, NOW) is False
+    assert deal.sell_leg.treasury.code == "99"
+    assert ai.calls == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# وحدة التحقّق الحتميّ — مباشرةً
+# ═══════════════════════════════════════════════════════════════════════════
+def _recs():
+    return ([TreasuryRecord(name="قروب اوس", code="82", type=TreasuryType.SELL_ONLY)],
+            [SupplierRecord(name="طه", code="S1")])
+
+
+def test_validator_accepts_alias_and_code():
+    """المطابقة تقبل الكود والاسم الرسميّ — وترفض ما عداهما (لا تشابه)."""
+    trs, sup = _recs()
+    p = AiProposal(data=_proposal(treasury=None, treasury_code="82"), model="m")
+    assert validate_proposal(p, TEXT, trs, sup).ok is True
+    p2 = AiProposal(data=_proposal(treasury="قروب او"), model="m")   # بادئة قريبة — تُرفض
+    v2 = validate_proposal(p2, TEXT, trs, sup)
+    assert v2.ok is False and "غير مسجَّلة" in v2.reason
+
+
+def test_validator_rejects_unknown_currency():
+    trs, sup = _recs()
+    p = AiProposal(data=_proposal(currency="XYZ"), model="m")
+    v = validate_proposal(p, TEXT, trs, sup)
+    assert v.ok is False and "عملة" in v.reason
+
+
+def test_validator_requires_treasury_field():
+    """النموذج لم يقترح خزينةً أصلًا → لا فائدة من الإنقاذ (تصعيد)."""
+    trs, sup = _recs()
+    p = AiProposal(data=_proposal(treasury=None, treasury_code=None), model="m")
+    v = validate_proposal(p, TEXT, trs, sup)
+    assert v.ok is False and "treasury" in v.reason
+
+
+def test_number_in_text_accepts_alf_expansion():
+    """توسّع «ألف» الموثَّق (§3.5): «32 ألف» في النصّ يقبل المبلغ 32000 — لا يُعدّ اختراعًا."""
+    from core.ai_understanding import _num_in_text
+    assert _num_in_text(32000, "المبلغ 32 الف جنيه") is True
+    assert _num_in_text(32000, "المبلغ 500 جنيه") is False
+    assert _num_in_text(1000, "القيمة 1,000 دت") is True
+    assert _num_in_text(6.0, "السعر 6.0") is True
+    # 🔴 مطابقة رقميّة تامّة لا جزئيّة: مبلغٌ مقترح 100 والنصّ فيه 1000 ⇒ مرفوض (خطر ماليّ).
+    assert _num_in_text(100, "المبلغ 1000") is False
+    assert _num_in_text(5.7, "السعر 5.72") is False

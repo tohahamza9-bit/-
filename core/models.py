@@ -387,6 +387,12 @@ class DetectionConfig(BaseModel):
     room_match_enabled: bool = True              # تشغيل/إيقاف الطبقة كاملةً بيد المدير
     room_match_window_seconds: float = 50.0      # نافذة البحث حول ختم الوصول (±)
     room_match_recheck_seconds: float = 3.0      # فترة إعادة الفحص (تُنفَّذ عبر النبضة)
+    # ── الفهم الذكي (OpenRouter) — طبقة إنقاذ قبل التصعيد. تُدار من الداشبورد (hot-reload) ──
+    # 🔴 مطفأة افتراضيًّا: لا تعمل حتى يشغّلها المالك ويضع OPENROUTER_API_KEY في .env.
+    ai_enabled: bool = False                     # تشغيل/إيقاف الطبقة كاملةً بيد المدير
+    ai_model: str = "google/gemini-2.5-flash"    # نموذج OpenRouter (قابل للتبديل من اللوحة)
+    ai_confidence_threshold: float = 0.9         # ثقة أيّ حقل جوهريّ دونها → تصعيد
+    ai_timeout_seconds: float = 10.0             # مهلة النداء؛ تجاوزها → تصعيد عاديّ
 
 
 class FxRatesConfig(BaseModel):
