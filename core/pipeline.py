@@ -1631,7 +1631,20 @@ class Pipeline:
         # يُقبل التحكّم من الموظفين المعتمدين فقط (§8.3 §10)
         authorized = await self.db.employees.is_authorized(raw.sender_jid or "")
         if not authorized:
-            log.warning("تحكّم «%s» من غير معتمد (%s) — رُفض (§8.3).", action, raw.sender_jid)
+            # 🔴 (قاعدة الرسائل الإلزامية) الرفض الصامت ممنوع: كان أمر التحكّم يُبتلَع بلا أيّ ردّ،
+            #    فيظنّ المُرسِل أن البوت معطَّل (م: «أعد» على X1323 رُفضت مرّتين بصمت 21:29 و21:30).
+            #    الآن: ردّ للمُرسِل بالسبب + إشعار المسؤول يحمل **معرّف المُرسِل حرفيًّا** كي يُضاف
+            #    للمعتمدين بنسخٍ مباشر (المعرّف قد يكون @lid لا رقم هاتف — انظر _handle_control).
+            sender = raw.sender_jid or "؟"
+            log.warning("تحكّم «%s» من غير معتمد (%s) — رُفض (§8.3) + إبلاغ.", action, sender)
+            await self.bus.reply_central(
+                f"🔴 «{action}» مرفوض — المُرسِل غير مُدرَج في «الموظفين المعتمدين».",
+                raw.message_key, is_alert=True)
+            await self.bus.notify_admin(
+                f"🔴 أمر تحكّم «{action}» رُفض: المُرسِل غير معتمد.\n"
+                f"معرّفه: {sender}\n"
+                f"لاعتماده: الإعدادات ← الموظفون المعتمدون ← أضِف هذا المعرّف حرفيًّا.",
+                raw.message_key, forward_key=raw.message_key)
             return
 
         original = await self.db.deals.find_by_source_key(raw.reply_to_key or "")
