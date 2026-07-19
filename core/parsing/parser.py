@@ -739,6 +739,23 @@ _NAME_CODE_PRICE_RE = re.compile(r"^([ء-ي].+?)\s+(\d{2,4})\s+(\d+(?:[.,،]\d+)
 _CODE_PRICE_NAME_RE = re.compile(r"^(\d{2,4})\s+(\d+[.,،]\d+)\s+([ء-ي].+)$")
 
 
+# حرف عربيّ ملتصق برقم — «مومن عريبي6.02» / «طه الحافي35» (م: X1323، X1328).
+_GLUED_NUM_RE = re.compile(r"([ء-ي])(?=\d)")
+
+
+def _split_glued_number(seg: str) -> str:
+    """يفصل رقمًا ملتصقًا بنهاية اسم عربيّ بمسافة: «مومن عريبي6.02» → «مومن عريبي 6.02».
+
+    🔴 (م: X1323) السعر الملتصق كان **يُبتلَع في الاسم فيضيع صامتًا**: `_parse_name_price_supplier`
+       يقسّم بالمسافات، فـ«عريبي6.02» رمزٌ واحد لا يطابق نمط الرقم ⇒ price=None. والأسوأ أن
+       المورّد يُحلّ رغم ذلك بالمطابقة التقريبية («مومن عريبي6.02»→«مومن عريبي»)، فلا يبدو أيّ
+       خلل — ثم يُخلَّق طرف شراء بلا سعر، فيُترك حقل السعر فارغًا في شاشة الشراء، فلا يتفعّل
+       «تخزين» وتفشل الحوالة بلا سبب ظاهر.
+       الفصل آمن: الأكواد الرقمية منفصلة أصلًا، و«كود1284» تبقى مفهومة (الفاصل بعد «كود» اختياريّ).
+    """
+    return _GLUED_NUM_RE.sub(r"\1 ", seg or "")
+
+
 def extract_code_name_price_lines(
     text: str, suppliers: Optional[list[SupplierRecord]] = None,
 ) -> list[tuple[str, str, Optional[str]]]:
@@ -752,7 +769,7 @@ def extract_code_name_price_lines(
     pairs: list[tuple[str, str, Optional[str]]] = []
     for raw_line in normalize_digits(text or "").splitlines():
         for ln in raw_line.split("/"):       # «/» فاصل مقاطع كالسطر الجديد (§7.3)
-            ln = ln.strip()
+            ln = _split_glued_number(ln.strip())
             if not ln or detect_currency(ln):   # مقطع مبلغ (فيه رمز عملة) → ليس سطر زبون
                 continue
             r = _parse_customer_line(ln)
