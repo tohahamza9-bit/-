@@ -248,55 +248,55 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
     @app.get("/")
     async def index():  # noqa: ANN201
         html = ROOT / "dashboard" / "static" / "index.html"
-        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
     @app.get("/login")
     async def login_page():  # noqa: ANN201
         """صفحة تسجيل الدخول (§14.3) — تُقدَّم بلا مصادقة؛ البوّابة في الواجهة/الـ API."""
         html = ROOT / "dashboard" / "static" / "login.html"
-        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
     @app.get("/rooms")
     async def rooms_page():  # noqa: ANN201
         """صفحة إدارة الغرف (§2.2) — تصنيف بالأسماء فقط، بلا إدخال JID يدوي."""
         html = ROOT / "dashboard" / "static" / "rooms.html"
-        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
     @app.get("/attention")
     async def attention_page():  # noqa: ANN201
         """قائمة الانتباه (لوحة V2 م١) — البوّابة في الواجهة/الـ API."""
         html = ROOT / "dashboard" / "static" / "attention.html"
-        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
     @app.get("/transfers")
     async def transfers_page():  # noqa: ANN201
         """سجل الحوالات (لوحة V2 م١)."""
         html = ROOT / "dashboard" / "static" / "transfers.html"
-        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
     @app.get("/connect")
     async def connect_page():  # noqa: ANN201
         """صفحة الاتصال + QR + صحة MONEYADO (لوحة V2 م٥)."""
         html = ROOT / "dashboard" / "static" / "connect.html"
-        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
     @app.get("/settings")
     async def settings_page():  # noqa: ANN201
         """مركز الإعدادات (لوحة V2 م٦)."""
         html = ROOT / "dashboard" / "static" / "settings.html"
-        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
     @app.get("/fx-rates")
     async def fx_rates_page():  # noqa: ANN201
         """صفحة إدارة الأسعار (FX_RATES_SPEC §15) — البوّابة/الصلاحيات تُفرَض في الـAPI."""
         html = ROOT / "dashboard" / "static" / "fx_rates.html"
-        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
     @app.get("/entity-aliases")
     async def entity_aliases_page():  # noqa: ANN201
         """صفحة إدارة الكيانات الموحّدة (FX_RATES_SPEC §4)."""
         html = ROOT / "dashboard" / "static" / "entity_aliases.html"
-        return FileResponse(str(html)) if html.exists() else JSONResponse({"status": "ok"})
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
     return app
 
