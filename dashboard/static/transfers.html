@@ -99,6 +99,7 @@ function statusPill(d){
 }
 function resolvedBadge(d){
   if(d.resolved_by==="room_match") return ' <span class="pill" style="background:#0a7d46;color:#fff;font-size:11px" title="حُلّت الخزينة من قروب الخزينة (مطابقة هاتف+قيمة)">قروب</span>';
+  if(d.resolved_by==="ai") return ' <span class="pill" style="background:#5b3fd6;color:#fff;font-size:11px" title="فُهمت بالذكاء الاصطناعي ثم تحقّق الكود من الكيان والأرقام">ذكاء</span>';
   if(d.resolved_by==="similarity") return ' <span class="pill" style="background:#b5820a;color:#fff;font-size:11px" title="حُلّت بتشابه اسم جريء — راجعها">تشابه</span>';
   return '';
 }

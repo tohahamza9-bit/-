@@ -190,6 +190,23 @@
       (الإجمالي أو الصافي ×0.99). سجّل قروب كل خزينة من صفحة «الغرف».</p>
   </div>
 
+  <!-- الفهم الذكي (OpenRouter) -->
+  <div class="card">
+    <h2>الفهم الذكي <span class="muted">(طبقة إنقاذ أخيرة قبل التصعيد — النموذج يقترح والكود يتحقّق)</span></h2>
+    <label style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <input type="checkbox" id="ai_enabled" style="flex:none;width:auto"> <span>تفعيل الفهم الذكي</span></label>
+    <div class="row" style="gap:12px">
+      <label class="dfield" style="flex:2">نموذج OpenRouter<input id="ai_model" type="text" placeholder="google/gemini-2.5-flash"></label>
+      <label class="dfield">عتبة الثقة (0–1)<input id="ai_conf" type="number" step="any" min="0" max="1"></label>
+      <label class="dfield">مهلة النداء (ثانية)<input id="ai_timeout" type="number" step="any"></label>
+      <button onclick="saveDetection()" style="align-self:flex-end">حفظ</button>
+    </div>
+    <p class="muted" style="margin:8px 0 0">تعمل <b>فقط</b> على الرسائل التي كانت ستُصعَّد (فشل الحلّ
+      الصارم وطبقة القروب). كل كيان يقترحه النموذج يجب أن يكون مسجَّلًا فعلًا، وكل رقم موجودًا في نصّ
+      الرسالة، وثقته فوق العتبة — وإلا تُصعَّد كالمعتاد. المفتاح يوضع في ملف <code>.env</code> باسم
+      <code>OPENROUTER_API_KEY</code> (لا يُدار من هنا).</p>
+  </div>
+
   <!-- السجل التقنيّ (م٦) -->
   <div class="card">
     <h2>السجل التقنيّ <span class="muted">(دخول/خروج + تغييرات الإعدادات — الأثر الدائم)</span>
@@ -345,6 +362,10 @@ async function loadDetection(){
     $("rm_enabled").checked = c.room_match_enabled !== false;
     $("rm_win").value = c.room_match_window_seconds;
     $("rm_recheck").value = c.room_match_recheck_seconds;
+    $("ai_enabled").checked = c.ai_enabled === true;
+    $("ai_model").value = c.ai_model || "";
+    $("ai_conf").value = c.ai_confidence_threshold;
+    $("ai_timeout").value = c.ai_timeout_seconds;
   }catch(e){}
 }
 async function saveDetection(){
@@ -362,6 +383,10 @@ async function saveDetection(){
     room_match_enabled:$("rm_enabled").checked,
     room_match_window_seconds:parseFloat($("rm_win").value),
     room_match_recheck_seconds:parseFloat($("rm_recheck").value),
+    ai_enabled:$("ai_enabled").checked,
+    ai_model:$("ai_model").value.trim(),
+    ai_confidence_threshold:parseFloat($("ai_conf").value),
+    ai_timeout_seconds:parseFloat($("ai_timeout").value),
   });
   try{ await api("/settings/detection","PUT",c); window._det=c; toast("حُفظت الحدود ✓"); loadLog(); }catch(e){}
 }

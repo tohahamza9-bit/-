@@ -97,10 +97,10 @@ def _deal_summary(d: dict) -> dict:
 
 
 def _resolved_by(leg: dict) -> Optional[str]:
-    """مصدرُ حلّ الخزينة من deviation_log (للعرض/الفلترة): «room_match» (من القروب) أو «similarity»
-    (تشابه جريء) أو None (صريح من النص)."""
+    """مصدرُ حلّ الخزينة من deviation_log (للعرض/الفلترة): «room_match» (من القروب) أو «ai» (الفهم
+    الذكي المُتحقَّق منه) أو «similarity» (تشابه جريء، ملغى) أو None (صريح من النص)."""
     for dv in (leg.get("deviation_log") or []):
-        if dv.get("field") == "treasury" and dv.get("method") in ("room_match", "similarity"):
+        if dv.get("field") == "treasury" and dv.get("method") in ("room_match", "ai", "similarity"):
             return dv.get("method")
     return None
 
