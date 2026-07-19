@@ -1332,11 +1332,15 @@ class Pipeline:
             "is_supplier_counterpart": True,
             "supplier_price_raw": None,          # استُهلك في بناء طرف الشراء
         })
-        # 🔴 (قاعدة الطرفين §6.1): طرف **البيع** أيضًا بالصافي (NET) بلا عمولة — كالشراء المشتقّ.
-        #    القاعدة محاسبيّة بنوع الحوالة (طرفين خصم)، بغضّ النظر عن اشتقاق الشراء (§6.2).
-        sell.amount = net
-        sell.amount_after_discount = None
-        sell.commission = None
+        # 🔴 (حكم المالك النهائي — م: X1322) قيد **البيع** للحوالة المخصومة يُكتب **بالإجمالي
+        #    (GROSS) + عمولة سالبة**، وMONEYADO يشتقّ الصافي (GROSS − |عمولة| = NET). لا يُحوَّل
+        #    البيع للصافي ولا تُلغى عمولته.
+        #    نُسِخ هذا الموضع سابقًا لقاعدة «الطرفان NET» (2680f6f) المبنيّة على افتراض أن خانة
+        #    العمولة توثيقيّة — وقد أثبت a1e8e7c أن MONEYADO **يطرحها فعليًّا**، فسقط الافتراض.
+        #    الآن القاعدة موحّدة مع خصم البيع-فقط (§6.2) ومع الإلغاء والتعديل (كلاهما GROSS).
+        #    طرف الشراء المشتقّ يبقى بالصافي بلا عمولة (عرف MONEYADO القائم — بلا تغيير).
+        if sell.amount_after_discount is not None:
+            sell.commission = compute_commission(sell, None)   # بعد − قبل (سالبة §6.2)
         sell.commission_rate = 0.0
         deal.is_two_legged = True
         log.info(
@@ -1349,13 +1353,19 @@ class Pipeline:
         """يحسب العمولة ويُسند خزينة «خصم1%/صافي» لطرفَي الصفقة (§6.1 §6.2)."""
         commission = compute_commission(deal.sell_leg, deal.buy_leg)
         has_discount = bool(commission is not None and abs(commission) > 1e-9)
-        # 🔴 (قاعدة الطرفين §6.1، تأكيد المستخدم): خزينة خصم ثنائية → **كلا القيدين بالصافي (NET)
-        #    بلا عمولة** (قاعدة محاسبيّة بنوع الحوالة، لا بطريقة اشتقاق الشراء). البيع كان GROSS+عمولة
-        #    → يُحوَّل للصافي وتُلغى عمولته. has_discount يُحسَب **قبل** التصفير فلا يتأثّر اختيار الخزينة.
-        if has_discount and deal.sell_leg.amount_after_discount is not None:
-            deal.sell_leg.amount = deal.sell_leg.amount_after_discount
-        deal.sell_leg.amount_after_discount = None
-        deal.sell_leg.commission = None
+        # 🔴 (حكم المالك النهائي — م: X1322) قيد **البيع** للحوالة المخصومة الثنائية يُكتب
+        #    **بالإجمالي (GROSS) + عمولة سالبة**، وMONEYADO يشتقّ الصافي. مثال X1322:
+        #    المبلغ الأجنبي 8700 والعمولة −87 ⇒ المخصوم 8613 (لا كتابة 8613 مباشرةً بلا عمولة).
+        #
+        #    تاريخ القاعدة: 2680f6f أدخل «الطرفان NET» بافتراض أن خانة العمولة **توثيقيّة**؛ ثم
+        #    أثبت a1e8e7c بتأكيد محاسبيّ من MONEYADO أنها **تُطرَح فعليًّا**، وأعاد الإلغاء إلى
+        #    GROSS لكنه ترك هذا الموضع. حكم المالك الآن يوحّد القاعدة: البيع المخصوم GROSS+سالبة
+        #    في كل المسارات (بيع-فقط §6.2، ثنائية §6.1، الإلغاء، التعديل).
+        #    has_discount يُحسَب **قبل** أيّ تعديل فلا يتأثّر اختيار الخزينة.
+        if has_discount:
+            deal.sell_leg.commission = commission          # سالبة (بعد − قبل)
+        else:
+            deal.sell_leg.commission = None
         deal.sell_leg.commission_rate = 0.0    # 0 دائمًا (§6.2)
         if deal.buy_leg is not None:
             deal.buy_leg.commission = None
