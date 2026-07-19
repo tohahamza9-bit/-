@@ -324,6 +324,10 @@ class UserRecord(BaseModel):
     password_hash: str                           # argon2id — لا نصّ صريح أبدًا
     role: Role = Role.DATA_ENTRY                 # أقلّ امتياز افتراضيًا (مبدأ أمان)
     active: bool = True                          # تعطيل بلا حذف (§13)
+    # (م: X1323، قرار المالك) معرّف واتساب المدير — يجعله **معتمدًا تلقائيًّا** لأوامر التحكّم
+    # («تم»/إلغاء/«أعد») بلا إدراجه يدويًّا في قائمة الموظفين. فارغ = لا اعتماد تلقائيّ (الافتراض
+    # الآمن). 🔴 يُدخَل **حرفيًّا** كما يظهر في إشعار الرفض — قد يكون «…@lid» لا رقم هاتف.
+    whatsapp_jid: Optional[str] = None
     created_at: Optional[datetime] = None
     last_login_at: Optional[datetime] = None
     failed_attempts: int = 0                     # عدّاد الفشل المتتالي (قفل التخمين)

@@ -338,3 +338,60 @@ def test_number_in_text_accepts_alf_expansion():
     # 🔴 مطابقة رقميّة تامّة لا جزئيّة: مبلغٌ مقترح 100 والنصّ فيه 1000 ⇒ مرفوض (خطر ماليّ).
     assert _num_in_text(100, "المبلغ 1000") is False
     assert _num_in_text(5.7, "السعر 5.72") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# توسعة X1325: الرسالة الأولى الفاشلة تفكيكًا — تصحيح كلمة العملة ثم إعادة تفكيك
+# ═══════════════════════════════════════════════════════════════════════════
+X1325_TEXT = "X1325\n٠١٠٢٩٢٨١٦٢٠\n3,600 جني م\n  صافي"
+
+
+def _currency_fix_proposal(raw="جني", official="جنيه", conf=0.98) -> dict:
+    return {"corrections": [{"raw": raw, "entity_type": "currency",
+                             "official": official, "confidence": conf}],
+            "confidence": _conf()}
+
+
+def _raw_msg(text=X1325_TEXT, key="x1325-1"):
+    from core.models import RawMessage
+    return RawMessage(message_key=key, chat_jid=CENTRAL, sender_jid="emp@lid",
+                      text=text, received_at=NOW)
+
+
+async def test_x1325_currency_typo_rescued(db):
+    """🔴 «3,600 جني م» فشل تفكيكها ⇒ تصعيد. التصحيح «جني»←«جنيه» يُعيد التفكيك فيظهر 3600."""
+    await _seed(db)
+    bus, ai = _RecBus(), _FakeAi(_currency_fix_proposal())
+    res = await _pipe(db, bus, ai)._ai_rescue_parse(_raw_msg(), [], [])
+    assert res is not None and res.kind == "transfer"
+    assert res.leg.amount == 3600.0
+    assert any("فُهمت بالذكاء الاصطناعي" in m for m in bus.admin_msgs)
+
+
+async def test_currency_fix_outside_closed_list_rejected(db):
+    """بديل خارج قائمة العملات المغلقة → يُرفض (النموذج لا يخترع كلمات)."""
+    await _seed(db)
+    ai = _FakeAi(_currency_fix_proposal(official="عملة غريبة"))
+    assert await _pipe(db, _RecBus(), ai)._ai_rescue_parse(_raw_msg(), [], []) is None
+
+
+async def test_currency_fix_must_extend_raw_token(db):
+    """التصحيح إضافيّ لا حذفيّ: «3,600»←«جنيه» مرفوض (ليس امتدادًا للخام) — يمنع ابتلاع رقم."""
+    await _seed(db)
+    ai = _FakeAi(_currency_fix_proposal(raw="3,600", official="جنيه"))
+    assert await _pipe(db, _RecBus(), ai)._ai_rescue_parse(_raw_msg(), [], []) is None
+
+
+async def test_parse_rescue_disabled_when_layer_off(db):
+    """الطبقة مطفأة → لا نداء ولا إنقاذ تفكيك."""
+    await _seed(db, ai_enabled=False)
+    ai = _FakeAi(_currency_fix_proposal())
+    assert await _pipe(db, _RecBus(), ai)._ai_rescue_parse(_raw_msg(), [], []) is None
+    assert ai.calls == 0
+
+
+async def test_parse_rescue_call_failure_escalates(db):
+    """فشل النداء → None (تصعيد عاديّ)."""
+    await _seed(db)
+    ai = _FakeAi(None, fail=True)
+    assert await _pipe(db, _RecBus(), ai)._ai_rescue_parse(_raw_msg(), [], []) is None

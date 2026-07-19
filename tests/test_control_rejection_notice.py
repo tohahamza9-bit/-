@@ -99,3 +99,33 @@ async def test_rerun_refuses_when_ledger_has_entry(db):
     bus = _RecBus()
     await _pipe(db, bus)._handle_control("rerun", None, _rerun_msg(), NOW)
     assert any("ازدواج" in m for m in bus.central_msgs), bus.central_msgs
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# المدراء معتمدون تلقائيًّا (م: X1323، قرار المالك) — مع بقاء الإضافة اليدويّة
+# ═══════════════════════════════════════════════════════════════════════════
+async def test_manager_with_whatsapp_jid_is_authorized(db):
+    """مدير اللوحة الذي سُجِّل معرّف واتسابه معتمدٌ تلقائيًّا بلا إدراجه في قائمة الموظفين."""
+    from core.constants import Role
+    from core.models import UserRecord
+    await db.users.upsert(UserRecord(username="owner", password_hash="x",
+                                     role=Role.MANAGER, whatsapp_jid=OWNER_LID))
+    assert await db.employees.is_authorized(OWNER_LID) is True
+
+
+async def test_non_manager_user_is_not_authorized(db):
+    """مستخدم لوحة بدور أقلّ (إدخال بيانات) لا يُعتمَد تلقائيًّا — أقلّ امتياز."""
+    from core.constants import Role
+    from core.models import UserRecord
+    await db.users.upsert(UserRecord(username="clerk", password_hash="x",
+                                     role=Role.DATA_ENTRY, whatsapp_jid=OWNER_LID))
+    assert await db.employees.is_authorized(OWNER_LID) is False
+
+
+async def test_manager_without_jid_does_not_authorize_everyone(db):
+    """مدير بلا معرّف واتساب لا يمنح الاعتماد لأحد (فارغ ≠ يطابق الكلّ)."""
+    from core.constants import Role
+    from core.models import UserRecord
+    await db.users.upsert(UserRecord(username="owner2", password_hash="x", role=Role.MANAGER))
+    assert await db.employees.is_authorized(OWNER_LID) is False
+    assert await db.employees.is_authorized("") is False
