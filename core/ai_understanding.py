@@ -130,10 +130,32 @@ _SCHEMA_HINT = """أعِد JSON بهذا الشكل بالضبط:
 }"""
 
 
+PAIR_SEP = "\n──── الرسالة الثانية ────\n"
+
+# تعليمة الرسالتين معًا (§3ج) — 90% من الحوالات ثنائيّة، وفهمهما مجتمعتين يحسم
+# ما لا تحسمه أيٌّ منهما وحدها (الهويّة في الأولى، الخزينة/التسوية في الثانية).
+_PAIR_NOTE = (
+    "\n\n🔴 النصّ أعلاه يحوي **رسالتين مترابطتين من نفس المُرسِل** يفصل بينهما سطر "
+    "«──── الرسالة الثانية ────». فكّكهما **معًا** ككيان واحد: الرسالة الأولى تحمل الهويّة "
+    "(كود الزبون/الاسم/المبلغ) والثانية تحمل التسوية (الخزينة/المورد/السعر) غالبًا. "
+    "أعِد JSON واحدًا يجمع حقول الاثنتين. أيّ رقم تعيده يجب أن يكون موجودًا في إحداهما حرفيًّا."
+)
+
+
+def join_pair(texts: list[str]) -> str:
+    """يضمّ نصَّي الرسالتين بفاصل صريح — النصّ الناتج هو مرجع التحقّق الحتميّ لاحقًا.
+
+    مهمّ: المدقّقات (`_num_in_text`, `validate_corrections`) تعمل على هذا النصّ المضموم،
+    فيُقبل رقمٌ ورد في أيٍّ من الرسالتين ويُرفض ما لم يرد في أيّهما.
+    """
+    return PAIR_SEP.join(t.strip() for t in texts if (t or "").strip())
+
+
 def build_prompt(text: str, treasuries: list[TreasuryRecord],
                  suppliers: list[SupplierRecord],
                  known_shapes: Optional[list[str]] = None,
-                 sender_context: Optional[object] = None) -> str:
+                 sender_context: Optional[object] = None,
+                 pair: bool = False) -> str:
     """يبني الـprompt المنظَّم: نصّ الرسالة + الكيانات المسجَّلة **لحظة النداء** + سياق المُرسِل.
 
     🔴 القوائم تُمرَّر من المُستدعي بعد قراءتها من DB في هذه اللحظة — لا نسخة محفوظة هنا ولا
@@ -161,6 +183,7 @@ def build_prompt(text: str, treasuries: list[TreasuryRecord],
         f"\n\nأشكال الرسائل المعروفة:\n" + "\n".join(f"- {s}" for s in shapes) +
         (f"\n\n{sender_context.as_prompt_block()}"
          if sender_context is not None and hasattr(sender_context, "as_prompt_block") else "") +
+        (_PAIR_NOTE if pair else "") +
         f"\n\n{_SCHEMA_HINT}"
     )
 
@@ -178,7 +201,8 @@ class OpenRouterClient:
     async def propose(self, text: str, treasuries: list[TreasuryRecord],
                       suppliers: list[SupplierRecord],
                       known_shapes: Optional[list[str]] = None,
-                      sender_context: Optional[object] = None) -> Optional[AiProposal]:
+                      sender_context: Optional[object] = None,
+                      pair: bool = False) -> Optional[AiProposal]:
         if not self.api_key or not self.model:
             log.info("(الفهم الذكي) بلا مفتاح/نموذج — تخطٍّ (تصعيد عاديّ).")
             return None
@@ -189,7 +213,7 @@ class OpenRouterClient:
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": build_prompt(text, treasuries, suppliers, known_shapes,
-                                                          sender_context)},
+                                                          sender_context, pair=pair)},
             ],
         }
         headers = {"Authorization": f"Bearer {self.api_key}",
@@ -500,6 +524,47 @@ def validate_postal(prop: AiProposal, threshold: float = 0.9) -> Optional[bool]:
     if conf < threshold:
         return None
     return val
+
+
+@dataclass
+class LinkChoice:
+    """قرار ربط تكملةٍ بإحدى صفقتين معلّقتين (§5) — بعد التحقّق الحتميّ."""
+    action: str                    # "auto" | "ask" | "fifo"
+    index: Optional[int] = None    # الصفقة المختارة (0-based) حين action == "auto"
+    confidence: float = 0.0
+    reason: str = ""
+
+
+def validate_link_choice(prop: AiProposal, candidate_count: int,
+                         auto_threshold: float = 0.95,
+                         min_threshold: float = 0.80) -> LinkChoice:
+    """يحكم على اختيار النموذج لصفقةٍ من بين المعلّقات (§5).
+
+    التدرّج المعتمد (قرار المالك):
+      • ثقة ≥ auto_threshold (0.95) → ربط تلقائيّ + تنبيه المسؤول بالقرار.
+      • بين min و auto (0.80–0.95) → تصعيد بخيارين مرقّمين («رد 1 أو 2»).
+      • < min_threshold (0.80) → **FIFO الحتميّ كالمعتاد** — لا يلمس النموذج القرار.
+
+    🔴 الفهرس المقترَح يُتحقَّق أنه ضمن المدى فعلًا؛ أيّ خروج ⇒ FIFO (لا تخمين).
+    """
+    d = prop.data or {}
+    raw_idx = d.get("link_index")
+    try:
+        conf = float(d.get("link_confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    try:
+        idx = int(raw_idx) if raw_idx is not None else None
+    except (TypeError, ValueError):
+        idx = None
+
+    if idx is None or not (0 <= idx < candidate_count):
+        return LinkChoice("fifo", None, conf, f"فهرس غير صالح: {raw_idx!r}")
+    if conf >= auto_threshold:
+        return LinkChoice("auto", idx, conf, "ثقة عالية")
+    if conf >= min_threshold:
+        return LinkChoice("ask", idx, conf, "ثقة متوسّطة — تصعيد بخيارات")
+    return LinkChoice("fifo", None, conf, f"ثقة {conf:.2f} < {min_threshold:.2f}")
 
 
 def validate_proposal(prop: AiProposal, text: str, treasuries: list[TreasuryRecord],

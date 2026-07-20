@@ -58,10 +58,11 @@ from .parsing import (
 )
 from .ai_context import build_sender_context
 from .ai_understanding import (
-    OpenRouterClient, _num_in_text, apply_text_corrections, validate_corrections,
-    validate_line_parse, validate_postal, validate_proposal, validate_text_corrections,
-    with_ephemeral_alias,
+    OpenRouterClient, _num_in_text, apply_text_corrections, join_pair, validate_corrections,
+    validate_line_parse, validate_link_choice, validate_postal, validate_proposal,
+    validate_text_corrections, with_ephemeral_alias,
 )
+from .ambiguity import detect as detect_ambiguity
 from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
 from .parsing.parser import _has_reference
@@ -299,6 +300,197 @@ class Pipeline:
             if raw is not None and (raw.text or "").strip():
                 parts.append(raw.text.strip())
         return "\n".join(parts) if parts else None
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # AI-first للحالات الغامضة (§1-§3، قرار المالك 2026-07-20)
+    # ═════════════════════════════════════════════════════════════════════════
+    def _pair_partner(self, raw: RawMessage, batch: list[RawMessage],
+                      treasuries: list, suppliers: list) -> Optional[RawMessage]:
+        """تكملة الرسالة `raw` من نفس المُرسِل داخل الدفعة — أو None إن لم تصل بعد.
+
+        🔴 حالة X1327+X1328 (§2): مُرسِلٌ يبعث **رسالتين أوليَين** بنفس اللحظة. الثانية ليست
+           تكملةً للأولى بل حوالةٌ مستقلّة، وضمّهما يخلط صفقتين. المعيار الحاسم: رسالةٌ تُفكَّك
+           حوالةً وتحمل **مرجعًا خاصًّا بها يخالف مرجع الأولى** ⇒ مستقلّة، لا تكملة.
+           فكل رسالة تنتظر تكملتها هي، مستقلّةً عن جارتها.
+        """
+        own_ref = None
+        try:
+            own = parse_message(raw.text or "", treasuries, suppliers)
+            own_ref = own.leg.reference_number if own.leg is not None else None
+        except Exception:      # noqa: BLE001 — التفكيك لا يوقف الضمّ
+            pass
+        for cand in batch:
+            if cand.message_key == raw.message_key or cand.is_from_me:
+                continue
+            if cand.chat_jid != raw.chat_jid or cand.sender_jid != raw.sender_jid:
+                continue
+            if _as_naive_utc(cand.received_at) <= _as_naive_utc(raw.received_at):
+                continue
+            try:
+                res = parse_message(cand.text or "", treasuries, suppliers)
+            except Exception:  # noqa: BLE001
+                return cand    # تعذّر تفكيكها ⇒ ليست حوالةً مستقلّة ⇒ تكملة محتملة
+            ref = res.leg.reference_number if res.leg is not None else None
+            if res.kind == "transfer" and ref and ref != own_ref:
+                return None    # حوالة أولى مستقلّة (X1328) — لا تُضمّ
+            return cand
+        return None
+
+    async def _ai_pair_wait(self, raw: RawMessage, batch: list[RawMessage], now: datetime,
+                            lists: tuple[list, list]) -> bool:
+        """(§2) هل نؤجّل هذه الرسالة انتظارًا لتكملتها؟ True ⇒ تُترك للدورة التالية.
+
+        🔴 لا `asyncio.sleep`: كل `process_inbox` داخل `_inbox_lock`، فنومُ 8 ثوانٍ يجمّد الوارد
+           كلّه لكل رسالة غامضة. نستعمل بدلها آليّة التأجيل القائمة (نفس أسلوب `is_stable`):
+           الرسالة تبقى غير معالَجة فتُلتقَط بعد ثانيتين، حتى تصل التكملة أو تنقضي المهلة.
+        """
+        cfg = await self.db.detection.get()
+        if not getattr(cfg, "ai_first_enabled", False) or not getattr(cfg, "ai_enabled", False):
+            return False
+        treasuries, suppliers = lists
+        try:
+            result = parse_message(raw.text or "", treasuries, suppliers)
+        except Exception:      # noqa: BLE001 — فشل التفكيك يُعالَج في _ingest
+            return False
+        verdict = detect_ambiguity(
+            raw.text or "", result, treasuries, suppliers,
+            min_confidence=float(getattr(cfg, "ai_min_parse_confidence", 0.7)))
+        if not verdict.ambiguous:
+            return False
+        if self._pair_partner(raw, batch, treasuries, suppliers) is not None:
+            return False       # التكملة حاضرة ⇒ لا انتظار، تُضمّان الآن
+        waited = (_as_naive_utc(now) - _as_naive_utc(raw.received_at)).total_seconds()
+        if waited >= float(getattr(cfg, "ai_pair_wait_seconds", 8.0)):
+            return False       # انقضت المهلة ⇒ تمضي وحدها للذكاء
+        log.debug("(AI-first) تأجيل %s انتظارًا للتكملة (%.1fث/%.1fث) — %s",
+                  raw.message_key, waited,
+                  float(getattr(cfg, "ai_pair_wait_seconds", 8.0)), verdict.as_note())
+        return True
+
+    async def _ai_first(self, raw: RawMessage, result, verdict, treasuries: list,
+                        suppliers: list, partner: Optional[RawMessage], now: datetime):
+        """(§3) مسار الذكاء: الرسالتان معًا → اقتراح → تحقّق حتميّ → تطبيق أو تصعيد.
+
+        يُرجِع `ParseResult` مُصحَّحًا عند النجاح، أو None فيمضي المسار الحتميّ كما هو (fail-open §6).
+        """
+        cfg = await self.db.detection.get()
+        text = (raw.text or "").strip()
+        if not text:
+            return None
+        texts = [text] + ([partner.text.strip()] if partner is not None
+                          and (partner.text or "").strip() else [])
+        combined = join_pair(texts)
+        is_pair = len(texts) > 1
+
+        client = self._ai_client or OpenRouterClient(
+            api_key=get_settings().openrouter_api_key,
+            model=getattr(cfg, "ai_model", "google/gemini-2.5-flash"),
+            timeout=float(getattr(cfg, "ai_timeout_seconds", 10.0)))
+        sctx = await build_sender_context(self.db, raw.sender_jid, _as_naive_utc(raw.received_at))
+        try:
+            prop = await client.propose(combined, treasuries, suppliers,
+                                        sender_context=sctx, pair=is_pair)
+        except Exception as exc:      # §6 fail-open — لا رسالة تتوقّف على API خارجيّ
+            log.warning("(AI-first) استثناء في النداء (%s): %s — مسار حتميّ", raw.message_key, exc)
+            return None
+        if prop is None:
+            log.info("(AI-first) لا اقتراح (فشل/مهلة) لـ%s — مسار حتميّ", raw.message_key)
+            return None
+
+        threshold = float(getattr(cfg, "ai_confidence_threshold", 0.9))
+        # 🔴 التحقّق الحتميّ (§3د) — الكود هو الحَكَم: كل كيان مسجَّل بمطابقة تامّة، وكل رقم
+        #    موجود حرفيًّا في **النصّ المضموم** (أيّ من الرسالتين). لا استثناء لأيّ حقل.
+        av = validate_proposal(prop, combined, treasuries, suppliers, threshold, require=())
+        if not av.ok:
+            await self.bus.notify_admin(
+                f"⚠️ حوالة غامضة ({verdict.as_note()}) — الذكاء اقترح ولم يجتز التحقّق: "
+                f"{av.reason}. الاقتراح: {prop.summary()}. لم تُطبَّق — يرجى المراجعة.",
+                raw.message_key, forward_key=raw.message_key)
+            log.info("(AI-first) رُفض اقتراح %s: %s", raw.message_key, av.reason)
+            return None
+
+        # إعادة التفكيك حتميًّا بعد إضافة الإملاءات المُتحقَّق منها — الأرقام والأدوار
+        # يستخرجها المفكِّك من النصّ، لا النموذج.
+        fixes = validate_corrections(prop, combined, treasuries, suppliers, threshold)
+        t_list, s_list = treasuries, suppliers
+        for c in fixes:
+            if c.entity_type == "supplier":
+                s_list = with_ephemeral_alias(s_list, c.record, c.raw)
+            else:
+                t_list = with_ephemeral_alias(t_list, c.record, c.raw)
+        res = parse_message(text, t_list, s_list)
+        if res.kind != "transfer" or res.leg is None:
+            log.info("(AI-first) إعادة التفكيك لم تُنتج حوالة (%s) — مسار حتميّ", raw.message_key)
+            return None
+        if res.leg.amount is not None and not _num_in_text(res.leg.amount, combined):
+            log.warning("(AI-first) رُفض: المبلغ %s ليس في نصّ أيّ من الرسالتين", res.leg.amount)
+            return None
+
+        # deviation_log (§6): سبب التصنيف غامضةً + المدخل + المخرج + الثقة
+        res.leg.deviation_log.append({
+            "field": "ai_first",
+            "raw_value": verdict.as_note(),
+            "extracted_value": prop.summary(),
+            "method": "ai_first",
+            "confidence": int(threshold * 100),
+            "model": prop.model,
+            "stage": verdict.stage,
+            "paired": is_pair,
+        })
+        await self.bus.notify_admin(
+            f"⚠️ {res.leg.reference_number or '؟'} فُهمت بالذكاء الاصطناعي ({prop.model}) — "
+            f"سبب التصنيف غامضةً: {verdict.as_note()}"
+            f"{'؛ فُهمت مع رسالتها الثانية معًا' if is_pair else ''}. "
+            f"الناتج: {prop.summary()}. راجعها.",
+            raw.message_key, forward_key=raw.message_key)
+        log.info("(AI-first) طُبِّق على %s (سبب=%s، مزدوجة=%s، نموذج=%s)",
+                 raw.message_key, verdict.as_note(), is_pair, prop.model)
+        return res
+
+    async def _ai_link_choice(self, raw: RawMessage, cands: list[Deal],
+                              treasuries: list, suppliers: list, now: datetime):
+        """(§5) يعرض التكملة + بيانات الصفقتين المعلّقتين على النموذج ويطلب اختيارًا مبرَّرًا.
+
+        يُرجِع `LinkChoice` أو None (⇒ السلوك الحتميّ القائم). لا يُطبَّق أيّ اختيار قبل التحقّق
+        من أن الفهرس ضمن المدى فعلًا؛ ودون عتبة الحسم الدنيا يُترك القرار لـFIFO كما كان.
+        """
+        cfg = await self.db.detection.get()
+        if not getattr(cfg, "ai_first_enabled", False) or not getattr(cfg, "ai_enabled", False):
+            return None
+        lines = []
+        for i, d in enumerate(cands):
+            lg = d.sell_leg or d.buy_leg
+            lines.append(
+                f"{i}) مرجع {self._ref(d) or '؟'} — زبون {(lg.customer_code if lg else None) or '؟'} "
+                f"{(lg.customer_name if lg else None) or ''} — مبلغ "
+                f"{(lg.amount if lg else None) or '؟'} "
+                f"{getattr(getattr(lg, 'currency', None), 'value', '') or ''} — "
+                f"وصلت {_as_naive_utc(d.first_received_at or d.created_at)}")
+        ask = (
+            f"{(raw.text or '').strip()}\n\n"
+            f"الصفقات المعلّقة المرشّحة (اختر واحدة بفهرسها):\n" + "\n".join(lines) +
+            "\n\nأضِف إلى JSON حقلين: \"link_index\": <فهرس الصفقة>، "
+            "\"link_confidence\": <0.0-1.0>. إن لم تترجّح واحدة بوضوح فاجعل الثقة منخفضة."
+        )
+        client = self._ai_client or OpenRouterClient(
+            api_key=get_settings().openrouter_api_key,
+            model=getattr(cfg, "ai_model", "google/gemini-2.5-flash"),
+            timeout=float(getattr(cfg, "ai_timeout_seconds", 10.0)))
+        sctx = await build_sender_context(self.db, raw.sender_jid, _as_naive_utc(raw.received_at))
+        try:
+            prop = await client.propose(ask, treasuries, suppliers, sender_context=sctx)
+        except Exception as exc:      # §6 fail-open
+            log.warning("(AI-first §5) استثناء في نداء الربط: %s — FIFO الحتميّ", exc)
+            return None
+        if prop is None:
+            return None
+        choice = validate_link_choice(
+            prop, len(cands),
+            auto_threshold=float(getattr(cfg, "ai_link_auto_threshold", 0.95)),
+            min_threshold=float(getattr(cfg, "ai_link_min_threshold", 0.80)))
+        log.info("(AI-first §5) قرار الربط: %s (فهرس=%s، ثقة=%.2f، %s)",
+                 choice.action, choice.index, choice.confidence, choice.reason)
+        return choice
 
     async def _ai_rescue_parse(self, raw: RawMessage, treasuries: list, suppliers: list):
         """(الفهم الذكي — توسعة X1325) رسالة أولى تحمل مرجعًا وفشل تفكيكها → صحّح كلمة العملة
@@ -666,6 +858,10 @@ class Pipeline:
             # يقرأ الصفقة من DB لحظة تنفيذه (§3). معزولة: تتخطّى _ingest كليًّا.
             control_ops: list[RawMessage] = []
             batch = await self.db.raw.unprocessed()
+            # القوائم للكاشف (§1-§2) — قراءة واحدة لكل دفعة (لا لكل رسالة). _ingest يقرأ نسخته
+            # الحيّة كالمعتاد؛ هذه للفحص المسبق فقط فلا تغيّر مصدر الحقيقة.
+            ai_treasuries = await self.db.treasuries.all_active()
+            ai_suppliers = await self.db.suppliers.all_active()
             # نظام الأسعار (الربط أ): إعداد الأسعار يُقرأ مرّة لكل دفعة (hot-reload) — لتمييز غرفتَي
             #   الأسعار. فارغ افتراضيًّا ⇒ price_room_currency=None دائمًا ⇒ الفرع أدناه لا يُنفَّذ.
             fx_cfg = await self.db.fx_config.get()
@@ -737,6 +933,19 @@ class Pipeline:
                     log.debug("حجب ترتيبيّ (رسالة أسبق لنفس المُرسِل لم تستقرّ): %s", raw.message_key)
                     continue
 
+                # ═══ (§2) انتظار الرسالة الثانية عند كشف غموض — تأجيل لا نوم ═══
+                # الرسالة الغامضة تُترك غير معالَجة حتى تصل تكملتها أو تنقضي ai_pair_wait_seconds،
+                # فتذهبان للذكاء **معًا** (90% من الحوالات ثنائيّة). تحجب مُرسِلها كبقيّة التأجيلات
+                # حفاظًا على ترتيب FIFO. مطفأة ما لم يُفعِّل المالك ai_first_enabled.
+                if stable and not immediate and not completion:
+                    try:
+                        if await self._ai_pair_wait(raw, batch, now, (ai_treasuries, ai_suppliers)):
+                            blocked_senders.add(sender_key)
+                            continue
+                    except Exception as exc:  # §6 fail-open — الانتظار لا يوقف الطابور
+                        log.warning("(AI-first) تعذّر فحص الانتظار لـ%s (متابعة): %s",
+                                    raw.message_key, exc)
+
                 # لم تستقرّ بعد وليست ردّ إكمال → تأجيل + حجب رسائل **نفس المُرسِل** التالية حتى تستقرّ
                 # أو تنتهي مهلتها (§7.2). SI المستقلّة تُؤجَّل لاستقرارها لكن **لا تحجب** المُرسِل (لا
                 # تفتح خانة/ترتيبًا §4.5). لا تخطٍّ صامت (T5): نسجّل السبب.
@@ -746,7 +955,7 @@ class Pipeline:
                         blocked_senders.add(sender_key)
                     continue
                 try:
-                    deal = await self._ingest(raw, now)
+                    deal = await self._ingest(raw, now, batch)
                     if deal is not None:
                         # ختم وصول الرسالة الأولى (§7.3): يُضبط مرّة عند أول ظهور للصفقة، ويُحفَظ
                         # عبر دمج الطرف الثاني (الدمج يقرأ الصفقة من DB فيبقى الختم الأقدم، لا يُستبدَل
@@ -836,7 +1045,8 @@ class Pipeline:
         res = parse_message(raw.text, treasuries, suppliers)
         return res.leg is not None and res.leg.is_si_format
 
-    async def _ingest(self, raw: RawMessage, now: datetime) -> Optional[Deal]:
+    async def _ingest(self, raw: RawMessage, now: datetime,
+                      batch: Optional[list[RawMessage]] = None) -> Optional[Deal]:
         # الرسائل من غير المركزية = مصدر مطابقة صامت فقط (§2.2 §8) — لا تُفكَّك كحوالة
         if raw.chat_jid != self.bus.central_jid:
             return None
@@ -862,6 +1072,26 @@ class Pipeline:
             _fixed = await self._ai_rescue_parse(raw, treasuries, suppliers)
             if _fixed is not None:
                 result = _fixed
+
+        # ═══ AI-first: أيّ شكّ → ذكاء فورًا بالرسالتين معًا (§1-§3) ═══
+        # يسبق تصعيد «المبلغ الملتبس» أدناه عمدًا: ذاك أحد إشارات الغموض، فيُعطى الذكاء فرصته
+        # قبل التصعيد لا بعده. مطفأ ما لم يُفعَّل ai_first_enabled (سلوك اليوم مطابق حين يكون off).
+        _cfg_af = await self.db.detection.get()
+        if getattr(_cfg_af, "ai_first_enabled", False) and getattr(_cfg_af, "ai_enabled", False) \
+                and (result.kind == "transfer" or _has_reference(raw.text or "")):
+            _verdict = detect_ambiguity(
+                raw.text or "", result, treasuries, suppliers,
+                min_confidence=float(getattr(_cfg_af, "ai_min_parse_confidence", 0.7)))
+            if _verdict.ambiguous:
+                _partner = self._pair_partner(raw, batch or [], treasuries, suppliers)
+                try:
+                    _res = await self._ai_first(raw, result, _verdict, treasuries, suppliers,
+                                                _partner, now)
+                except Exception as exc:  # §6 fail-open — المسار الحتميّ يمضي كما هو
+                    log.warning("(AI-first) استثناء (%s): %s — مسار حتميّ", raw.message_key, exc)
+                    _res = None
+                if _res is not None:
+                    result = _res
 
         # 🔴 مبلغ بصيغة «ألف/آلاف» (§3.5): وُسِّع تلقائيًّا (32 ألف→32000) ويُسجَّل بالمبلغ المصحَّح
         #    عبر المسار العادي — تنبيه المركزية (Reply) + المسؤول للتأكيد/التصحيح. حسابٌ مع إشعار، بلا إيقاف.
@@ -927,6 +1157,32 @@ class Pipeline:
                     cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
                 return merged   # المعالجة مؤجَّلة لفرز الدفعة بـ first_received_at (§7.3)
             if len(cands) > 1:
+                # ═══ (§5) تعدّد المعلّقات + تكملة واحدة → الذكاء يرى الكل ويقرّر ═══
+                choice = await self._ai_link_choice(raw, cands, treasuries, suppliers, now)
+                if choice is not None and choice.action == "auto":
+                    merged = await self.queue.absorb_customer_supplier(
+                        cands[choice.index], pairs[0], pairs[1], raw.message_key, treasuries, now)
+                    await self.bus.notify_admin(
+                        f"⚠️ تكملة بلا رقم إشاري + {len(cands)} صفقات معلّقة — رُبطت بالذكاء "
+                        f"(ثقة {choice.confidence:.2f}) بصفقة {self._ref(merged) or '؟'}. راجعها.",
+                        raw.message_key, forward_key=raw.message_key)
+                    log.info("(AI-first §5) ربط تلقائيّ لتكملة %s بالصفقة #%d (ثقة %.2f)",
+                             raw.message_key, choice.index, choice.confidence)
+                    return merged
+                if choice is not None and choice.action == "ask":
+                    opts = "\n".join(
+                        f"{i+1}) {self._ref(c) or '؟'} — "
+                        f"{(c.sell_leg.customer_name if c.sell_leg else None) or '؟'}"
+                        for i, c in enumerate(cands))
+                    await self.bus.notify_admin(
+                        f"⚠️ تكملة بلا رقم إشاري + {len(cands)} صفقات معلّقة. الذكاء يرجّح "
+                        f"الخيار {choice.index + 1} بثقة {choice.confidence:.2f} (دون الحسم). "
+                        f"أيّها؟ **رد برقم الخيار**:\n{opts}",
+                        raw.message_key, forward_key=raw.message_key)
+                    log.info("(AI-first §5) تصعيد بخيارات لتكملة %s (ثقة %.2f)",
+                             raw.message_key, choice.confidence)
+                    return None
+                # choice is None أو action == "fifo" ⇒ السلوك الحتميّ كما كان (تصعيد §0)
                 await self.bus.notify_admin(
                     f"⚠️ رسالة ثانية بلا رقم إشاري وتعدّد صفقات معلّقة ({len(cands)}) في الغرفة "
                     f"— تعذّر الربط التلقائي؛ مراجعة يدوية: {(raw.text or '').strip()[:60]}",

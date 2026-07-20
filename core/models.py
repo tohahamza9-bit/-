@@ -397,6 +397,13 @@ class DetectionConfig(BaseModel):
     ai_model: str = "google/gemini-2.5-flash"    # نموذج OpenRouter (قابل للتبديل من اللوحة)
     ai_confidence_threshold: float = 0.9         # ثقة أيّ حقل جوهريّ دونها → تصعيد
     ai_timeout_seconds: float = 10.0             # مهلة النداء؛ تجاوزها → تصعيد عاديّ
+    # ── AI-first للحالات الغامضة (قرار المالك 2026-07-20) ──
+    # أيّ شكّ → ذكاء فورًا بالرسالتين معًا، بدل تجريب القواعد حتى تفشل.
+    ai_first_enabled: bool = False               # الطبقة كاملةً — مطفأة افتراضيًّا
+    ai_min_parse_confidence: float = 0.7         # ثقة تفكيك دونها = غموض (17.7% قياسًا)
+    ai_pair_wait_seconds: float = 8.0            # انتظار الرسالة الثانية قبل نداء الذكاء
+    ai_link_auto_threshold: float = 0.95         # ربط تلقائيّ عند تعدّد المعلّقات (§5)
+    ai_link_min_threshold: float = 0.80          # دونها → FIFO الحتميّ كالمعتاد (§5)
 
 
 class FxRatesConfig(BaseModel):
