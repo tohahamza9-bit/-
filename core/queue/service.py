@@ -818,6 +818,7 @@ class QueueService:
 
     async def pending_candidates_for_sender(self, chat_jid: str | None, sender_jid: str | None,
                                             now: datetime, text_ref: str | None = None, *,
+                                            frag: ParsedLeg | None = None,
                                             message_key: str | None = None) -> list[Deal]:
         """(البند 1، الربط أولاً) الصفقات المعلّقة لنفس المُرسِل ضمن نافذة الربط، **مرتّبة FIFO** —
         **بلا** تقييد نوع المحتوى (بخلاف oldest_waiting_for_sender الذي يشترط _fragment_targets).
@@ -836,6 +837,19 @@ class QueueService:
             _log_link_decision("pending_for_sender", message_key, pool,
                                matched[0] if matched else None, reason, text_ref)
             return matched
+        # 🔴 مرشِّح المحتوى الحتميّ **قبل** الذكاء وقبل FIFO (انحدار الدفعات 2026-07-20):
+        #   كان هذا المسار متساهلًا عمدًا («بلا تقييد نوع المحتوى») كي لا تسقط تكملةٌ صامتةً —
+        #   وهو سليمٌ حين تكون المعلّقة واحدة. لكن في دفعةٍ عميقة صار كلّ ردٍّ عديم‑مرجع يهبط
+        #   على **أقدم** معلّقة أيًّا كان محتواه: «1277 شركة القت» (تحمل كودًا) هبطت على X1566
+        #   وكودها 755 محجوزٌ سلفًا، بينما X1568 بلا كود هي صاحبتها الحقيقية.
+        #   _fragment_targets يعرف القاعدة أصلًا: ردٌّ يحمل كودًا يخصّ صفقةً **بلا كود**.
+        #   يُطبَّق تفضيلًا لا إقصاءً: إن لم يوافق أحدٌ نعود للمجموعة كاملةً، فتبقى ضمانة
+        #   «لا سقوط صامت» قائمةً كما كانت.
+        targeted = [d for d in pool if self._fragment_targets(d, frag)] if frag is not None else []
+        if targeted:
+            _log_link_decision("pending_for_sender", message_key, targeted,
+                               targeted[0], "content-targeted")
+            return targeted
         _log_link_decision("pending_for_sender", message_key, pool,
                            pool[0] if pool else None, "fifo-pool")
         return pool
@@ -885,7 +899,7 @@ class QueueService:
         if not self.is_completion_shaped(frag):
             return None
         cands = await self.pending_candidates_for_sender(
-            chat_jid, sender_jid, now, text_ref, message_key=message_key)
+            chat_jid, sender_jid, now, text_ref, frag=frag, message_key=message_key)
         if not cands:
             return None
         target = await self.apply_orphan_completion(cands[0], frag, sender_jid, message_key, now)

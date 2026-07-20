@@ -1366,7 +1366,8 @@ class Pipeline:
                 #   المرجع يُلزِم، وعند غيابه يرجّح الذكاءُ بالمحتوى، وFIFO آخر الاحتياطات.
                 if self.queue.is_completion_shaped(frag2):
                     cands = await self.queue.pending_candidates_for_sender(
-                        raw.chat_jid, raw.sender_jid, now, txt_ref, message_key=raw.message_key)
+                        raw.chat_jid, raw.sender_jid, now, txt_ref,
+                        frag=frag2, message_key=raw.message_key)
                     target = await self._choose_link_target(
                         raw, cands, treasuries, suppliers, now,
                         text_ref=txt_ref, stage="orphan_completion")
