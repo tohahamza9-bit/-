@@ -234,3 +234,51 @@ async def test_ref_mismatch_is_logged_with_reason(db, caplog):
     assert links, "لا سطر [link] واحد — قرارات الربط ما زالت غير مرصودة"
     assert any("reason=rejected-ref-mismatch" in m for m in links), (
         f"رفض المرجع لم يُسجَّل. المسجَّل: {links}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (و) المسار الثاني — مطالبة الردود المعلّقة (pending_replies)
+# ═════════════════════════════════════════════════════════════════════════════
+def _pending_deal(deal_id, ref, sender, code=None):
+    from core.constants import OperationType, Status
+    from core.models import Deal, ParsedLeg
+    leg = ParsedLeg(operation=OperationType.SELL, reference_number=ref, customer_code=code,
+                    amount=5000.0, sender_jid=sender, source_message_key=f"{deal_id}-a")
+    return Deal(deal_id=deal_id, status=Status.WAITING_SECOND_LEG, sell_leg=leg,
+                created_at=NOW, updated_at=NOW, chat_jid=CENTRAL, first_received_at=NOW,
+                source_message_keys=[f"{deal_id}-a"])
+
+
+def _reply_leg(code, name, sender):
+    from core.constants import OperationType
+    from core.models import ParsedLeg
+    return ParsedLeg(operation=OperationType.SELL, customer_code=code, customer_name=name,
+                     price_raw="6.0", price_normalized="6.0", sender_jid=sender)
+
+
+async def test_pending_reply_never_crosses_senders_when_unknown(db):
+    """ردٌّ معلّق مجهولُ المُرسِل لا تسحبه صفقةُ مُرسِلٍ آخر.
+
+    كان حصر المُرسِل يُتخطّى كلّه إن جُهِل أيُّ الطرفين (`sender and psender and ...`)، فيُسلَّم
+    ردُّ مُرسِلٍ إلى صفقة مُرسِلٍ أجنبيّ — تلوّثٌ صامت. الآن يلزم تطابقٌ إيجابيّ."""
+    from core.queue.service import QueueService
+    q = QueueService(db)
+    await db.pending_replies.add(message_key="r-unknown", chat_jid=CENTRAL,
+                                 leg=_reply_leg("999", "زبون أجنبيّ", None), received_at=NOW)
+    deal = _pending_deal("dForeign", "X9999", "other@lid")
+    await db.deals.upsert(deal)
+    pulled = await q._pull_pending_reply(deal, CENTRAL, NOW + timedelta(seconds=5))
+    assert pulled is False, "ردٌّ مجهول المُرسِل سُحِب إلى صفقة مُرسِلٍ أجنبيّ"
+    assert deal.sell_leg.customer_code != "999"
+
+
+async def test_pending_reply_same_sender_still_links(db):
+    """الحصر أُغلِق على المجهول فقط — التطابق الإيجابيّ يعمل كما كان."""
+    from core.queue.service import QueueService
+    q = QueueService(db)
+    await db.pending_replies.add(message_key="r-same", chat_jid=CENTRAL,
+                                 leg=_reply_leg("111", "زبون", S1), received_at=NOW)
+    deal = _pending_deal("dSame", None, S1)
+    await db.deals.upsert(deal)
+    assert await q._pull_pending_reply(deal, CENTRAL, NOW + timedelta(seconds=5)) is True
+    assert deal.sell_leg.customer_code == "111"

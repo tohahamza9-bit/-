@@ -911,16 +911,26 @@ class QueueService:
         doc = await self.db.pending_replies.claim_by_reference(
             chat_jid, ref, now, PENDING_REPLY_MAX_SECONDS) if ref else None
         via_ref = doc is not None
+        # (R3) قرار المطالبة يُسجَّل بسببه — كان هذا المسار كلّه بلا سطر لوق واحد، كنظيره في الربط.
+        log.info("[pending] stage=claim_by_ref deal=%s ref=%s sender=%s → %s",
+                 deal.deal_id[:8], ref or "-", sender or "-",
+                 (doc.get("message_key") if doc else "لا مطابق"))
         # الطبقة ٢: ردّ معلّق عديم‑مرجع لنفس المُرسِل (FIFO، استحواذ ذرّي) — يُقبَل فقط إن كان هدفًا
         #   صالحًا للصفقة (frag يحمل هوية → لصفقة بلا كود؛ خزينة فقط → لصفقة تنتظر خزينة). غير ذلك يُطلَق سراحه.
         if doc is None:
             cand = await self.db.pending_replies.claim_fifo_for_sender(
                 chat_jid, sender, now, PENDING_REPLY_MAX_SECONDS)
             if cand is not None:
-                if self._fragment_targets(deal, ParsedLeg(**cand["leg"])):
+                targets = self._fragment_targets(deal, ParsedLeg(**cand["leg"]))
+                log.info("[pending] stage=claim_fifo deal=%s sender=%s cand=%s targets=%s",
+                         deal.deal_id[:8], sender or "-", cand.get("message_key"), targets)
+                if targets:
                     doc = cand
                 else:
                     await self.db.pending_replies.release(cand.get("message_key"))
+            else:
+                log.info("[pending] stage=claim_fifo deal=%s sender=%s → لا مرشَّح",
+                         deal.deal_id[:8], sender or "-")
         if doc is None:
             return False
         frag = ParsedLeg(**doc["leg"])

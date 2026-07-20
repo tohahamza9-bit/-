@@ -679,7 +679,13 @@ class PendingReplyRepo(_Repo):
     async def claim_fifo_for_sender(self, chat_jid: str, sender_jid: Optional[str], now: datetime,
                                     within_seconds: int) -> Optional[dict]:
         """الطبقة ٢ (استحواذ ذرّي FIFO §7.3): **أقدم** ردّ عديم‑مرجع لنفس المُرسِل، يُحجَز ذرّيًّا في
-        نفس المسح — أول فتح أول قفل بلا سباق. يُرجع الوثيقة المحجوزة أو None."""
+        نفس المسح — أول فتح أول قفل بلا سباق. يُرجع الوثيقة المحجوزة أو None.
+
+        🔴 حصر المُرسِل **يُغلَق عند الجهل** (2026-07-20): كان الشرط `sender_jid and psender and
+        psender != sender_jid` يتخطّى الفحص كلّه إن جُهِل أيُّ الطرفين، فيُسلّم ردَّ مُرسِلٍ إلى
+        صفقة مُرسِلٍ آخر — تلوّثٌ صامت عابرٌ للمُرسِلين (أُثبِت تجريبيًّا: ردّ بلا sender سحبته
+        صفقةٌ لمُرسِلٍ أجنبيّ). الآن يلزم **تطابقٌ إيجابيّ**؛ والمجهول يبقى معلّقًا حتى تنقضي
+        مهلته فيُصعَّد ⚠️ (sweep_expired) — تصعيدٌ خيرٌ من إسنادٍ مُخمَّن (§0)."""
         horizon = _naive_utc(now) - timedelta(seconds=within_seconds)
         cur = self.col.find({"chat_jid": chat_jid, "consumed": False}).sort("received_at", 1)
         async for d in cur:
@@ -689,8 +695,11 @@ class PendingReplyRepo(_Repo):
             if (leg.get("reference_number") or "").strip():
                 continue                                   # ذو مرجع → للطبقة ١ لا FIFO
             psender = leg.get("sender_jid")
-            if sender_jid and psender and psender != sender_jid:
-                continue                                   # مُرسِل مختلف → تخطَّ
+            if not sender_jid or not psender or psender != sender_jid:
+                if sender_jid != psender:                  # لا حصر مؤكَّد → لا مطالبة
+                    log.info("[pending] تخطٍّ: ردّ %s مُرسِله %r لا يطابق مُرسِل الصفقة %r",
+                             d.get("message_key"), psender, sender_jid)
+                    continue
             if await self._try_claim(d["_id"]):
                 d.pop("_id", None)
                 d["consumed"] = True
