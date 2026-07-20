@@ -178,6 +178,59 @@ async def test_pair_partner_ignores_independent_first_message(db):
     assert p._pair_partner(m1, [m1, m2], tre, sup) is None
 
 
+async def test_pair_partner_rejects_ref_bearing_even_when_not_transfer(db):
+    """🔴 بلاغ إنتاج: تحت الـburst تصل X2 أثناء انتظار X1 فتُعتبر تكملتها. رسالةٌ تحمل
+    مرجعًا هي **بداية صفقة** مهما كان تفكيكها — الصياغة السابقة كانت تشترط
+    kind=='transfer' فتقبل رسالةً بمرجع تُفكَّك «noise» (شائع تحت الضغط)."""
+    await _enable(db)
+    p = _pipe(db, _RecBus(), _FakeAi())
+    tre, sup = await db.treasuries.all_active(), await db.suppliers.all_active()
+    m1 = _raw("k1", "X1538\nمحمد المنصوري\n53480258\nمبلغ 390 تونسي\nصفاقس", at=NOW)
+    # نصّ يحمل مرجعًا لكنه لا يُفكَّك حوالةً مكتملة
+    m2 = _raw("k2", "X1539\nتونس الحمامات", at=NOW + timedelta(seconds=1))
+    assert p._pair_partner(m1, [m1, m2], tre, sup, window_seconds=3.0) is None
+
+
+async def test_pair_partner_rejects_interleaved_si_burst(db):
+    """دفعة 13:52 الحيّة: رسائل SI تتخلّل الحوالات من نفس المُرسِل. SI تحمل مرجعًا
+    ⇒ ليست تكملة، ولا نقفز فوقها إلى ما بعدها (القفز تخمينٌ في الهويّة)."""
+    await _enable(db)
+    p = _pipe(db, _RecBus(), _FakeAi())
+    tre, sup = await db.treasuries.all_active(), await db.suppliers.all_active()
+    m1 = _raw("k1", "X1536\n0911912952\nامين\nصفاقس\n3795دت", at=NOW)
+    si = _raw("k2", "رقم العملية: SI4721\nرقم المستلم: 01015801860\nالسعر: 6.02",
+              at=NOW + timedelta(seconds=1))
+    comp = _raw("k3", "453 محمد عريبي34.5\n\nمحمود", at=NOW + timedelta(seconds=2))
+    assert p._pair_partner(m1, [m1, si, comp], tre, sup, window_seconds=3.0) is None
+
+
+async def test_pair_partner_respects_wait_window(db):
+    """تكملة خارج نافذة الانتظار لا تُضمّ — بلا هذا القيد كانت رسالةٌ بعد دقائق تُقبل."""
+    await _enable(db)
+    p = _pipe(db, _RecBus(), _FakeAi())
+    tre, sup = await db.treasuries.all_active(), await db.suppliers.all_active()
+    m1 = _raw("k1", "X1538\n01234567890\n390 تونسي", at=NOW)
+    late = _raw("k2", "390 العربي34.5\n\nمحمود", at=NOW + timedelta(seconds=30))
+    assert p._pair_partner(m1, [m1, late], tre, sup, window_seconds=3.0) is None
+    assert p._pair_partner(m1, [m1, late], tre, sup, window_seconds=60.0) is late
+
+
+async def test_pair_partner_accepts_same_reference_second_message(db):
+    """الشكل الموثَّق: المرجع مكرَّر في الرسالتين ⇒ تُقبل تكملةً رغم حملها مرجعًا."""
+    await _enable(db)
+    p = _pipe(db, _RecBus(), _FakeAi())
+    tre, sup = await db.treasuries.all_active(), await db.suppliers.all_active()
+    m1 = _raw("k1", "X1538\n01234567890\nمبلغ 390 تونسي", at=NOW)
+    m2 = _raw("k2", "X1538\nمحمود\n34.5", at=NOW + timedelta(seconds=1))
+    assert p._pair_partner(m1, [m1, m2], tre, sup, window_seconds=3.0) is m2
+
+
+def test_pair_wait_default_is_three_seconds():
+    """التأخير المحسوس: 3ث لا 8 (التكملة تصل خلال ثانية أو ثانيتين)."""
+    from core.models import DetectionConfig
+    assert DetectionConfig().ai_pair_wait_seconds == 3.0
+
+
 async def test_pair_partner_accepts_completion_fragment(db):
     """تكملة بلا مرجع خاصّ بها → تُضمّ للأولى."""
     await _enable(db)

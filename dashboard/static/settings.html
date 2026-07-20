@@ -209,6 +209,20 @@
       <label class="dfield">مهلة النداء (ثانية)<input id="ai_timeout" type="number" step="any"></label>
       <button onclick="saveDetection()" style="align-self:flex-end">حفظ</button>
     </div>
+    <label style="display:flex;gap:8px;align-items:center;margin:12px 0 8px">
+      <input type="checkbox" id="ai_first_enabled" style="flex:none;width:auto">
+      <span>AI-first للحالات الغامضة <span class="muted">(أيّ شكّ → ذكاء فورًا بالرسالتين
+        معًا، بدل تجريب القواعد حتى تفشل)</span></span></label>
+    <div class="row" style="gap:12px">
+      <label class="dfield">انتظار الرسالة الثانية (ثانية)<input id="ai_pairwait" type="number" step="any" min="0"></label>
+      <label class="dfield">أدنى ثقة تفكيك<input id="ai_minconf" type="number" step="any" min="0" max="1"></label>
+      <button onclick="saveDetection()" style="align-self:flex-end">حفظ</button>
+    </div>
+    <p class="muted" style="margin:8px 0 0">
+      <b>AI-first</b> يحتاج «تفعيل الفهم الذكي» أعلاه **أيضًا** — المفتاحان معًا.
+      انتظار الرسالة الثانية تأخيرٌ فعليّ يشعر به المُرسِل: 3ث تكفي (التكملة تصل عادةً خلال
+      ثانية أو ثانيتين)، وأيّ رسالة تحمل رقمًا إشاريًّا تُعدّ بداية صفقة جديدة لا تكملة
+      فلا تُضمّ مهما كان توقيتها.</p>
     <p class="muted" style="margin:8px 0 0">تعمل <b>فقط</b> على الرسائل التي كانت ستُصعَّد (فشل الحلّ
       الصارم وطبقة القروب). كل كيان يقترحه النموذج يجب أن يكون مسجَّلًا فعلًا، وكل رقم موجودًا في نصّ
       الرسالة، وثقته فوق العتبة — وإلا تُصعَّد كالمعتاد. المفتاح يوضع في ملف <code>.env</code> باسم
@@ -407,6 +421,9 @@ async function loadDetection(){
     $("ai_model").value = c.ai_model || "";
     $("ai_conf").value = c.ai_confidence_threshold;
     $("ai_timeout").value = c.ai_timeout_seconds;
+    $("ai_first_enabled").checked = c.ai_first_enabled === true;
+    $("ai_pairwait").value = c.ai_pair_wait_seconds;
+    $("ai_minconf").value = c.ai_min_parse_confidence;
   }catch(e){}
 }
 async function saveDetection(){
@@ -428,6 +445,9 @@ async function saveDetection(){
     ai_model:$("ai_model").value.trim(),
     ai_confidence_threshold:parseFloat($("ai_conf").value),
     ai_timeout_seconds:parseFloat($("ai_timeout").value),
+    ai_first_enabled:$("ai_first_enabled").checked,
+    ai_pair_wait_seconds:parseFloat($("ai_pairwait").value),
+    ai_min_parse_confidence:parseFloat($("ai_minconf").value),
   });
   try{ await api("/settings/detection","PUT",c); window._det=c; toast("حُفظت الحدود ✓"); loadLog(); }catch(e){}
 }

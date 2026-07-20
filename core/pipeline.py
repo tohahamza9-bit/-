@@ -306,13 +306,21 @@ class Pipeline:
     # AI-first للحالات الغامضة (§1-§3، قرار المالك 2026-07-20)
     # ═════════════════════════════════════════════════════════════════════════
     def _pair_partner(self, raw: RawMessage, batch: list[RawMessage],
-                      treasuries: list, suppliers: list) -> Optional[RawMessage]:
+                      treasuries: list, suppliers: list,
+                      window_seconds: Optional[float] = None) -> Optional[RawMessage]:
         """تكملة الرسالة `raw` من نفس المُرسِل داخل الدفعة — أو None إن لم تصل بعد.
 
-        🔴 حالة X1327+X1328 (§2): مُرسِلٌ يبعث **رسالتين أوليَين** بنفس اللحظة. الثانية ليست
-           تكملةً للأولى بل حوالةٌ مستقلّة، وضمّهما يخلط صفقتين. المعيار الحاسم: رسالةٌ تُفكَّك
-           حوالةً وتحمل **مرجعًا خاصًّا بها يخالف مرجع الأولى** ⇒ مستقلّة، لا تكملة.
-           فكل رسالة تنتظر تكملتها هي، مستقلّةً عن جارتها.
+        🔴 القيد الحاسم (بلاغ إنتاج): **رسالةٌ تحمل مرجعًا (X/A/SI####) هي بداية صفقة
+           جديدة لا تكملة** — مهما كان توقيتها. التكملة الحقيقيّة لا تحمل مرجعًا في الغالب
+           (سعر + خزينة فقط: «390 العربي34.5 / محمود»).
+           هذا يُفحص بـ`_has_reference` على النصّ **مستقلًّا عن نجاح التفكيك**. الصياغة
+           السابقة كانت تشترط `kind=="transfer"` أيضًا، فرسالةٌ أولى تحمل مرجعًا لكنها
+           تُفكَّك «noise» (شائع تحت الـburst) كانت تُقبَل تكملةً خطأً — فيرى الذكاء صفقتين
+           مخلوطتين. الاستثناء الوحيد: **نفس** المرجع (الشكل الموثَّق: المرجع مكرَّر في
+           الرسالتين).
+
+        🔴 وحدٌ زمنيّ: المرشّح يجب أن يصل خلال نافذة الانتظار نفسها؛ بلا هذا القيد كانت
+           رسالةٌ بعد دقائق (في نفس الدفعة) تُقبَل تكملةً.
         """
         own_ref = None
         try:
@@ -320,20 +328,23 @@ class Pipeline:
             own_ref = own.leg.reference_number if own.leg is not None else None
         except Exception:      # noqa: BLE001 — التفكيك لا يوقف الضمّ
             pass
-        for cand in batch:
+        base = _as_naive_utc(raw.received_at)
+        # ترتيب زمنيّ صريح: «الأولى بعدها» يجب ألّا تتعلّق بترتيب الدفعة.
+        for cand in sorted(batch, key=lambda c: _as_naive_utc(c.received_at)):
             if cand.message_key == raw.message_key or cand.is_from_me:
                 continue
             if cand.chat_jid != raw.chat_jid or cand.sender_jid != raw.sender_jid:
                 continue
-            if _as_naive_utc(cand.received_at) <= _as_naive_utc(raw.received_at):
+            gap = (_as_naive_utc(cand.received_at) - base).total_seconds()
+            if gap <= 0:
                 continue
-            try:
-                res = parse_message(cand.text or "", treasuries, suppliers)
-            except Exception:  # noqa: BLE001
-                return cand    # تعذّر تفكيكها ⇒ ليست حوالةً مستقلّة ⇒ تكملة محتملة
-            ref = res.leg.reference_number if res.leg is not None else None
-            if res.kind == "transfer" and ref and ref != own_ref:
-                return None    # حوالة أولى مستقلّة (X1328) — لا تُضمّ
+            if window_seconds is not None and gap > float(window_seconds):
+                return None    # خارج نافذة الانتظار — ليست تكملتها
+            text = cand.text or ""
+            if _has_reference(text) and not (own_ref and own_ref in text):
+                # بداية صفقة جديدة (X1328/SI4721) — لا تُضمّ، ولا نتخطّاها إلى ما بعدها:
+                # التكملة تلي أصلها مباشرةً، وأيّ قفزٍ فوق صفقة أخرى تخمينٌ في الهويّة.
+                return None
             return cand
         return None
 
@@ -358,14 +369,14 @@ class Pipeline:
             min_confidence=float(getattr(cfg, "ai_min_parse_confidence", 0.7)))
         if not verdict.ambiguous:
             return False
-        if self._pair_partner(raw, batch, treasuries, suppliers) is not None:
+        wait = float(getattr(cfg, "ai_pair_wait_seconds", 3.0))
+        if self._pair_partner(raw, batch, treasuries, suppliers, window_seconds=wait) is not None:
             return False       # التكملة حاضرة ⇒ لا انتظار، تُضمّان الآن
         waited = (_as_naive_utc(now) - _as_naive_utc(raw.received_at)).total_seconds()
-        if waited >= float(getattr(cfg, "ai_pair_wait_seconds", 8.0)):
+        if waited >= wait:
             return False       # انقضت المهلة ⇒ تمضي وحدها للذكاء
         log.debug("(AI-first) تأجيل %s انتظارًا للتكملة (%.1fث/%.1fث) — %s",
-                  raw.message_key, waited,
-                  float(getattr(cfg, "ai_pair_wait_seconds", 8.0)), verdict.as_note())
+                  raw.message_key, waited, wait, verdict.as_note())
         return True
 
     async def _ai_first(self, raw: RawMessage, result, verdict, treasuries: list,
@@ -1122,7 +1133,9 @@ class Pipeline:
                 raw.text or "", result, treasuries, suppliers,
                 min_confidence=float(getattr(_cfg_af, "ai_min_parse_confidence", 0.7)))
             if _verdict.ambiguous:
-                _partner = self._pair_partner(raw, batch or [], treasuries, suppliers)
+                _partner = self._pair_partner(
+                    raw, batch or [], treasuries, suppliers,
+                    window_seconds=float(getattr(_cfg_af, "ai_pair_wait_seconds", 3.0)))
                 try:
                     _res = await self._ai_first(raw, result, _verdict, treasuries, suppliers,
                                                 _partner, now)
