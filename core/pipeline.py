@@ -66,12 +66,14 @@ from .ambiguity import detect as detect_ambiguity
 from .ambiguity import treasury_role_conflict
 from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
-from .parsing.parser import _has_reference
+from .parsing.parser import _has_reference, first_reference
 from .parsing.resolve import resolve_bold, resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
 from .queue.service import (
     QueueService,
     _as_naive_utc,
+    _log_link_decision,
+    bind_by_reference,
     is_completion_fragment,
     is_incomplete_first_message,
     is_treasury_only_reply,
@@ -541,6 +543,56 @@ class Pipeline:
         log.info("(AI-first §5) قرار الربط: %s (فهرس=%s، ثقة=%.2f، %s)",
                  choice.action, choice.index, choice.confidence, choice.reason)
         return choice
+
+    async def _choose_link_target(self, raw: RawMessage, cands: list[Deal],
+                                  treasuries: list, suppliers: list, now: datetime, *,
+                                  text_ref: str | None = None, stage: str = "link") -> Deal | None:
+        """(R1+R2+R3) نقطة التحكيم **الوحيدة** لاختيار هدف التكملة.
+
+        الترتيب صارم: مرجعٌ صريح ⇒ حسمٌ فوريّ (القائمة مُصفّاة بالمرجع سلفًا في طبقة الطابور،
+        و[] تعني رفض ربط لا «لا مرشّحين»). ثمّ مرشَّحٌ واحد ⇒ هو. ثمّ **الذكاء يرجّح بالمحتوى**
+        عند التعدّد (حادثة X1571: FIFO أعطت تكملتَها لـX1568 بلا فحص محتوى). وأخيرًا FIFO
+        احتياطًا حين يكون الذكاء مطفأً/فاشلًا/دون العتبة — السلوك القائم بلا تغيير."""
+        if not cands:
+            _log_link_decision(stage, raw.message_key, [], None,
+                               "rejected-ref-mismatch" if text_ref else "no-candidates", text_ref)
+            return None
+        # (R1) يُعاد تطبيق الحارس هنا **عمدًا** رغم أنّ طبقة الطابور تُصفّي سلفًا: الاعتماد على
+        #      «القائمة مُصفّاة» يجعل صحّة الربط رهنًا بانضباط كلّ مُستدعٍ. أثبت اختبار التحوّل
+        #      (تعطيل الحارس في الطابور) أنّ هذه الدالة كانت تُسلّم cands[0] بثقةٍ عمياء.
+        bound = bind_by_reference(cands, text_ref)
+        if bound is not None:
+            matched, reason = bound
+            chosen = matched[0] if matched else None
+            _log_link_decision(stage, raw.message_key, cands, chosen, reason, text_ref)
+            return chosen
+        if len(cands) == 1:
+            _log_link_decision(stage, raw.message_key, cands, cands[0], "single-candidate")
+            return cands[0]
+        choice = await self._ai_link_choice(raw, cands, treasuries, suppliers, now)
+        if choice is not None and choice.action == "auto":
+            chosen = cands[choice.index]
+            _log_link_decision(stage, raw.message_key, cands, chosen, f"ai-auto:{choice.confidence:.2f}")
+            await self.bus.notify_admin(
+                f"⚠️ تكملة بلا رقم إشاري + {len(cands)} صفقات معلّقة — رُبطت بالذكاء "
+                f"(ثقة {choice.confidence:.2f}) بصفقة {self._ref(chosen) or '؟'}. راجعها.",
+                raw.message_key, forward_key=raw.message_key)
+            return chosen
+        if choice is not None and choice.action == "ask":
+            _log_link_decision(stage, raw.message_key, cands, cands[choice.index],
+                               f"ai-ask:{choice.confidence:.2f}")
+            opts = "\n".join(
+                f"{i+1}) {self._ref(c) or '؟'} — "
+                f"{(c.sell_leg.customer_name if c.sell_leg else None) or '؟'}"
+                for i, c in enumerate(cands))
+            await self.bus.notify_admin(
+                f"⚠️ تكملة بلا رقم إشاري + {len(cands)} صفقات معلّقة. الذكاء يرجّح "
+                f"الخيار {choice.index + 1} بثقة {choice.confidence:.2f} (دون الحسم). "
+                f"أيّها؟ **رد برقم الخيار**:\n{opts}",
+                raw.message_key, forward_key=raw.message_key)
+            return None
+        _log_link_decision(stage, raw.message_key, cands, cands[0], "fifo-fallback")
+        return cands[0]
 
     async def _ai_rescue_parse(self, raw: RawMessage, treasuries: list, suppliers: list):
         """(الفهم الذكي — توسعة X1325) رسالة أولى تحمل مرجعًا وفشل تفكيكها → صحّح كلمة العملة
@@ -1181,21 +1233,27 @@ class Pipeline:
         #   المرجع مكرّر في الرسالتين). الطبقة ٢ (FIFO): بلا ref → أقدم صفقة منتظِرة لنفس المُرسِل (أول
         #   فتح أول قفل). SI لا تدخل هنا (§4.5). الهدف يُشتقّ من الصفقات (مصدر الحقيقة)، لا من خانة مفردة.
         #   absorb_second_into يُرجِع None لو لم تكن الرسالة جزءًا مكمّلاً (حوالة أولى جديدة) → يسقط للتالي.
+        # (R1) المرجع الصريح يُقرأ من **النصّ الخام** لا من ناتج التفكيك وحده: رسالةٌ فشل تفكيكها
+        #      تفقد مرجعها فتنزلق إلى FIFO فتُبتلَع (X1567 داخل X1566، 2026-07-20). يُحسب مرّةً
+        #      واحدة هنا ويُلزِم كلّ الفروع أدناه.
+        txt_ref = (result.leg.reference_number if result.leg is not None else None) \
+            or first_reference(raw.text or "")
         if raw.sender_jid and not (result.leg is not None and result.leg.is_si_format):
-            inc_ref = result.leg.reference_number if result.leg is not None else None
-            if inc_ref:                                    # الطبقة ١ — بالمرجع حصرًا
-                target = await self.queue.waiting_by_reference(raw.chat_jid, inc_ref, now)
+            if txt_ref:                                    # الطبقة ١ — بالمرجع حصرًا (مُلزِم)
+                target = await self.queue.waiting_by_reference(raw.chat_jid, txt_ref, now)
+                _link_reason = "مرجع" if target is not None else "رفض — مرجع بلا مطابقة"
             else:                                          # الطبقة ٢ — FIFO لنفس المُرسِل (حسب نوع الرسالة)
                 frag2 = parse_completion_fragment(raw.text, treasuries, suppliers)
                 target = await self.queue.oldest_waiting_for_sender(
-                    raw.chat_jid, raw.sender_jid, now, frag2)
+                    raw.chat_jid, raw.sender_jid, now, frag2, message_key=raw.message_key)
+                _link_reason = "FIFO مُرسِل"
             if target is not None and target.status == Status.WAITING_SECOND_LEG:
                 absorbed = await self.queue.absorb_second_into(
                     target, raw, now, treasuries, suppliers)
                 if absorbed is not None:
                     merged, _immediate = absorbed   # المعالجة مؤجَّلة للفرز — لا حاجة للعلَم هنا
                     log.info("ربط الرسالة الثانية %s بالصفقة %s (%s)", raw.message_key,
-                             merged.deal_id, "مرجع" if inc_ref else "FIFO مُرسِل")
+                             merged.deal_id, _link_reason)
                     return merged
 
         # 🔴 ربط الرسالة الثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون ثم مورد §7.3) بصفقة معلّقة
@@ -1204,6 +1262,15 @@ class Pipeline:
         pairs = extract_code_name_price_lines(raw.text, suppliers)
         if len(pairs) >= 2:
             cands = await self.queue.waiting_candidates_for_second(raw.chat_jid, now)
+            # (R1) مرجعٌ صريح في النصّ ⇒ يُصفّي المرشّحين حصرًا؛ بلا مطابقة ⇒ **لا ربط** (لا ذكاء
+            #      ولا FIFO) — تسقط الرسالة لتصعيد has_ref أدناه بدل أن تلوّث صفقةً أجنبية.
+            _bound = bind_by_reference(cands, txt_ref)
+            if _bound is not None:
+                cands, _reason = _bound
+                _log_link_decision("second_pairs", raw.message_key, cands,
+                                   cands[0] if cands else None, _reason, txt_ref)
+                if not cands:
+                    return None
             if len(cands) == 1:
                 merged = await self.queue.absorb_customer_supplier(
                     cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
@@ -1285,7 +1352,7 @@ class Pipeline:
                 #    (absorb_fragment → _find_recent_waiting). fallback حين لا تلتقطه طبقتا خانة المُرسِل
                 #    (رد وصل قبل حوالته/عبر مُرسِل مختلف). تعدّد المرشّحين يُحسَم بالأقدم لا بالتصعيد.
                 return await self.queue.absorb_fragment(
-                    frag, raw.chat_jid, raw.message_key, now
+                    frag, raw.chat_jid, raw.message_key, now, text_ref=txt_ref
                 )
             # 🔴 (البند 1، الربط أولاً) لم تُصنَّف جزءًا **محلولًا** (فشل حلّ الخزينة/المورد: غريب/جديد/
             #    إملائيّة خاطئة)، لكنّها **بشكل تكملة** (سعر/خزينة/مورد/كود) والمُرسِل عنده صفقة معلّقة →
@@ -1293,8 +1360,19 @@ class Pipeline:
             #    يُصعَّد برسالة إلزامية مربوطة بمرجع الصفقة (اسم غير معروف: <حرفيًّا>) — روح 08adce8 للربط كلّه.
             if raw.sender_jid:
                 frag2 = parse_completion_fragment(raw.text, treasuries, suppliers)
-                merged = await self.queue.link_orphan_completion(
-                    frag2, raw.chat_jid, raw.sender_jid, raw.message_key, now)
+                merged = None
+                # (R1+R2) هذا هو مسار حادثتَي 2026-07-20 بالضبط: كان يُلصِق الرسالة بأقدم معلّقة
+                #   بلا قراءة مرجع (X1567→X1566) وبلا فحص محتوى (تكملة X1571→X1568). الآن:
+                #   المرجع يُلزِم، وعند غيابه يرجّح الذكاءُ بالمحتوى، وFIFO آخر الاحتياطات.
+                if self.queue.is_completion_shaped(frag2):
+                    cands = await self.queue.pending_candidates_for_sender(
+                        raw.chat_jid, raw.sender_jid, now, txt_ref, message_key=raw.message_key)
+                    target = await self._choose_link_target(
+                        raw, cands, treasuries, suppliers, now,
+                        text_ref=txt_ref, stage="orphan_completion")
+                    if target is not None:
+                        merged = await self.queue.apply_orphan_completion(
+                            target, frag2, raw.sender_jid, raw.message_key, now)
                 if merged is not None:
                     missing = missing_mandatory_fields(merged.sell_leg or merged.buy_leg)
                     if missing:

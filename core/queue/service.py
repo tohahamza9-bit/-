@@ -60,6 +60,46 @@ def _unresolved_treasury_tokens(text: str, treasuries: list[TreasuryRecord]) -> 
     return out
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# (R1) المرجع الصريح مُلزِم مطلقًا — حارسٌ واحد لكلّ منتقيات الربط
+# ═════════════════════════════════════════════════════════════════════════════
+def _deal_ref(d: Deal) -> str:
+    """الرقم الإشاريّ المُطبَّع لصفقة (من طرف البيع وإلّا الشراء). "" إن لا مرجع."""
+    leg = d.sell_leg or d.buy_leg
+    return _norm_ref(leg.reference_number) if leg is not None else ""
+
+
+def _log_link_decision(stage: str, message_key: str | None, cands: list[Deal],
+                       chosen: Deal | None, reason: str, text_ref: str | None = None) -> None:
+    """(R3) **لماذا** اختير هذا الهدف دون غيره — لا «أنّ» ربطًا حدث فقط.
+
+    فجوة رصد مؤكَّدة (2026-07-20): وصلت 6 مراجع خلال 20 ثانية كلُّها بلا خزينة، ورُبط اثنان
+    منها خطأً — ولا سطر واحد في اللوق يذكر من كان المرشَّحون ولا لماذا فاز من فاز."""
+    log.info("[link] stage=%s msg=%s text_ref=%s cands=%s chosen=%s reason=%s",
+             stage, message_key or "-", text_ref or "-",
+             [f"{d.deal_id[:8]}:{_deal_ref(d) or '؟'}" for d in cands],
+             chosen.deal_id[:8] if chosen is not None else "-", reason)
+
+
+def bind_by_reference(cands: list[Deal], text_ref: str | None) -> tuple[list[Deal], str] | None:
+    """(R1) المرجع الصريح مُلزِم مطلقًا — الحارس الوحيد لكلّ مسارات الربط.
+
+    ثلاثيّ الحالة **عمدًا**، فـ«الرفض» مُرمَّزٌ في قيمة الإرجاع لا في `if` كلّ مُستدعٍ:
+      • `None`                        ⇒ لا مرجع في النصّ؛ امضِ لمنطقك (ذكاء ثمّ FIFO).
+      • `([], "rejected-ref-mismatch")` ⇒ مرجعٌ صريح بلا صفقة مطابقة ⇒ **لا رَبْط بشيء**.
+        لا سقوط لـFIFO: هذه بالضبط هي حادثة X1567 التي ابتلعتها X1566.
+      • `([d], "ref-exact")`          ⇒ اربط بصفقته، بغضّ النظر عن أيّ شيء آخر.
+
+    كلّ منتقٍ يُعيد هذه النتيجة **مباشرةً**، فلا يوجد كود FIFO بعد الحارس يمكن العودة إليه."""
+    if not text_ref:
+        return None
+    nref = _norm_ref(text_ref)
+    if not nref:
+        return None
+    matched = [d for d in cands if _deal_ref(d) == nref]
+    return matched, ("ref-exact" if matched else "rejected-ref-mismatch")
+
+
 def is_completion_fragment(leg: ParsedLeg | None) -> bool:
     """
     رد خزينة/مورد يُكمِّل حوالة معلّقة (§7.3) — مثل «بلس» وحدها أو «صافي» وحدها أو
@@ -578,7 +618,8 @@ class QueueService:
 
     # ── ردود الخزينة/المورد المكمّلة (§7.3 — الرسالة الثانية بلا رقم إشاري) ────
     async def absorb_fragment(
-        self, frag: ParsedLeg, chat_jid: str | None, message_key: str, now: datetime
+        self, frag: ParsedLeg, chat_jid: str | None, message_key: str, now: datetime,
+        text_ref: str | None = None,
     ) -> Deal | None:
         """
         رد خزينة/مورد بلا رقم إشاري («بلس»/«صافي» وحدها).
@@ -587,9 +628,12 @@ class QueueService:
                 (SECOND_MESSAGE_LINK_SECONDS) → تكتمل الصفقة وتمشي.
         (Fix 2) يصل قبل الحوالة: لا صفقة معلّقة → يُحفَظ «ردًّا معلّقًا» حتى 90s
                 (PENDING_REPLY_MAX_SECONDS) ريثما تصل الأولى.
+
+        `text_ref` (R1): مرجع صريح من **النصّ الخام** — يُلزِم الاختيار ويمنع FIFO.
         """
         frag.source_message_key = message_key
-        deal = await self._find_recent_waiting(chat_jid, now, frag)
+        deal = await self._find_recent_waiting(chat_jid, now, frag, text_ref,
+                                               message_key=message_key)
         if deal is not None:
             self._apply_fragment(deal, frag)
             deal.status = Status.PARSED
@@ -601,6 +645,11 @@ class QueueService:
                      message_key, deal.deal_id)
             return deal
         # لا صفقة معلّقة → احفظه ردًّا معلّقًا (Fix 2)
+        # (R1) وسمُه بمرجعه الصريح إن وُجد، ليطالبه _pull_pending_reply لاحقًا **بالمرجع** لا
+        #      بـFIFO حين تصل صفقته. لا يُوسَم إلّا على هذا المسار (بلا هدف) — الوسم على مسار
+        #      الالتصاق يُبطل شروط «غياب المرجع» في is_completion_fragment وغيرها.
+        if text_ref and not frag.reference_number:
+            frag.reference_number = text_ref
         await self.db.pending_replies.add(
             message_key=message_key, chat_jid=chat_jid or "", leg=frag, received_at=now,
         )
@@ -650,6 +699,7 @@ class QueueService:
 
     async def fragment_link_candidates(
         self, chat_jid: str | None, now: datetime, frag: ParsedLeg | None = None,
+        text_ref: str | None = None, *, message_key: str | None = None,
     ) -> list[Deal]:
         """المرشّحون لربط الرسالة الثانية `frag` بصفقة معلّقة في نفس الغرفة، **بعد كل المميّزات**
         (§7.3، §0):
@@ -683,13 +733,16 @@ class QueueService:
         ]
         if not candidates:
             return []
-        # (الطبقة ١) رقم إشاري صريح → طابِق بالـref حصرًا (يشمل تسوية الخصم لصفقة ذات هوية بلا خزينة)
-        frag_ref = _norm_ref(frag.reference_number) if frag is not None and frag.reference_number else None
-        if frag_ref:
-            return [
-                d for d in candidates
-                if d.sell_leg is not None and _norm_ref(d.sell_leg.reference_number) == frag_ref
-            ]
+        # (الطبقة ١) رقم إشاري صريح → طابِق بالـref حصرًا (يشمل تسوية الخصم لصفقة ذات هوية بلا خزينة).
+        # (R1) المصدر: `text_ref` من **النصّ الخام** أوّلًا — فلا يُسقِط فشلُ التفكيك المرجعَ معه
+        #      (حادثة X1567). ثمّ مرجع الطرف المفكَّك. النتيجة مُلزِمة: لا مطابقة ⇒ [] ⇒ لا ربط.
+        bound = bind_by_reference(
+            candidates, text_ref or (frag.reference_number if frag is not None else None))
+        if bound is not None:
+            matched, reason = bound
+            _log_link_decision("fragment_candidates", message_key, candidates,
+                               matched[0] if matched else None, reason, text_ref)
+            return matched
         # (الطبقة ٢) بلا ref: الرسالة الثانية تحمل الهوية → تخصّ صفقةً **ناقصة الهوية** فقط (لا صفقة
         #   ذات هوية تنتظر تسوية مرجعها). ثم نفس المُرسِل يميّز إن وُجد، والترتيب تصاعديّ (FIFO الأقدم).
         awaiting = [d for d in candidates if self._fragment_targets(d, frag)]
@@ -697,11 +750,16 @@ class QueueService:
         if sender:
             same_sender = [d for d in awaiting if self._leg_sender(d) == sender]
             if same_sender:
+                _log_link_decision("fragment_candidates", message_key, same_sender,
+                                   same_sender[0], "fifo-pool-same-sender")
                 return same_sender
+        _log_link_decision("fragment_candidates", message_key, awaiting,
+                           awaiting[0] if awaiting else None, "fifo-pool")
         return awaiting
 
     async def _find_recent_waiting(
         self, chat_jid: str | None, now: datetime, frag: ParsedLeg | None = None,
+        text_ref: str | None = None, *, message_key: str | None = None,
     ) -> Deal | None:
         """الصفقة المطابِقة للرسالة الثانية (§7.3 — تصميم حتميّ بطبقتين، بلا تجاور ولا تصعيد):
 
@@ -712,7 +770,8 @@ class QueueService:
 
         fragment_link_candidates تُرجِع المرشّحين مرتّبين بـcreated_at تصاعديًّا (waiting_in_room)،
         فأوّلهم = الأقدم = هدف FIFO الصحيح. (استُبدلت آلية التجاور بالكامل بـFIFO — أحسم لنفس الهدف §0.)"""
-        cands = await self.fragment_link_candidates(chat_jid, now, frag)
+        cands = await self.fragment_link_candidates(chat_jid, now, frag, text_ref,
+                                                    message_key=message_key)
         return cands[0] if cands else None
 
     async def waiting_by_reference(self, chat_jid: str | None, ref: str | None,
@@ -732,35 +791,61 @@ class QueueService:
         return None
 
     async def oldest_waiting_for_sender(self, chat_jid: str | None, sender_jid: str | None,
-                                        now: datetime, frag: ParsedLeg | None = None) -> Deal | None:
+                                        now: datetime, frag: ParsedLeg | None = None,
+                                        text_ref: str | None = None, *,
+                                        message_key: str | None = None) -> Deal | None:
         """الطبقة ٢ (FIFO §7.3): **أقدم** صفقة منتظِرة لنفس المُرسِل هي هدف صالح للرسالة الثانية `frag`
         (حسب _fragment_targets) ضمن نافذة الربط — أول فتح أول قفل. حتميّ بلا قرب/تجاور/تصعيد
-        (يعكس عمل الموظف: رسالتان متتاليتان ثم التالية)."""
+        (يعكس عمل الموظف: رسالتان متتاليتان ثم التالية).
+
+        (R1) يسبقها الحارس: مرجعٌ صريح ⇒ مطابقته **حصرًا**، ولا سقوط لـFIFO عند عدم المطابقة."""
         if not chat_jid or not sender_jid:
             return None
         horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
-        for d in await self.db.deals.waiting_in_room(chat_jid):   # ASC = FIFO (الأقدم أولًا)
-            if _as_naive_utc(d.created_at) < horizon:
-                continue
-            if self._fragment_targets(d, frag) and self._leg_sender(d) == sender_jid:
-                return d
-        return None
+        pool = [d for d in await self.db.deals.waiting_in_room(chat_jid)   # ASC = FIFO (الأقدم أولًا)
+                if _as_naive_utc(d.created_at) >= horizon]
+        # (R1) المرجع الصريح يعلو على المُرسِل والشكل معًا — كـwaiting_by_reference تمامًا.
+        bound = bind_by_reference(pool, text_ref)
+        if bound is not None:
+            matched, reason = bound
+            chosen = matched[0] if matched else None
+            _log_link_decision("oldest_waiting_for_sender", message_key, pool, chosen, reason, text_ref)
+            return chosen
+        chosen = next((d for d in pool
+                       if self._fragment_targets(d, frag) and self._leg_sender(d) == sender_jid), None)
+        _log_link_decision("oldest_waiting_for_sender", message_key, pool, chosen, "fifo-fallback")
+        return chosen
+
+    async def pending_candidates_for_sender(self, chat_jid: str | None, sender_jid: str | None,
+                                            now: datetime, text_ref: str | None = None, *,
+                                            message_key: str | None = None) -> list[Deal]:
+        """(البند 1، الربط أولاً) الصفقات المعلّقة لنفس المُرسِل ضمن نافذة الربط، **مرتّبة FIFO** —
+        **بلا** تقييد نوع المحتوى (بخلاف oldest_waiting_for_sender الذي يشترط _fragment_targets).
+
+        تُرجِع **القائمة** لا الأقدم وحدها، كي يحكّمها الأنبوب بالذكاء عند غياب المرجع (R2) بدل
+        FIFO عمياء — حادثة X1571 التي سُرقت تكملتُها لصالح X1568 بلا أيّ فحص محتوى.
+        (R1) مرجعٌ صريح ⇒ المصفّاة بالمرجع حصرًا؛ [] تعني **رفض ربط** لا «لا مرشّحين»."""
+        if not chat_jid or not sender_jid:
+            return []
+        horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        pool = [d for d in await self.db.deals.waiting_in_room(chat_jid)   # ASC = FIFO
+                if _as_naive_utc(d.created_at) >= horizon and self._leg_sender(d) == sender_jid]
+        bound = bind_by_reference(pool, text_ref)
+        if bound is not None:
+            matched, reason = bound
+            _log_link_decision("pending_for_sender", message_key, pool,
+                               matched[0] if matched else None, reason, text_ref)
+            return matched
+        _log_link_decision("pending_for_sender", message_key, pool,
+                           pool[0] if pool else None, "fifo-pool")
+        return pool
 
     async def oldest_pending_for_sender(self, chat_jid: str | None, sender_jid: str | None,
-                                        now: datetime) -> Deal | None:
-        """(البند 1، الربط أولاً) **أقدم** صفقة معلّقة لنفس المُرسِل ضمن نافذة الربط — **بلا** تقييد نوع
-        المحتوى (بخلاف oldest_waiting_for_sender الذي يشترط _fragment_targets). أيّ رسالةٍ من مُرسِلٍ
-        عنده صفقة WAITING_SECOND_LEG تُربَط بأقدمها بغضّ النظر عن انحلال محتواها. FIFO حتميّ (درس X850:
-        سقوط/تعثّر وحدة لا يزيح الباقي — كلٌّ يُربَط بالأقدم المتبقّي)."""
-        if not chat_jid or not sender_jid:
-            return None
-        horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
-        for d in await self.db.deals.waiting_in_room(chat_jid):   # ASC = FIFO
-            if _as_naive_utc(d.created_at) < horizon:
-                continue
-            if self._leg_sender(d) == sender_jid:
-                return d
-        return None
+                                        now: datetime, text_ref: str | None = None) -> Deal | None:
+        """**أقدم** صفقة معلّقة لنفس المُرسِل (FIFO حتميّ — درس X850: سقوط/تعثّر وحدة لا يزيح الباقي).
+        غلافٌ رفيع فوق pending_candidates_for_sender يحفظ التوقيع القائم."""
+        cands = await self.pending_candidates_for_sender(chat_jid, sender_jid, now, text_ref)
+        return cands[0] if cands else None
 
     @staticmethod
     def is_completion_shaped(frag: ParsedLeg | None) -> bool:
@@ -773,18 +858,11 @@ class QueueService:
                     or frag.customer_code or (frag.customer_name or "").strip()
                     or frag.unresolved_treasury)
 
-    async def link_orphan_completion(self, frag: ParsedLeg, chat_jid: str | None,
-                                     sender_jid: str | None, message_key: str,
-                                     now: datetime) -> Deal | None:
-        """(البند 1) يربط رسالة **بشكل تكملة قد يفشل حلّ اسمها** بأقدم صفقة معلّقة لنفس المُرسِل — قبل
-        وبغضّ النظر عن نجاح الحل. يطبّق ما انحلّ عبر _apply_fragment ويُعيدها PARSED (تُعالَج بالنبضة:
-        مطابقة/كتابة إن اكتملت، أو تصعيد غنيّ إن بقيت ناقصة). None إن لا صفقة معلّقة (تُترك للمسار العادي).
-        لا تمسّ حوالةً أولى مستقلّة (تُصنَّف transfer لا noise فلا تصل هنا)."""
-        if not self.is_completion_shaped(frag):
-            return None
-        target = await self.oldest_pending_for_sender(chat_jid, sender_jid, now)
-        if target is None:
-            return None
+    async def apply_orphan_completion(self, target: Deal, frag: ParsedLeg,
+                                      sender_jid: str | None, message_key: str,
+                                      now: datetime) -> Deal:
+        """يطبّق تكملةً على صفقةٍ **مختارةٍ سلفًا** ويُعيدها PARSED. فُصِل عن اختيار الهدف كي يتولّى
+        الأنبوب التحكيم (مرجع مُلزِم / ذكاء / FIFO) ثمّ يستدعي التطبيق."""
         frag.sender_jid = sender_jid
         frag.source_message_key = message_key
         self._apply_fragment(target, frag)          # يطبّق الخزينة/المورد/الكود/السعر المحلول (إن وُجد)
@@ -793,6 +871,26 @@ class QueueService:
         target.status = Status.PARSED
         target.waiting_deadline = None
         await self.db.deals.upsert(target)
+        return target
+
+    async def link_orphan_completion(self, frag: ParsedLeg, chat_jid: str | None,
+                                     sender_jid: str | None, message_key: str,
+                                     now: datetime, text_ref: str | None = None) -> Deal | None:
+        """(البند 1) يربط رسالة **بشكل تكملة قد يفشل حلّ اسمها** بصفقة معلّقة لنفس المُرسِل — قبل
+        وبغضّ النظر عن نجاح الحل. يطبّق ما انحلّ عبر _apply_fragment ويُعيدها PARSED (تُعالَج بالنبضة:
+        مطابقة/كتابة إن اكتملت، أو تصعيد غنيّ إن بقيت ناقصة). None إن لا صفقة معلّقة (تُترك للمسار العادي).
+        لا تمسّ حوالةً أولى مستقلّة (تُصنَّف transfer لا noise فلا تصل هنا).
+
+        (R1) `text_ref` مُلزِم: مرجعٌ صريح بلا صفقة مطابقة ⇒ None (رفض ربط) لا أقدمَ معلّقة."""
+        if not self.is_completion_shaped(frag):
+            return None
+        cands = await self.pending_candidates_for_sender(
+            chat_jid, sender_jid, now, text_ref, message_key=message_key)
+        if not cands:
+            return None
+        target = await self.apply_orphan_completion(cands[0], frag, sender_jid, message_key, now)
+        _log_link_decision("orphan_completion", message_key, cands, target,
+                           "ref-exact" if text_ref else "fifo-fallback", text_ref)
         log.info("(البند 1) رُبطت رسالة تكملة %s بالصفقة المعلّقة %s", message_key, target.deal_id)
         return target
 

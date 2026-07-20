@@ -1,0 +1,236 @@
+"""
+(R1) المرجع الصريح مُلزِم مطلقًا — لا FIFO ولا ذكاء يتجاوزه.
+
+حادثتا إنتاج 2026-07-20 (دفعة 17:21، ستّة مراجع خلال 20 ثانية):
+
+1. **X1567 ابتُلعت.** رسالتها الأولى — حوالةٌ كاملةٌ تحمل مرجعها في سطرها الأوّل — فشل تفكيكها
+   فصُنّفت noise، فرُبطت بأقدم صفقة معلّقة (X1566) عبر link_orphan_completion الذي لا يقرأ أيّ
+   مرجع. لوّثتها بـ«270 العطوي»، ولم تُنشَأ لـX1567 صفقةٌ قطّ — حوالةٌ ضائعة بلا أثر.
+2. **تكملة X1571 سُرقت.** جاءت بلا مرجع فعلًا، فأعطتها FIFO العمياء لأقدم معلّقة (X1568) بلا
+   أيّ فحص محتوى. بقيت X1571 بلا مورّد وصُعِّدت.
+
+المرجع كان أمام النظام في الحالة الأولى ولم يُقرأ قطّ، لأنّ كلّ قارئ للمرجع كان يقرأه من
+**ناتج التفكيك** لا من النصّ الخام.
+"""
+from __future__ import annotations
+
+import contextlib
+import io
+import logging
+from datetime import datetime, timedelta, timezone
+
+from core.bus import Bus
+from core.models import DetectionConfig, RawMessage, WriteResult
+from core.pipeline import Pipeline
+
+from .test_ai_first import _FakeAi
+
+NOW = datetime(2026, 7, 20, 17, 21, 0, tzinfo=timezone.utc)
+CENTRAL = "central@g.us"
+ADMIN = "admin@g.us"
+S1 = "sender1@lid"
+
+
+class _W:
+    name = "w"
+
+    async def write(self, job, *, commit):
+        return WriteResult(ok=True)
+
+
+class _V:
+    enabled = False
+
+    async def verify_transaction(self, *a, **k):
+        return (False, None)
+
+    async def find_last_pending(self, *a, **k):
+        return None
+
+
+def _pipeline(db, ai_client=None):
+    return Pipeline(db, Bus(db, {CENTRAL, ADMIN}, CENTRAL, ADMIN), _W(), _V(),
+                    customer_room_jids=[], treasury_room_jids=[], ai_client=ai_client)
+
+
+async def _run_burst(pipe, msgs, *, base=NOW, gap=0.3, now_offset=6):
+    """دفعةٌ متقاربة (نفس الدقيقة) ثم دورتا معالجة — شكل حادثة الإنتاج بالضبط.
+
+    الدورة الثانية ضرورية: بوّابة الاستقرار تُؤجِّل **آخر** رسالة في الدفعة (تنتظر تكملتها 3ث)،
+    فتبقى بلا معالجة في دورة واحدة — والتكملة اليتيمة هي آخر رسالة في هذه الاختبارات."""
+    for i, (text, key, sender) in enumerate(msgs):
+        await pipe.capture(RawMessage(message_key=key, chat_jid=CENTRAL, sender_jid=sender,
+                                      text=text, received_at=base + timedelta(seconds=i * gap)))
+    with contextlib.redirect_stderr(io.StringIO()):
+        await pipe.process_inbox(base + timedelta(seconds=now_offset))
+        await pipe.process_inbox(base + timedelta(seconds=now_offset + 10))
+
+
+async def _deals_by_ref(db):
+    out: dict[str, list[dict]] = {}
+    async for d in db.deals.col.find({}):
+        r = (d.get("sell_leg") or {}).get("reference_number")
+        if r:
+            out.setdefault(r, []).append(d)
+    return out
+
+
+async def _all_sell_legs(db):
+    return [(d.get("sell_leg") or {}) async for d in db.deals.col.find({})]
+
+
+# رسائل حادثة X1566/X1567 حرفيًّا من واتساب (2026-07-20 5:19 م)
+_X1566 = ("X1566\nفدفوان كاش\n01033761670\n915ج.م\n755 مهند بندلسي6.08", "m1566", S1)
+_X1567 = ("X1567\nارجو تحويل 5800 جني فودافون 01025146087\n270 العطوي6.08", "m1567", S1)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (أ) تكملة بمرجع صريح → تُربَط بصفقتها، لا بأقدم معلّقة
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_ref_message_is_not_swallowed_by_older_pending(db):
+    """X1567 لا تُلصَق بـX1566 المعلّقة قبلها — المرجع مختلف فالربط مرفوض.
+
+    الفحص على **ابتلاع المفتاح** لا على تلوّث الحقول: حين تكون للصفقة المضيفة هويةٌ سلفًا لا
+    يدهسها _apply_fragment، فتبدو نظيفةً بينما رسالةُ X1567 ابتُلعت فيها وضاعت. المفتاح لا يكذب."""
+    await _run_burst(_pipeline(db), [_X1566, _X1567])
+    async for d in db.deals.col.find({}):
+        ref = (d.get("sell_leg") or {}).get("reference_number")
+        if ref != "X1567":
+            assert "m1567" not in (d.get("source_message_keys") or []), (
+                f"رسالة X1567 ابتُلعت في صفقة {ref}")
+
+
+async def test_ref_continuation_binds_own_deal_over_older_pending(db):
+    """تكملةٌ بمرجعها الصريح تتخطّى صفقةً معلّقةً **أقدم** وتربط صاحبتها."""
+    await _run_burst(_pipeline(db), [
+        ("X1560\n01000000000\n3000 جنيه مصري\nفودافون", "m1560", S1),   # الأقدم — طُعم FIFO
+        ("X1561\n01011111111\n7000 جنيه مصري\nفودافون", "m1561", S1),
+        ("X1561\nبلاس فون", "m1561b", S1),                              # تكملة بمرجع صريح
+    ])
+    by = await _deals_by_ref(db)
+    t1560 = (by["X1560"][0]["sell_leg"] or {}).get("treasury") or {}
+    assert t1560.get("name") != "بلاس فون", "الأقدم (X1560) خطفت تكملة X1561"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (ب) مرجع بلا صفقة مطابقة → لا يبتلعه أحد، ولا يختفي
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_ref_without_matching_deal_is_never_absorbed(db):
+    """«رفض ربط» لا «أقدم معلّقة»: بيانات X1567 لا تظهر في أيّ صفقة أخرى."""
+    await _run_burst(_pipeline(db), [_X1566, _X1567])
+    legs = await _all_sell_legs(db)
+    owners = [lg for lg in legs
+              if lg.get("customer_code") == "270" or "العطوي" in (lg.get("customer_name") or "")]
+    for lg in owners:
+        assert lg.get("reference_number") == "X1567", (
+            f"بيانات X1567 هبطت على صفقة {lg.get('reference_number')}")
+
+
+async def test_unlinkable_ref_message_is_escalated_not_lost(db):
+    """X1567 يجب أن تُصعَّد لا أن تختفي — «لا خسارة صامتة» (§0)."""
+    await _run_burst(_pipeline(db), [_X1566, _X1567])
+    by = await _deals_by_ref(db)
+    if "X1567" in by:
+        return                                  # نجت بصفقتها الخاصّة — مقبول أيضًا
+    texts = [(o.get("text") or "") async for o in db.outgoing.col.find({})]
+    assert any("X1567" in t for t in texts), "X1567 لم تُنشئ صفقةً ولم تُصعَّد — ضاعت صامتةً"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (ج) بلا مرجع + مرشّحان → الذكاء يرجّح بالمحتوى؛ FIFO حين يكون مطفأً
+# ═════════════════════════════════════════════════════════════════════════════
+# يُختبَر على مستوى الوحدة: بلوغ الفرع E عبر الأنبوب يتطلّب تركيبةً نادرة (الفرع B يلتقط
+# التكملة ذات السطرين، وبوّابة الاستقرار تحجب ذات السطر الواحد 60 ثانية). التحكيم نفسه هو
+# موضع العطل، فيُختبَر مباشرةً — كما يفعل tests/test_link_first.py.
+def _pending(deal_id, created_offset, ref):
+    from core.constants import OperationType, Status
+    from core.models import Deal, ParsedLeg
+    leg = ParsedLeg(operation=OperationType.SELL, reference_number=ref, amount=5000.0,
+                    sender_jid=S1, source_message_key=f"{deal_id}-a", expects_pair=True)
+    at = NOW + timedelta(seconds=created_offset)
+    return Deal(deal_id=deal_id, status=Status.WAITING_SECOND_LEG, sell_leg=leg,
+                created_at=at, updated_at=at, chat_jid=CENTRAL, first_received_at=at,
+                source_message_keys=[f"{deal_id}-a"])
+
+
+async def _two_pending(db):
+    """X1568 (الأقدم) ثمّ X1571 — تركيبة حادثة سرقة التكملة."""
+    from core.queue.service import QueueService
+    await db.deals.upsert(_pending("d1568", 0, "X1568"))
+    await db.deals.upsert(_pending("d1571", 1, "X1571"))
+    return QueueService(db)
+
+
+async def test_no_ref_candidates_stay_fifo_ordered(db):
+    """بلا مرجع ⇒ القائمة كاملةٌ مرتّبةً FIFO — سلوك الاحتياط القائم لم يُمسّ."""
+    q = await _two_pending(db)
+    cands = await q.pending_candidates_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5))
+    assert [c.deal_id for c in cands] == ["d1568", "d1571"]
+
+
+async def test_explicit_ref_filters_candidates_to_one(db):
+    """(R1) مرجعٌ صريح ⇒ صاحبته وحدها، ولو كانت الأحدث."""
+    q = await _two_pending(db)
+    cands = await q.pending_candidates_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5),
+                                                  "X1571")
+    assert [c.deal_id for c in cands] == ["d1571"]
+
+
+async def test_unknown_ref_refuses_to_link(db):
+    """(R1) مرجعٌ بلا صفقة مطابقة ⇒ [] = **رفض ربط**، لا أقدمَ معلّقة — حادثة X1567."""
+    q = await _two_pending(db)
+    cands = await q.pending_candidates_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5),
+                                                  "X1567")
+    assert cands == [], "مرجعٌ غريب ما زال يسقط على أقدم معلّقة"
+    assert await q.oldest_pending_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5),
+                                             "X1567") is None
+
+
+async def test_no_ref_two_candidates_ai_arbitrates_by_content(db):
+    """(R2) بلا مرجع + مرشّحان ⇒ الذكاء يرجّح بالمحتوى، فتصل التكملة لـX1571 لا لأقدم معلّقة."""
+    q = await _two_pending(db)
+    cands = await q.pending_candidates_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5))
+    await db.detection.set(DetectionConfig(ai_enabled=True, ai_first_enabled=True,
+                                           ai_model="fake/model"))
+    ai = _FakeAi({"link_index": 1, "link_confidence": 0.97})          # 1 = X1571
+    pipe = _pipeline(db, ai_client=ai)
+    raw = RawMessage(message_key="m1571b", chat_jid=CENTRAL, sender_jid=S1,
+                     text="مطلب الفيتوري5.98\nمومن عريبي6.02", received_at=NOW)
+    chosen = await pipe._choose_link_target(raw, cands, [], [], NOW + timedelta(seconds=5))
+    assert chosen is not None and chosen.deal_id == "d1571", "الذكاء رجّح X1571 ولم تصلها"
+    assert ai.calls, "الذكاء لم يُستدعَ أصلًا عند تعدّد المرشّحين"
+
+
+async def test_no_ref_two_candidates_fifo_when_ai_off(db):
+    """الاحتياط القائم محفوظ: الذكاء مطفأ ⇒ FIFO (الأقدم) كما كان بالضبط."""
+    q = await _two_pending(db)
+    cands = await q.pending_candidates_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5))
+    raw = RawMessage(message_key="m1571b", chat_jid=CENTRAL, sender_jid=S1,
+                     text="مطلب الفيتوري5.98", received_at=NOW)
+    chosen = await _pipeline(db)._choose_link_target(raw, cands, [], [], NOW + timedelta(seconds=5))
+    assert chosen is not None and chosen.deal_id == "d1568"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (د/هـ) حراسة الانحدار + الرصد
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_own_ref_repeated_still_merges(db):
+    """R1 لا يكسر الشكل السليم: المرجع مكرَّرٌ في الرسالتين ⇒ يطابق نفسه ⇒ يُدمَج (X1570)."""
+    await _run_burst(_pipeline(db), [
+        ("X1570\n01000000000\n5800 جنيه مصري\nفودافون", "m70", S1),
+        ("X1570\nبلاس فون", "m70b", S1),
+    ])
+    by = await _deals_by_ref(db)
+    assert len(by.get("X1570", [])) == 1, "المرجع المكرَّر أنشأ صفقتين بدل الدمج"
+    tre = (by["X1570"][0]["sell_leg"] or {}).get("treasury") or {}
+    assert tre.get("name") == "بلاس فون", "التكملة ذات المرجع نفسه لم تُدمَج"
+
+
+async def test_ref_mismatch_is_logged_with_reason(db, caplog):
+    """(R3) قرار الربط يُسجَّل بسببه ومرشّحيه — فجوة الرصد مغلقة."""
+    with caplog.at_level(logging.INFO):
+        await _run_burst(_pipeline(db), [_X1566, _X1567])
+    links = [r.getMessage() for r in caplog.records if "[link]" in r.getMessage()]
+    assert links, "لا سطر [link] واحد — قرارات الربط ما زالت غير مرصودة"
+    assert any("reason=rejected-ref-mismatch" in m for m in links), (
+        f"رفض المرجع لم يُسجَّل. المسجَّل: {links}")

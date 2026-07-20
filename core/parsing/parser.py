@@ -135,13 +135,24 @@ _SI_LABELS = [
 ]
 
 
+def first_reference(text: str) -> Optional[str]:
+    """§0 (R1): **أوّل** رقم إشاريّ (Axxxx/SIxxxx) في النصّ الخام — مستقلّ تمامًا عن نجاح التفكيك.
+
+    مرساة الربط المُلزِمة: حادثة X1567 (2026-07-20) — رسالةٌ حوالةٍ كاملةٍ تحمل مرجعها في سطرها
+    الأوّل فشل تفكيكها فصُنّفت noise، فرُبطت بأقدم صفقة معلّقة (X1566) وابتُلعت. المرجع كان في
+    النصّ ولم يُقرأ قطّ لأنّ كل قارئ للمرجع كان يقرأه من **ناتج التفكيك** لا من النصّ.
+    من هنا: تُقرأ من `raw.text` مباشرةً، فلا يُسقِط فشلُ التفكيك المرجعَ معه."""
+    for tok in re.split(r"[\s/]+", (text or "").strip()):
+        if tok:
+            ref = _match_reference(tok)
+            if ref:
+                return ref
+    return None
+
+
 def _has_reference(text: str) -> bool:
     """§0: هل يحمل النصّ رقمًا إشاريًا (Axxxx/SIxxxx) كرمز مستقلّ؟ — مرساة معاملة قاطعة."""
-    return any(
-        _match_reference(tok)
-        for tok in re.split(r"[\s/]+", (text or "").strip())
-        if tok
-    )
+    return first_reference(text) is not None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
