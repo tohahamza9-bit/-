@@ -162,10 +162,16 @@ def parse_message(
     text: str,
     treasuries: list[TreasuryRecord],
     suppliers: list[SupplierRecord],
+    corrections: "list | None" = None,
 ) -> ParseResult:
-    """يفكّك رسالة المركزية إلى ParseResult (§3، §5، §7.2، §10)."""
+    """يفكّك رسالة المركزية إلى ParseResult (§3، §5، §7.2، §10).
+
+    `corrections` (قاموس التصحيحات الحيّ): تُطبَّق **قبل أيّ استخراج** فيغلب الديناميّ الثابت."""
     if not text or not text.strip():
         return ParseResult(kind="noise", reason="رسالة فارغة", confidence=1.0)
+    if corrections:
+        from core.corrections import apply_corrections   # استيراد مؤجَّل (تفادي دورة الحزمة)
+        text, _fired = apply_corrections(text, corrections)
     text = normalize_digits(text)          # أرقام عربية-هندية → لاتينية قبل أي استخراج (§3.5)
     text, alf_expansions = expand_alf_amounts(text)   # «32 ألف»→32000 + سجلّ التوسّع للتنبيه (§3.5)
 
@@ -918,6 +924,7 @@ def _strip_phone_tokens(ln: str) -> str:
 
 def parse_completion_fragment(
     text: str, treasuries: list[TreasuryRecord], suppliers: list[SupplierRecord],
+    corrections: "list | None" = None,
 ) -> ParsedLeg:
     """يحلّل الرسالة الثانية (completion_fragment §7.3) بـ **pattern-fishing**: تفتيش كامل النصّ
     عن الأنماط بلا اعتماد على ترتيب الأسطر — أمتن للصيغ المتنوّعة من التحليل سطرًا-بسطر.
@@ -927,6 +934,9 @@ def parse_completion_fragment(
     (resolve_treasury التامّة)، الهاتف، والعملة. وكلّ ما لا يُطابِق (فودافون كاش/بنك/…) يُتجاهَل.
     """
     # «/» فاصل مقاطع كالسطر الجديد — رسالة ثانية على سطر واحد («… / طه 5.90») تُفكَّك سليمة
+    if corrections:
+        from core.corrections import apply_corrections   # استيراد مؤجَّل (تفادي دورة الحزمة)
+        text, _fired = apply_corrections(text or "", corrections)
     text = normalize_digits(text or "")     # أرقام عربية-هندية → لاتينية (§3.5)
     lines = [ln.strip() for ln in text.replace("/", "\n").splitlines() if ln.strip()]
     currency: Optional[Currency] = None

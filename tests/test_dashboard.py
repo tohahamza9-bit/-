@@ -807,3 +807,71 @@ async def test_bridge_control_disabled_without_token(db):
     async with _client(db, settings=_settings(bridge_control_token="")) as ac:
         body = (await ac.get("/api/system/bridge-control")).json()
         assert body["enabled"] is False
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# قاموس التصحيحات الحيّ — CRUD + بوابة المدير + الحفظ من الانتباه
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_corrections_crud_manager(db):
+    """إضافة/عرض/بحث/إيقاف/حذف — كلّها للمدير، تسري فورًا."""
+    pytest.importorskip("fastapi")
+    async with _client(db) as ac:
+        # إضافة (201)
+        r = await ac.post("/api/corrections", json={
+            "wrong_text": "فودا", "correct_value": "فودافون", "field_type": "channel"})
+        assert r.status_code == 201, r.text
+        assert r.json()["created_by"] == "admin"       # منسوبٌ للفاعل
+        # عرض
+        rows = (await ac.get("/api/corrections")).json()
+        assert any(c["wrong_text"] == "فودا" for c in rows)
+        # بحث
+        assert len((await ac.get("/api/corrections?q=فود")).json()) == 1
+        assert (await ac.get("/api/corrections?q=لاشيء")).json() == []
+        # إيقاف ثم تفعيل
+        assert (await ac.post("/api/corrections/disable", json={"wrong_text": "فودا"})).status_code == 200
+        assert not (await db.corrections.all_active())      # موقوف → خارج all_active
+        assert (await ac.post("/api/corrections/enable", json={"wrong_text": "فودا"})).status_code == 200
+        # حذف حقيقيّ
+        assert (await ac.request("DELETE", "/api/corrections", json={"wrong_text": "فودا"})).status_code == 200
+        assert (await ac.get("/api/corrections")).json() == []
+
+
+async def test_corrections_write_requires_manager(db):
+    """المراجع/المجهول لا يكتبان في القاموس (إدارة حسّاسة = مدير فقط)."""
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    async with _anon_client(db) as ac:
+        assert (await ac.post("/api/corrections", json={
+            "wrong_text": "x", "correct_value": "y", "field_type": "channel"})).status_code == 401
+    async with _client(db, Role.REVIEWER, username="rev") as ac:
+        assert (await ac.post("/api/corrections", json={
+            "wrong_text": "x", "correct_value": "y", "field_type": "channel"})).status_code == 403
+
+
+async def test_corrections_bad_field_type_rejected(db):
+    """نوعٌ خارج (channel/treasury/supplier/customer) → 422 (تحقّق pydantic)."""
+    pytest.importorskip("fastapi")
+    async with _client(db) as ac:
+        assert (await ac.post("/api/corrections", json={
+            "wrong_text": "x", "correct_value": "y", "field_type": "bogus"})).status_code == 422
+
+
+async def test_correction_saved_from_dashboard_is_live_in_parser(db):
+    """تصحيحٌ حُفظ من اللوحة يسري فورًا على تفكيك رسالةٍ تالية (بلا إعادة تشغيل)."""
+    pytest.importorskip("fastapi")
+    from core.parsing import parse_message
+    async with _client(db) as ac:
+        await ac.post("/api/corrections", json={
+            "wrong_text": "محموذ", "correct_value": "محمود", "field_type": "treasury"})
+    corr = await db.corrections.all_active()
+    tre, sup = await db.treasuries.all_active(), await db.suppliers.all_active()
+    r = parse_message("X9\n0917133939\nامين\nصفاقس\n3795دت\nمحموذ", tre, sup, corr)
+    assert r.leg is not None and r.leg.treasury is not None and "محمود" in r.leg.treasury.name
+
+
+async def test_corrections_page_served(db):
+    """صفحة /corrections تُخدَم (HTML)."""
+    pytest.importorskip("fastapi")
+    async with _anon_client(db) as ac:
+        r = await ac.get("/corrections")
+        assert r.status_code == 200 and "قاموس التصحيحات" in r.text

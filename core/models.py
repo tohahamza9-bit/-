@@ -289,6 +289,25 @@ class EntityAlias(BaseModel):
     active: bool = True                          # إيقاف بلا حذف (§13)
 
 
+class CorrectionRecord(BaseModel):
+    """قاموس التصحيحات الحيّ — تصحيحٌ نصّيّ يسري **فورًا بلا إعادة تشغيل** (يُقرأ لكل رسالة).
+
+    الدلالة: كلّما ظهر `wrong_text` كرمزٍ مستقلٍّ في نصّ رسالةٍ، يُستبدَل بـ`correct_value` **قبل**
+    أيّ حلٍّ (الديناميّ يغلب الثابت دائمًا: الرمز الخاطئ يزول قبل أن يصل الـaliases/الكاشف).
+    مثال: wrong_text=«فودا» correct_value=«فودافون» field_type=«channel».
+
+    `field_type` (channel/treasury/supplier/customer) وصفيّ للفهرسة والبحث في اللوحة؛ الاستبدال
+    نفسه على مستوى الرمز، فلا يكسر كلمةً أطول (مطابقة رمزٍ كامل لا سلسلة جزئيّة). المفتاح المنطقيّ
+    (wrong_text مطبَّعًا) فريدٌ — تصحيحان بنفس الرمز الخاطئ = التباسٌ يُتخطّى (لا تخمين §0)."""
+    field_type: str                              # channel | treasury | supplier | customer
+    wrong_text: str                              # الرمز كما يرد خطأً
+    correct_value: str                           # ما يجب أن يُستبدَل به
+    active: bool = True                          # إيقاف بلا حذف (§13)
+    created_by: str = "system"                   # مستخدم اللوحة أو "attention" (زر الحفظ التلقائيّ)
+    created_at: Optional[datetime] = None
+    times_used: int = 0                          # كم مرّة أطلق الاستبدال فعليًّا (رصد أثر)
+
+
 class EmployeeRecord(BaseModel):
     """موظف معتمد — «تم»/الإلغاء تُقبل منه فقط (§8.3 §10 §13)."""
     whatsapp_number: str

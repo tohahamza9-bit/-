@@ -56,6 +56,7 @@ from .parsing import (
     parse_completion_fragment,
     parse_message,
 )
+from .corrections import apply_corrections
 from .ai_context import build_sender_context
 from .ai_understanding import (
     OpenRouterClient, _num_in_text, apply_text_corrections, join_pair, validate_corrections,
@@ -1163,7 +1164,16 @@ class Pipeline:
         # الفهم (§3-§5)
         treasuries = await self.db.treasuries.all_active()
         suppliers = await self.db.suppliers.all_active()
-        result = parse_message(raw.text, treasuries, suppliers)
+        # قاموس التصحيحات الحيّ (يُقرأ لكل رسالة — حيّ بلا إعادة تشغيل): استبدالٌ نصّيّ **قبل** أيّ
+        #   حلٍّ فيغلب الديناميّ الثابت. يُمرَّر لمسارات التفكيك (parse_message + الرسالة الثانية)
+        #   فتُطبِّقه داخلها. المسحة هنا **للرصد فقط** (times_used) — نلتقط ما سيُطلَق ونزيد عدّاده.
+        corrections = await self.db.corrections.all_active()
+        if corrections:
+            _corr_fired = apply_corrections(raw.text or "", corrections)[1]
+            if _corr_fired:
+                await self.db.corrections.bump_usage(_corr_fired)
+                log.info("(قاموس التصحيحات) طُبِّق على %s: %s", raw.message_key, _corr_fired)
+        result = parse_message(raw.text, treasuries, suppliers, corrections)
 
         # ═══ (طبقة الفهم الذكي — توسعة: الرسالة الأولى الفاشلة تفكيكًا، م: X1325) ═══
         # رسالةٌ تحمل مرجعًا لكن التفكيك أخفق ⇒ مصيرها التصعيد حتمًا (لا صفقة تُنشَأ، وتكملتها
@@ -1254,7 +1264,7 @@ class Pipeline:
                 target = await self.queue.waiting_by_reference(raw.chat_jid, txt_ref, now)
                 _link_reason = "مرجع" if target is not None else "رفض — مرجع بلا مطابقة"
             else:                                          # الطبقة ٢ — FIFO لنفس المُرسِل (حسب نوع الرسالة)
-                frag2 = parse_completion_fragment(raw.text, treasuries, suppliers)
+                frag2 = parse_completion_fragment(raw.text, treasuries, suppliers, corrections)
                 target = await self.queue.oldest_waiting_for_sender(
                     raw.chat_jid, raw.sender_jid, now, frag2, message_key=raw.message_key)
                 _link_reason = "FIFO مُرسِل"
@@ -1356,7 +1366,7 @@ class Pipeline:
             if is_completion_fragment(result.leg):
                 # 🔴 الرسالة الثانية تُعاد قراءتها بـ pattern-fishing (لا سطرًا-بسطر) — أمتن
                 #    للصيغ المتنوّعة (الكود آخر السطر، السعر بسطر مستقلّ…) — تلتقط كود/اسم/سعر/خزينة.
-                frag = parse_completion_fragment(raw.text, treasuries, suppliers)
+                frag = parse_completion_fragment(raw.text, treasuries, suppliers, corrections)
                 frag.sender_jid = raw.sender_jid          # مُرسِل الرد (لربطه بصفقة نفس المُرسِل §7.3)
                 frag.source_message_key = raw.message_key
                 # ربط حتميّ (§7.3، بلا تجاور/تصعيد): مرجع صريح → بالمرجع؛ وإلا → أقدم صفقة مطابِقة FIFO
@@ -1370,7 +1380,7 @@ class Pipeline:
             #    تُربَط بأقدمها بغضّ النظر عن نجاح الحل (لا سقوط صامت). ما انحلّ يُطبَّق؛ ما بقي ناقصًا
             #    يُصعَّد برسالة إلزامية مربوطة بمرجع الصفقة (اسم غير معروف: <حرفيًّا>) — روح 08adce8 للربط كلّه.
             if raw.sender_jid:
-                frag2 = parse_completion_fragment(raw.text, treasuries, suppliers)
+                frag2 = parse_completion_fragment(raw.text, treasuries, suppliers, corrections)
                 merged = None
                 # (R1+R2) هذا هو مسار حادثتَي 2026-07-20 بالضبط: كان يُلصِق الرسالة بأقدم معلّقة
                 #   بلا قراءة مرجع (X1567→X1566) وبلا فحص محتوى (تكملة X1571→X1568). الآن:

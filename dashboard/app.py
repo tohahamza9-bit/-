@@ -30,6 +30,7 @@ from core.db import Database, utcnow
 from core.logging_setup import get_logger
 from core.models import (
     BotControl,
+    CorrectionRecord,
     DetectionConfig,
     EmployeeRecord,
     EntityAlias,
@@ -110,6 +111,19 @@ class AliasPushIn(BaseModel):
 class CancellationModeIn(BaseModel):
     """وضع قرار الإلغاء/التعديل على COMPLETED (§10)."""
     mode: str = Field(..., pattern="^(immediate|sql_required|manual)$")
+
+
+class CorrectionIn(BaseModel):
+    """قاموس التصحيحات الحيّ — إضافة/تعديل (upsert على wrong_text المطبَّع)."""
+    field_type: str = Field(..., pattern="^(channel|treasury|supplier|customer)$")
+    wrong_text: str = Field(..., min_length=1)
+    correct_value: str = Field(..., min_length=1)
+    active: bool = True
+
+
+class CorrectionKeyIn(BaseModel):
+    """مفتاح تصحيح (wrong_text) — للحذف."""
+    wrong_text: str = Field(..., min_length=1)
 
 
 class RoomClassifyIn(BaseModel):
@@ -994,6 +1008,52 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         await _notify_owner(_owner_text("كيان", "تفعيل", body.alias, body.entity_type.value))
         return {"alias": body.alias, "entity_type": body.entity_type.value, "active": True}
 
+    # ── قاموس التصحيحات الحيّ — عرض/بحث/إضافة/حذف (يسري فورًا بلا إعادة تشغيل) ──
+    @router.get("/corrections", dependencies=[reader])
+    async def list_corrections(q: Optional[str] = None) -> list[dict]:
+        """كل التصحيحات (نشطة وموقوفة)؛ `q` يبحث في wrong_text/correct_value."""
+        return await db.corrections.list_all(q)
+
+    @router.post("/corrections", status_code=status.HTTP_201_CREATED)
+    async def add_correction(body: CorrectionIn,
+                             actor: UserRecord = Depends(require_manager_audited)) -> dict:
+        """إضافة/تعديل تصحيح (upsert على wrong_text المطبَّع). يسري على الرسالة التالية فورًا."""
+        rec = CorrectionRecord(created_by=actor.username, created_at=utcnow(), **body.model_dump())
+        await db.corrections.upsert(rec)
+        log.info("تصحيح محدّث: «%s» → «%s» (%s) بواسطة %s",
+                 rec.wrong_text, rec.correct_value, rec.field_type, actor.username)
+        await _notify_owner(_owner_text("تصحيح", "إضافة/تعديل",
+                                        f"{rec.wrong_text}→{rec.correct_value}", rec.field_type))
+        return rec.model_dump(mode="json")
+
+    @router.post("/corrections/disable", dependencies=[manager])
+    async def disable_correction(body: CorrectionKeyIn) -> dict:
+        """إيقاف تصحيح (active=false) — بلا حذف، للتعطيل المؤقّت."""
+        res = await db.corrections.col.update_one(
+            {"_norm": db.corrections._key(body.wrong_text)}, {"$set": {"active": False}})
+        if res.matched_count == 0:
+            raise HTTPException(status_code=404, detail=f"تصحيح غير موجود: {body.wrong_text}")
+        return {"wrong_text": body.wrong_text, "active": False}
+
+    @router.post("/corrections/enable", dependencies=[manager])
+    async def enable_correction(body: CorrectionKeyIn) -> dict:
+        """تفعيل تصحيح موقوف (active=true)."""
+        res = await db.corrections.col.update_one(
+            {"_norm": db.corrections._key(body.wrong_text)}, {"$set": {"active": True}})
+        if res.matched_count == 0:
+            raise HTTPException(status_code=404, detail=f"تصحيح غير موجود: {body.wrong_text}")
+        return {"wrong_text": body.wrong_text, "active": True}
+
+    @router.delete("/corrections", dependencies=[manager])
+    async def delete_correction(body: CorrectionKeyIn) -> dict:
+        """حذفٌ حقيقيّ من القاموس (بخلاف الخزائن — هذا قاموسٌ حيّ، الخطأ يزول لا يُعطَّل)."""
+        n = await db.corrections.delete(body.wrong_text)
+        if n == 0:
+            raise HTTPException(status_code=404, detail=f"تصحيح غير موجود: {body.wrong_text}")
+        log.info("تصحيح محذوف: «%s»", body.wrong_text)
+        await _notify_owner(_owner_text("تصحيح", "حذف", body.wrong_text))
+        return {"wrong_text": body.wrong_text, "deleted": True}
+
     # ── تاريخ الأسعار (FX §15) — قراءة فقط لعرض اللقطات في اللوحة ──────────────
     @router.get("/fx-rates/history", dependencies=[reader])
     async def fx_rates_history(currency: Optional[str] = None, limit: int = 50) -> list[dict]:
@@ -1090,6 +1150,11 @@ def create_app(db: Database, settings: Optional[Settings] = None) -> FastAPI:
     async def entity_aliases_page() -> FileResponse:
         """صفحة إدارة الكيانات الموحّدة (§4)."""
         return FileResponse(str(STATIC_DIR / "entity_aliases.html"), headers=_HTML_NOCACHE)
+
+    @app.get("/corrections")
+    async def corrections_page() -> FileResponse:
+        """قاموس التصحيحات الحيّ (مدير فقط) — عرض/بحث/إضافة/حذف؛ يسري فورًا بلا إعادة تشغيل."""
+        return FileResponse(str(STATIC_DIR / "corrections.html"), headers=_HTML_NOCACHE)
 
     @app.get("/settings")
     async def settings_page() -> FileResponse:

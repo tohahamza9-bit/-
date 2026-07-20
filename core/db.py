@@ -27,6 +27,7 @@ from .logging_setup import get_logger
 from .models import (
     AuthEventRecord,
     BotControl,
+    CorrectionRecord,
     DashboardReview,
     DetectionConfig,
     Deal,
@@ -447,6 +448,60 @@ class PaymentChannelListRepo(_Repo):
         for s in seed:
             doc = {"active": True, "aliases": [], **s}
             await self.col.update_one({"name": doc["name"]}, {"$setOnInsert": doc}, upsert=True)
+
+
+class CorrectionsListRepo(_Repo):
+    """قاموس التصحيحات الحيّ — نمط PaymentChannelListRepo. المفتاح wrong_text (مطبَّعًا).
+
+    يُقرأ لكل رسالة عبر all_active (حيّ بلا إعادة تشغيل، كـtreasuries §4.5)، فيسري التصحيح فورًا.
+    بخلاف قوائم الخزائن/الموردين (إيقاف بلا حذف §13) هذا **قاموسٌ حيّ** يقبل الحذف الحقيقيّ:
+    تصحيحٌ خاطئ يجب أن يزول لا أن يبقى معطَّلًا (طلب المالك صراحةً: عرض/بحث/حذف/إضافة)."""
+
+    @staticmethod
+    def _key(wrong_text: str) -> str:
+        """مفتاح المطابقة: مطبَّعٌ عربيًّا (نفس دالّة الحلّ) كي يُطابق «فودا» بصرف النظر عن التشكيل."""
+        from .parsing.normalize import normalize_ar
+        return normalize_ar(wrong_text)
+
+    async def upsert(self, rec: CorrectionRecord) -> None:
+        """إضافة/تعديل تصحيح (upsert على wrong_text المطبَّع). يحفظ created_at عند أوّل إدراج."""
+        payload = self._dump(rec)
+        payload["_norm"] = self._key(rec.wrong_text)         # مفتاح استعلام متّسق
+        await self.col.update_one(
+            {"_norm": payload["_norm"]},
+            {"$set": {k: v for k, v in payload.items() if k not in ("created_at", "times_used")},
+             "$setOnInsert": {"created_at": rec.created_at or utcnow(), "times_used": 0}},
+            upsert=True,
+        )
+
+    async def all_active(self) -> list[CorrectionRecord]:
+        cur = self.col.find({"active": True})
+        return [CorrectionRecord(**{k: v for k, v in d.items() if k not in ("_id", "_norm")})
+                async for d in cur]
+
+    async def list_all(self, query: Optional[str] = None) -> list[dict]:
+        """كل التصحيحات (نشطة وموقوفة) — للّوحة. `query` يبحث في wrong_text/correct_value."""
+        filt: dict = {}
+        if query and query.strip():
+            rx = re.escape(query.strip())
+            filt = {"$or": [{"wrong_text": {"$regex": rx}}, {"correct_value": {"$regex": rx}},
+                            {"_norm": {"$regex": re.escape(self._key(query))}}]}
+        out: list[dict] = []
+        async for d in self.col.find(filt).sort("created_at", -1):
+            d.pop("_id", None)
+            d.pop("_norm", None)
+            out.append(d)
+        return out
+
+    async def delete(self, wrong_text: str) -> int:
+        """حذفٌ حقيقيّ بالمفتاح المطبَّع (يُرجع عدد المحذوف)."""
+        res = await self.col.delete_one({"_norm": self._key(wrong_text)})
+        return res.deleted_count
+
+    async def bump_usage(self, wrong_texts: list[str]) -> None:
+        """يزيد times_used للتصحيحات التي أطلقت الاستبدال فعليًّا (رصد الأثر، best-effort)."""
+        for wt in wrong_texts:
+            await self.col.update_one({"_norm": self._key(wt)}, {"$inc": {"times_used": 1}})
 
 
 class EntityAliasRepo(_Repo):
@@ -1098,6 +1153,8 @@ class Database:
         self.treasuries = TreasuryListRepo(self.mdb, "treasuries", "name")
         self.suppliers = SupplierListRepo(self.mdb, "suppliers", "name")
         self.payment_channels = PaymentChannelListRepo(self.mdb, "payment_channels", "name")
+        # قاموس التصحيحات الحيّ — يُقرأ لكل رسالة (حيّ بلا إعادة تشغيل). المفتاح wrong_text المطبَّع.
+        self.corrections = CorrectionsListRepo(self.mdb, "corrections", "_norm")
         # نظام الأسعار (§4): الكيانات الموحّدة — مجموعة مستقلّة عن إملاءات الخزائن/الموردين
         self.entity_aliases = EntityAliasRepo(self.mdb, "entity_aliases", "alias")
         self.employees = EmployeeListRepo(self.mdb, "employees", "whatsapp_number")
@@ -1155,6 +1212,8 @@ class Database:
         await self.outgoing.col.create_index("sent_at", expireAfterSeconds=300, name="ttl_sent_at")
         await self.employees.col.create_index("whatsapp_number", unique=True)
         await self.payment_channels.col.create_index("name", unique=True)
+        # قاموس التصحيحات: المفتاح الفريد wrong_text المطبَّع (لا تصحيحان بنفس الرمز الخاطئ §0).
+        await self.corrections.col.create_index("_norm", unique=True)
         # خانات المُرسِل (§7.3): خانة واحدة مفتوحة لكل (غرفة|مُرسِل) + TTL على expires_at.
         # TTL بلا partialFilter (قيد Mongo) — لكن الخانة مشتقّة فحذفها التلقائي غير ضارّ.
         await self.sender_slots.col.create_index("slot_key", unique=True)

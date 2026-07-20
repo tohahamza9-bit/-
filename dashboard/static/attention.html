@@ -59,6 +59,17 @@
   .tl { border-inline-start:2px solid var(--line); margin:10px 0; padding-inline-start:14px; }
   .ev { margin-bottom:12px; } .ev .t { font-size:12px; color:var(--muted); }
   .ev .k { font-size:12px; font-weight:700; padding:1px 8px; border-radius:999px; background:var(--chip); }
+  .corr-box { margin-top:14px; padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--bg); }
+  .corr-box .k { font-size:12px; font-weight:700; padding:1px 8px; border-radius:999px; background:var(--chip); }
+  .corr-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:6px; font-size:14px; }
+  .corr-row code { background:var(--chip); padding:1px 7px; border-radius:6px; }
+  .corr-row .ft { font-size:12px; font-weight:700; padding:1px 8px; border-radius:999px;
+                  background:rgba(59,130,246,.13); color:var(--accent); }
+  .corr-row input, .corr-row select { font-family:inherit; font-size:13px; padding:6px 8px;
+                  border-radius:7px; border:1px solid var(--line); background:var(--card); color:var(--txt); }
+  .corr-row button { font-family:inherit; font-size:13px; padding:6px 12px; border-radius:7px;
+                  border:1px solid var(--ok); background:transparent; color:var(--ok); cursor:pointer; }
+  .corr-row button.ghost { border-color:var(--line); color:var(--txt); }
 </style>
 </head>
 <body>
@@ -172,7 +183,46 @@ function renderTimeline(tl){
   return `<div class="top"><h2 style="margin:0;font-size:17px">حوالة <span class="mono">${esc(d.deal_id)}</span></h2>
       <button class="ghost" onclick="$('detail').style.display='none'">إغلاق ✕</button></div>
     <div class="meta">المرجع ${esc(d.reference_number||"—")} · ${esc(d.customer_name||"—")} · ${esc(d.phone||"—")} · الحالة ${esc(d.status)}</div>
-    <div class="tl">${ev||"<span class='meta'>لا أحداث</span>"}</div>`;
+    <div class="tl">${ev||"<span class='meta'>لا أحداث</span>"}</div>
+    ${correctionsBox(tl)}`;
+}
+
+// ── قاموس التصحيحات: زرّ «✓ صحيح — احفظ التصحيح» على تصعيدات الذكاء (مدير فقط) ──
+const CFT_AR = { channel:"قناة دفع", treasury:"خزينة", supplier:"مورد", customer:"زبون" };
+function correctionsBox(tl){
+  if (ROLE!=="manager") return "";                       // إدارة القاموس للمدير وحده
+  const pairs = tl.ai_corrections || [];
+  // اقتراحات الذكاء الجاهزة (حفظٌ بنقرة، بلا كتابة) — أزواج «خطأ→صحيح» مستخرَجة من deviation_log.
+  const suggested = pairs.map((p,i)=>`
+    <div class="corr-row">
+      <code>${esc(p.wrong_text)}</code> → <code>${esc(p.correct_value)}</code>
+      <span class="ft">${esc(CFT_AR[p.field_type]||p.field_type)}</span>
+      <button onclick='saveCorrection(${JSON.stringify(p).replace(/'/g,"&#39;")})'>✓ صحيح — احفظ التصحيح</button>
+    </div>`).join("");
+  // إضافةٌ يدويّة (حين لا يقترح الذكاء): يختار المدير الرمز الخاطئ ونوعه.
+  const manual = `
+    <div class="corr-row" style="margin-top:8px">
+      <input id="c_wrong" placeholder="النصّ الخاطئ" style="width:130px">→
+      <input id="c_correct" placeholder="الصحيح" style="width:130px">
+      <select id="c_type">
+        <option value="channel">قناة</option><option value="treasury">خزينة</option>
+        <option value="supplier">مورد</option><option value="customer">زبون</option>
+      </select>
+      <button class="ghost" onclick="saveCorrectionManual()">＋ احفظ</button>
+    </div>`;
+  return `<div class="corr-box">
+    <div class="k" style="margin-bottom:6px">قاموس التصحيحات — يسري فورًا بلا إعادة تشغيل</div>
+    ${suggested || `<span class="meta">لا اقتراح جاهز من الذكاء لهذه الحوالة — أضِفه يدويًّا:</span>`}
+    ${manual}</div>`;
+}
+async function saveCorrection(p){
+  try{ await api("/corrections","POST",p); toast(`حُفظ التصحيح «${p.wrong_text}»→«${p.correct_value}» ✓`); }catch(e){}
+}
+async function saveCorrectionManual(){
+  const wrong=($("c_wrong").value||"").trim(), correct=($("c_correct").value||"").trim();
+  if(!wrong||!correct){ toast("النصّ الخاطئ والصحيح مطلوبان"); return; }
+  await saveCorrection({ wrong_text:wrong, correct_value:correct, field_type:$("c_type").value });
+  $("c_wrong").value=""; $("c_correct").value="";
 }
 
 const ROLE_AR={manager:"مدير",reviewer:"مراجع",data_entry:"مُدخل بيانات"};

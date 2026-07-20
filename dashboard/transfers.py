@@ -105,6 +105,34 @@ def _resolved_by(leg: dict) -> Optional[str]:
     return None
 
 
+def _ai_correction_pairs(deal: dict) -> list[dict]:
+    """أزواج «خطأ→صحيح» النظيفة من deviation_log لملء زرّ «احفظ التصحيح» تلقائيًّا (بلا كتابة).
+
+    نقتصر على مدخلات الذكاء ذات الرمز الخام + القيمة المحلولة (field=treasury/supplier،
+    method=ai/similarity): raw_value رمزٌ خاطئ فعليّ و extracted_value اسمٌ محلول. نستبعد
+    field=ai_first (raw_value فيه **سببٌ** لا رمزًا) وأيّ raw_value متعدّد الكلمات/طويل (جملة لا رمز).
+    يُرجِع [{wrong_text, correct_value, field_type}] مُزال التكرار."""
+    _FT = {"treasury": "treasury", "supplier": "supplier"}
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+    for side in ("sell_leg", "buy_leg"):
+        for dv in ((deal.get(side) or {}).get("deviation_log") or []):
+            ft = _FT.get(dv.get("field") or "")
+            if not ft or dv.get("method") not in ("ai", "similarity"):
+                continue
+            wrong = (dv.get("raw_value") or "").strip()
+            correct = (dv.get("extracted_value") or "").strip()
+            # رمزٌ لا جملة: كلمةٌ أو كلمتان، وليس سببًا («حوالة بلا خزينة…»).
+            if not wrong or not correct or wrong == correct or len(wrong.split()) > 2:
+                continue
+            k = (wrong, ft)
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append({"wrong_text": wrong, "correct_value": correct, "field_type": ft})
+    return out
+
+
 async def search_transfers(db: Database, q: str = "", limit: int = 50) -> list[dict]:
     """بحث فوريّ في أرشيف الحوالات بالمرجع/الهاتف/الاسم (أو الأحدث عند غياب الاستعلام)."""
     limit = max(1, min(int(limit or 50), 200))
@@ -210,6 +238,7 @@ async def get_timeline(db: Database, deal_id: str) -> Optional[dict]:
         "ledger": ledger,
         "cancellation": cancellation,
         "timeline": events,
+        "ai_corrections": _ai_correction_pairs(d),   # أزواج «خطأ→صحيح» لزرّ الحفظ التلقائيّ
         "review": ({"reviewed_by": review.reviewed_by, "reviewed_at": _iso(review.reviewed_at),
                     "note": review.note} if review else None),
     }

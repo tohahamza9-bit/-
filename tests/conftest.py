@@ -60,6 +60,7 @@ async def db():
             self.treasuries = dbmod.TreasuryListRepo(self.mdb, "treasuries", "name")
             self.suppliers = dbmod.SupplierListRepo(self.mdb, "suppliers", "name")
             self.payment_channels = dbmod.PaymentChannelListRepo(self.mdb, "payment_channels", "name")
+            self.corrections = dbmod.CorrectionsListRepo(self.mdb, "corrections", "_norm")
             self.entity_aliases = dbmod.EntityAliasRepo(self.mdb, "entity_aliases", "alias")
             self.employees = dbmod.EmployeeListRepo(self.mdb, "employees", "whatsapp_number")
             self.control = dbmod.ControlRepo(self.mdb, "bot_control", "_key")
