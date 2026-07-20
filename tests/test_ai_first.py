@@ -116,9 +116,20 @@ def test_glued_currency_is_clean_not_ambiguous():
 
 
 def test_nonstandard_currency_word_flags():
-    """«جنى» تحريف لـ«جنيه» وdetect_currency يفشل عليها → غموض."""
-    reasons = detect_pre("X1300\n5000 جنى", [_tre()], [_sup()])
+    """كلمة عملة يفشل عليها detect_currency → غموض.
+
+    كانت العيّنة «جنى»، وصارت تُحلّ حتميًّا بعد إضافة «جني» لـ_EGP_TOKENS (2026-07-20):
+    normalize_ar يردّ الألف المقصورة ياءً فتصير «جني». العيّنة الآن «جنا» — يلتقطها
+    _CURRENCY_HINT (`جن[ىيا](?!ه)`) ويعجز عنها detect_currency، فتبقى غامضةً فعلًا.
+    الحلّ الحتميّ أفضل من التصعيد: بلا نداء نموذج ولا انتظار."""
+    reasons = detect_pre("X1300\n5000 جنا", [_tre()], [_sup()])
     assert any("عملة غير معياريّة" in r for r in reasons)
+
+
+def test_geny_variants_resolve_deterministically_no_ambiguity():
+    """«جني»/«جنى» تُحلّان حتميًّا الآن ⇒ لا غموض ولا نداء ذكاء (X1478، X1567)."""
+    for token in ("جني", "جنى", "جنيه"):
+        assert detect_pre(f"X1300\n5000 {token}", [_tre()], [_sup()]) == [], token
 
 
 def test_recipient_name_colliding_with_treasury_flags():

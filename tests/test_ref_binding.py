@@ -227,13 +227,30 @@ async def test_own_ref_repeated_still_merges(db):
 
 
 async def test_ref_mismatch_is_logged_with_reason(db, caplog):
-    """(R3) قرار الربط يُسجَّل بسببه ومرشّحيه — فجوة الرصد مغلقة."""
+    """(R3) رفضُ الربط لاختلاف المرجع يُسجَّل بسببه ومرشّحيه — فجوة الرصد مغلقة.
+
+    يُستدعى المنتقي مباشرةً: بعد إضافة «جني» لـ_EGP_TOKENS صارت X1567 تُفكَّك حوالةً مستقلّةً
+    فتُنشئ صفقتها عبر المسار العاديّ ولا تبلغ مسار اليتيمة أصلًا — وهو الأفضل. فيبقى فحص
+    عقد التسجيل على المنتقي نفسه، حتميًّا، بلا اعتمادٍ على أيّ طريقٍ يسلكه الأنبوب."""
+    q = await _two_pending(db)
     with caplog.at_level(logging.INFO):
-        await _run_burst(_pipeline(db), [_X1566, _X1567])
+        cands = await q.pending_candidates_for_sender(
+            CENTRAL, S1, NOW + timedelta(seconds=5), "X1567", message_key="m1567")
+    assert cands == []
     links = [r.getMessage() for r in caplog.records if "[link]" in r.getMessage()]
     assert links, "لا سطر [link] واحد — قرارات الربط ما زالت غير مرصودة"
-    assert any("reason=rejected-ref-mismatch" in m for m in links), (
+    assert any("reason=rejected-ref-mismatch" in m and "text_ref=X1567" in m for m in links), (
         f"رفض المرجع لم يُسجَّل. المسجَّل: {links}")
+
+
+async def test_x1567_now_becomes_its_own_deal(db):
+    """أثر «جني» على حادثة X1567: تُفكَّك حوالةً مستقلّةً بدل أن تُصنَّف noise وتُبتلَع.
+
+    دفاعٌ في العمق: إلزام المرجع يمنع الابتلاع، وهذا يمنع بلوغَ ذلك المسار أصلًا."""
+    await _run_burst(_pipeline(db), [_X1566, _X1567])
+    by = await _deals_by_ref(db)
+    assert "X1567" in by, "X1567 ما زالت بلا صفقة"
+    assert (by["X1567"][0]["sell_leg"] or {}).get("amount") == 5800.0
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -282,3 +299,40 @@ async def test_pending_reply_same_sender_still_links(db):
     await db.deals.upsert(deal)
     assert await q._pull_pending_reply(deal, CENTRAL, NOW + timedelta(seconds=5)) is True
     assert deal.sell_leg.customer_code == "111"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (ز) «جني» بلا هاء — إملاءٌ أسقط حوالتين (X1478, X1567)
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_geny_without_haa_is_egp_amount(db):
+    """«مبلغ40.000 جني م» تُفكَّك حوالةً بمبلغ 40000 — نصّ X1478 حرفيًّا.
+
+    كان «جني» خارج _EGP_TOKENS فيفشل استخراج المبلغ، فتُصنَّف الرسالة «بلا بنية»
+    وتُصعَّد بلا صفقة (bot.log.1 @ 11:49:29)."""
+    from core.parsing import parse_message
+    tre, sup = await db.treasuries.all_active(), await db.suppliers.all_active()
+    res = parse_message(
+        "X1478\nفودافون\n01037703891\nمبلغ40.000 جني م\n825 عبد العاطي هروس 6.08", tre, sup)
+    assert res.kind == "transfer", "X1478 ما زالت تسقط noise"
+    assert res.leg.amount == 40000.0
+    assert res.leg.phone == "01037703891"
+
+
+async def test_geny_variants_all_parse(db):
+    """الإملاءات المتقاربة كلّها تُفكَّك — والسليمة لم تنكسر."""
+    from core.constants import Currency
+    from core.parsing import parse_message
+    tre, sup = await db.treasuries.all_active(), await db.suppliers.all_active()
+    for token in ("جني م", "جنيه م", "جنية م", "مصري"):
+        res = parse_message(f"X9\nفودافون\n01037703891\nمبلغ40.000 {token}\n825 اسم 6.08", tre, sup)
+        assert res.kind == "transfer" and res.leg.amount == 40000.0, token
+        assert res.leg.currency == Currency.EGP, token
+
+
+async def test_geny_does_not_swallow_tnd(db):
+    """الإضافة لا تُلوّث التونسي: «دت» تبقى TND."""
+    from core.constants import Currency
+    from core.parsing import parse_message
+    tre, sup = await db.treasuries.all_active(), await db.suppliers.all_active()
+    res = parse_message("X9\n0917133939\nالمبلغ 800 دت\nصفاقس", tre, sup)
+    assert res.leg is not None and res.leg.currency == Currency.TND
