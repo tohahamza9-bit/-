@@ -63,6 +63,7 @@ from .ai_understanding import (
     validate_text_corrections, with_ephemeral_alias,
 )
 from .ambiguity import detect as detect_ambiguity
+from .ambiguity import treasury_role_conflict
 from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
 from .parsing.parser import _has_reference
@@ -401,6 +402,17 @@ class Pipeline:
         # 🔴 التحقّق الحتميّ (§3د) — الكود هو الحَكَم: كل كيان مسجَّل بمطابقة تامّة، وكل رقم
         #    موجود حرفيًّا في **النصّ المضموم** (أيّ من الرسالتين). لا استثناء لأيّ حقل.
         av = validate_proposal(prop, combined, treasuries, suppliers, threshold, require=())
+
+        # 🔴 حارس الدور (حادثة XI1321): خزينةٌ اشتُقّت من رمزٍ مستهلَك في دورٍ آخر تُرفض،
+        #    مهما بلغت ثقتها ومهما كانت مسجَّلة. التحقّق الحتميّ وحده لا يرى هذا الخطأ.
+        if av.ok and av.treasury is not None:
+            _tok = self._treasury_source_token(prop, av.treasury, combined)
+            _conflict = treasury_role_conflict(_tok, combined,
+                                               result.leg if result is not None else None)
+            if _conflict is not None:
+                av = type(av)(False, f"الرمز «{_tok}» مستهلَك في دور «{_conflict}» — "
+                                     f"لا يصلح خزينةً (حارس الدور، XI1321)")
+
         if not av.ok:
             await self.bus.notify_admin(
                 f"⚠️ حوالة غامضة ({verdict.as_note()}) — الذكاء اقترح ولم يجتز التحقّق: "
@@ -446,6 +458,33 @@ class Pipeline:
         log.info("(AI-first) طُبِّق على %s (سبب=%s، مزدوجة=%s، نموذج=%s)",
                  raw.message_key, verdict.as_note(), is_pair, prop.model)
         return res
+
+    @staticmethod
+    def _treasury_source_token(prop, rec, text: str) -> Optional[str]:
+        """الرمز في نصّ الرسالة الذي اشتُقّت منه الخزينة المقترحة — مدخل حارس الدور.
+
+        الأولويّة: تصحيحٌ صريح من النموذج (يحمل `raw` كما ورد)، وإلّا أوّل صيغة من صيغ
+        السجلّ (الاسم الرسميّ أو إملاء بديل) تظهر فعلًا في النصّ. None ⇒ لا رمز يمكن
+        نسبته (فلا يعمل الحارس، ويبقى التحقّق الحتميّ وحده).
+        """
+        from .parsing.resolve import normalize_arabic_for_matching as _nrm
+
+        items = (prop.data or {}).get("corrections")
+        if isinstance(items, list):
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                if (it.get("entity_type") or "").strip().lower() != "treasury":
+                    continue
+                raw_tok = (it.get("raw") or "").strip()
+                if raw_tok:
+                    return raw_tok
+        ntext = _nrm(text or "")
+        for form in [getattr(rec, "name", None)] + list(getattr(rec, "aliases", []) or []):
+            nf = _nrm(form or "")
+            if nf and nf in ntext:
+                return form
+        return None
 
     async def _ai_link_choice(self, raw: RawMessage, cands: list[Deal],
                               treasuries: list, suppliers: list, now: datetime):

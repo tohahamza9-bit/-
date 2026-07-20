@@ -218,6 +218,92 @@ async def test_ai_first_disabled_makes_no_call(db):
     assert ai.calls == []
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# حارس الدور — حادثة XI1321
+# ═════════════════════════════════════════════════════════════════════════════
+def test_role_guard_rejects_city_token_jerba():
+    """XI1321 حرفيًّا: «جربه» من سطر الموقع لا تصلح خزينةً مهما بلغت الثقة."""
+    from core.ambiguity import treasury_role_conflict
+    assert treasury_role_conflict("جربه", "A9151\nسلم الى سليمان\nجربه/ميدون\n1000دت") \
+        == "موقع/مدينة"
+
+
+def test_role_guard_rejects_region_token():
+    from core.ambiguity import treasury_role_conflict
+    assert treasury_role_conflict("تونس", "X1258\nتونس /بريد\nNizar\n470 تونسي") == "موقع/مدينة"
+
+
+def test_role_guard_rejects_customer_name_token():
+    """الرمز نفسه لا يكون زبونًا وخزينةً معًا."""
+    from core.ambiguity import treasury_role_conflict
+    leg = ParsedLeg(operation=OperationType.SELL, amount=100.0, customer_name="عزالدين")
+    assert treasury_role_conflict("عزالدين", "X1\nعزالدين\n100", leg) == "اسم المستلم"
+
+
+def test_role_guard_rejects_delivery_line_token():
+    from core.ambiguity import treasury_role_conflict
+    assert treasury_role_conflict(
+        "ميدون", "A9151\nسلم الى ميدون\n1000دت") == "سطر موقع/تسليم"
+
+
+@pytest.mark.parametrize("name", [
+    "صالح جربة تونس", "عصام سوسة", "فتحي جربة", "محمود صفاقس", "وليد تونس العاصمة",
+])
+def test_role_guard_allows_treasury_names_containing_cities(name):
+    """9 من 14 خزينة تحمل اسم مدينة **جزءًا من هويّتها** للتمييز. شرط «أيّ جزء موقع»
+    كان يرفضها كلّها حين يكتبها الموظّف كاملةً — تعطيلٌ لا حماية. الشرط «كلّها موقع»."""
+    from core.ambiguity import treasury_role_conflict
+    assert treasury_role_conflict(name, name) is None
+
+
+@pytest.mark.parametrize("tok", ["جربه", "جربة", "تونس", "مصر", "العاصمة", "تونس العاصمة"])
+def test_role_guard_rejects_pure_location_tokens(tok):
+    """موقعٌ خالص لا يصلح خزينةً — بما فيه المعرَّف بـ«ال» (التطبيع يُسقطها)."""
+    from core.ambiguity import treasury_role_conflict
+    assert treasury_role_conflict(tok, tok) == "موقع/مدينة"
+
+
+def test_role_guard_location_hint_needs_word_boundary():
+    """«حي» داخل «فتحي» ليست دلالة موقع — مطابقةٌ عرَضيّة على جزء كلمة."""
+    from core.ambiguity import treasury_role_conflict
+    assert treasury_role_conflict("فتحي جربة", "X1\nفتحي جربة\n100") is None
+
+
+def test_role_guard_allows_legitimate_treasury_token():
+    """خزينة حقيقيّة في سطرها الخاصّ → لا تعارض ⇒ تُقبل."""
+    from core.ambiguity import treasury_role_conflict
+    assert treasury_role_conflict("البراق", "X1300\n01234567890\n5000 ج.م\nالبراق") is None
+
+
+async def test_xi1321_treasury_from_location_line_is_rejected_end_to_end(db):
+    """المسار كاملًا: النموذج يقترح خزينةً **مسجَّلة** بثقة 1.0 مشتقّة من سطر الموقع
+    «جربه/ميدون» — تجتاز التحقّق الحتميّ (كيان مسجَّل + لا رقم مخترع) ومع ذلك
+    يجب أن يرفضها حارس الدور، فلا يُطبَّق شيء ويُصعَّد."""
+    await _enable(db)
+    tre_list = await db.treasuries.all_active()
+    jerba = next((t for t in tre_list if "جرب" in t.name), None)
+    if jerba is None:                      # لا خزينة جربة في البذرة → أنشئها
+        jerba = TreasuryRecord(code="29", name="صالح جربة تونس",
+                               type=TreasuryType.SELL_ONLY, aliases=[], active=True)
+        tre_list = list(tre_list) + [jerba]
+    bus = _RecBus()
+    ai = _FakeAi({
+        "treasury": jerba.name,
+        "corrections": [{"raw": "جربه", "entity_type": "treasury",
+                         "official": jerba.name, "confidence": 1.0}],
+        "confidence": {"treasury": 1.0},
+    })
+    p = _pipe(db, bus, ai)
+    sup = await db.suppliers.all_active()
+    text = "A9151\nسلم الى\nسليمان\nجربه/ميدون\n1000دت\n00218921999133"
+    raw = _raw("k-xi1321", text)
+    res = parse_message(text, tre_list, sup)
+    from core.ambiguity import detect as _d
+    out = await p._ai_first(raw, res, _d(text, res, tre_list, sup), tre_list, sup, None, NOW)
+    assert out is None, "خزينة من سطر الموقع كان يجب ألّا تُطبَّق"
+    assert any("حارس الدور" in m for m in bus.admin_msgs), bus.admin_msgs
+
+
 async def test_rejected_proposal_escalates_with_suggestion(db):
     """اقتراح لم يجتز التحقّق ⇒ لا يُطبَّق، ويُصعَّد مرفقًا به (§3و)."""
     await _enable(db)

@@ -28,7 +28,9 @@ from typing import Optional
 
 from core.models import ParseResult, SupplierRecord, TreasuryRecord
 from core.parsing.normalize import detect_currency, normalize_ar
-from core.parsing.resolve import resolve_supplier, resolve_treasury
+from core.parsing.resolve import (
+    _TN_CITIES, normalize_arabic_for_matching, resolve_supplier, resolve_treasury,
+)
 
 # جذور تدلّ على نيّة ذكر عملة بصيغة غير معياريّة (detect_currency يفشل عليها).
 # مغلقة عمدًا: كل جذر هنا رآه القياس فعلًا أو هو تحريف مباشر لرمز معياريّ.
@@ -102,6 +104,68 @@ def detect_post(result: Optional[ParseResult], *, min_confidence: float = 0.7) -
         reasons.append(f"ثقة تفكيك منخفضة ({float(result.confidence or 0.0):.2f})")
 
     return reasons
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (٣) حارس الدور — الرمز المستهلَك في دورٍ آخر لا يصلح خزينة (حادثة XI1321)
+# ═════════════════════════════════════════════════════════════════════════════
+# 🔴 لماذا هذا الحارس ضروريّ رغم التحقّق الحتميّ:
+#    في XI1321 اقترح النموذج خزينة «صالح جربة تونس» (كود 29) من سطر **الموقع**
+#    «جربه/ميدون» بثقة 1.0 — وكان سيضع المال في حساب آخر. ذلك الاقتراح **يجتاز**
+#    validate_proposal كاملًا: الكيان مسجَّل فعلًا (مطابقة تامّة تنجح)، والثقة فوق أيّ
+#    عتبة، ولا رقم مخترعًا. المدقّق يسأل «هل هذا كيان مسجَّل؟» لا «هل هذا **دوره** في
+#    هذه الرسالة؟» — فخطأ الدور من نوعٍ لا يراه.
+#    الحارس يسدّ ذلك: الرمز الذي اشتُقّت منه الخزينة يجب ألّا يكون مستهلَكًا في دورٍ آخر.
+
+# بلدان/مناطق ترد كسياق لا ككيان ماليّ.
+_REGIONS = {"مصر", "تونس", "ليبيا", "مصري", "تونسي", "ليبي"}
+
+# 🔴 المجموعة تُطبَّع بنفس دالّة المقارنة: `normalize_arabic_for_matching` تُسقِط أداة
+#    التعريف («العاصمه»→«عاصمه»)، فمقارنة المُطبَّع بالخام كانت تُفوّت المدن المعرَّفة.
+_LOC_NORM = {normalize_arabic_for_matching(w) for w in (_TN_CITIES | _REGIONS)}
+_LOC_NORM.discard("")
+
+# كلمات تدلّ على أن السطر سطرُ موقع/تسليم لا سطرُ خزينة.
+# 🔴 بحدود كلمات: بلا الحدّ كان «حي » يطابق داخل «فتـحي جربه» فيُرفض المورد «فتحي جربة»
+#    (كيان مسجَّل شرعيّ) — مطابقةٌ عرَضيّة على جزء كلمة، لا دلالة موقع.
+_LOCATION_HINT = re.compile(
+    r"(?:(?<![^\W\d_])|^)(?:سلم ال[يى]|تسليم|العنوان|الموقع|منطقه|مدينه|حي)"
+    r"(?:(?![^\W\d_])|$)"
+)
+
+
+def treasury_role_conflict(token: Optional[str], text: str, leg=None) -> Optional[str]:
+    """هل `token` (الرمز الذي اشتُقّت منه الخزينة) مستهلَك في دورٍ آخر؟
+
+    يُرجِع اسم الدور المتعارض (⇒ يُرفض الاقتراح) أو None (⇒ لا تعارض).
+
+    الأدوار المفحوصة: مدينة/بلد معروف، اسم المستلم المستخرَج، سطر موقع/تسليم.
+    """
+    q = normalize_arabic_for_matching(token or "")
+    if not q:
+        return None
+
+    # (١) الرمز **موقعٌ خالص**: كل أجزائه مدن/مناطق معروفة — «جربه» حالة XI1321 حرفيًّا.
+    #     🔴 «كلّها» لا «أيّها» عمدًا: 9 من 14 خزينة مسجَّلة تحمل اسم مدينة **جزءًا من
+    #     هويّتها** للتمييز («عصام سوسة»، «محمود صفاقس»، «صالح جربة تونس»). شرط «أيّ جزء»
+    #     كان سيرفض هذه الأسماء الشرعيّة حين يكتبها الموظّف كاملةً — تعطيلٌ لا حماية.
+    #     الفارق الدلاليّ: «جربه» وحدها موقع؛ «صالح جربة تونس» اسمُ كيانٍ مُقيَّدٌ بموقع.
+    parts = [p for p in q.split() if p]
+    if parts and all(p in _LOC_NORM for p in parts):
+        return "موقع/مدينة"
+
+    # (٢) اسم المستلم المستخرَج حتميًّا — الرمز نفسه لا يكون زبونًا وخزينةً معًا.
+    cname = normalize_arabic_for_matching(getattr(leg, "customer_name", None) or "")
+    if cname and (q == cname or q in cname.split()):
+        return "اسم المستلم"
+
+    # (٣) السطر الذي ورد فيه الرمز سطرُ موقع/تسليم صريح.
+    for line in (text or "").splitlines():
+        nline = normalize_arabic_for_matching(line)
+        if q and q in nline and _LOCATION_HINT.search(nline):
+            return "سطر موقع/تسليم"
+
+    return None
 
 
 def detect(text: str, result: Optional[ParseResult],
