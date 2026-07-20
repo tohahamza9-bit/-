@@ -20,7 +20,8 @@ def test_exact_name_and_alias_resolve():
     assert resolve_treasury("طلال", TREAS).code == "76"        # alias
     assert resolve_treasury("بلاس", TREAS).code == "74"        # alias
     assert resolve_treasury("بلاس فون", TREAS).code == "74"    # الاسم الكامل
-    assert resolve_treasury("صافي", TREAS).name == "صافي"      # الاسم
+    # «صافي» حُذفت من البذرة (2026-07-20): مؤشّر خصم لا خزينة — لا تُحلّ إطلاقًا.
+    assert resolve_treasury("صافي", TREAS) is None
 
 
 def test_misspelled_alias_resolves_fix4():
@@ -46,10 +47,9 @@ def test_khasm_1pct_resolves_by_name_and_aliases():
 def test_all_sell_and_buy_treasuries_present():
     # كل الخزائن الخارجية (sell_and_buy) موجودة في البذرة
     sab = {t.name: t for t in TREAS if t.type == TreasuryType.SELL_AND_BUY}
-    assert set(sab) == {"خصم 1%", "فودافون بالخصم", "صافي", "تونسي خارجي"}
+    assert set(sab) == {"خصم 1%", "فودافون بالخصم", "تونسي خارجي"}   # بلا «صافي» (حُذفت)
     assert sab["خصم 1%"].code == "72"                # الافتراضية لـ SI مع مورد
     assert sab["فودافون بالخصم"].code == "85"        # الافتراضية لطرف مورد حوالة A الثانية
-    assert sab["صافي"].code is None         # معلّق (ملحق ب-3)
     assert sab["تونسي خارجي"].code is None  # معلّق (ملحق ب-3)
 
 

@@ -304,8 +304,11 @@ async def test_si_supplier_keeps_customer_amounts_and_commission(db):
     assert leg.currency == Currency.EGP
 
 
-async def test_si_supplier_no_discount_defaults_saafi(db):
-    # بلا سطر «بعد الخصم» + مورد → خزينة sell_and_buy الافتراضية «صافي» (لا خصم)
+async def test_si_supplier_no_discount_has_no_treasury(db):
+    """بلا «بعد الخصم» + مورد ⇒ **بلا خزينة** (حُذفت «صافي» — قرار المالك 2026-07-20).
+
+    كانت تُسنَد «صافي» بلا كود، وخزينةٌ بلا كود لا تُكتَب في MONEYADO أصلًا؛ فالنتيجة صفقةٌ
+    تبدو محسومةً وهي عالقة. الآن تبقى بلا خزينة فتُصعَّد صراحةً."""
     text = (
         "رقم العملية: SI1500\nرقم المستلم: 01037354643\n"
         "اسم الزبون: 570 ايهاب ابو حميد\n"
@@ -314,9 +317,7 @@ async def test_si_supplier_no_discount_defaults_saafi(db):
     )
     leg = parse_message(text, await _treas(db), await _suppliers(db)).leg
     assert leg.supplier is not None and leg.supplier.name == "طه"
-    assert leg.treasury is not None
-    assert leg.treasury.type == TreasuryType.SELL_AND_BUY
-    assert leg.treasury.name == "صافي"
+    assert leg.treasury is None
     assert leg.amount_after_discount is None
 
 
@@ -366,8 +367,10 @@ async def test_si_after_only_uses_after_as_amount(db):
     assert leg.treasury is not None and leg.treasury.name == "بلاس فون"
 
 
-async def test_si_after_only_with_supplier_defaults_saafi(db):
-    # «بعد» فقط + مورد بلا «الخزينة» → المبلغ=بعد، خزينة sell_and_buy الافتراضية «صافي» (لا خصم محسوب)
+async def test_si_after_only_with_supplier_has_no_treasury(db):
+    """«بعد» فقط + مورد بلا «الخزينة» ⇒ المبلغ=بعد، و**بلا خزينة** (حُذفت «صافي»).
+
+    ولا «خصم 1%» أيضًا: بلا «قبل» لا فرقَ خصمٍ يُحسَب."""
     text = (
         "رقم العملية: SI1417\nاسم الزبون: 570 ايهاب ابو حميد\n"
         "القيمة بعد الخصم 1%: 20271 ج.م\nالسعر: 5.9\n"
@@ -377,6 +380,4 @@ async def test_si_after_only_with_supplier_defaults_saafi(db):
     assert leg.amount == 20271
     assert leg.amount_after_discount is None
     assert leg.supplier is not None and leg.supplier.name == "طه"
-    assert leg.treasury is not None
-    assert leg.treasury.type == TreasuryType.SELL_AND_BUY
-    assert leg.treasury.name == "صافي"                # لا «خصم 1%» (لا فرق خصم بلا «قبل»)
+    assert leg.treasury is None
