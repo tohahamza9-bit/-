@@ -9,9 +9,65 @@ import {
   classifyDisconnect,
   reconnectDelayMs,
   CircuitBreaker,
+  UnauthorizedArbiter,
+  isIntentionalLogout,
   BENIGN_RECONNECT_CODES,
   FATAL_CODES,
+  UNAUTHORIZED_MAX_RETRIES,
+  UNAUTHORIZED_RETRY_DELAY_MS,
 } from '../src/antiban.js';
+
+// ── 401 عابر مقابل خروج حقيقي (حادثة 2026-07-20 00:42) ────────────────────────
+test('401 عابر: يُعاد الاتصال بعد 5ث حتى 3 محاولات', () => {
+  const a = new UnauthorizedArbiter();
+  for (let i = 1; i <= UNAUTHORIZED_MAX_RETRIES; i += 1) {
+    const v = a.onUnauthorized();
+    assert.equal(v.action, 'retry', `المحاولة ${i} يجب أن تعيد الاتصال`);
+    assert.equal(v.attempt, i);
+    assert.equal(v.delayMs, UNAUTHORIZED_RETRY_DELAY_MS);
+  }
+});
+
+test('401 حقيقي: بعد استنفاد المحاولات يتوقّف ويطلب QR', () => {
+  const a = new UnauthorizedArbiter();
+  for (let i = 0; i < UNAUTHORIZED_MAX_RETRIES; i += 1) a.onUnauthorized();
+  const v = a.onUnauthorized();
+  assert.equal(v.action, 'stop');
+  assert.match(v.reason, /خروج حقيقي/);
+});
+
+test('401: اتصال ناجح يصفّر العدّاد (العابر لا يتراكم عبر الجلسات)', () => {
+  const a = new UnauthorizedArbiter();
+  a.onUnauthorized();
+  a.onUnauthorized();
+  a.onConnectionOpen();
+  const v = a.onUnauthorized();
+  assert.equal(v.action, 'retry');
+  assert.equal(v.attempt, 1, 'بعد الاتصال الناجح يبدأ العدّ من جديد');
+});
+
+test('401 مقصود (logout صريح): يتوقّف فورًا بلا إعادة محاولة', () => {
+  const a = new UnauthorizedArbiter();
+  const v = a.onUnauthorized({ intentional: true });
+  assert.equal(v.action, 'stop');
+  assert.equal(v.attempt, 0, 'لا تُستهلك أيّ محاولة');
+  assert.match(v.reason, /مقصود/);
+});
+
+test('isIntentionalLogout: يميّز رسالة Baileys الصريحة', () => {
+  assert.equal(isIntentionalLogout({ output: { payload: { message: 'Intentional Logout' } } }), true);
+  assert.equal(isIntentionalLogout({ message: 'intentional logout' }), true);
+  assert.equal(isIntentionalLogout({ output: { payload: { message: 'Unauthorized' } } }), false);
+  assert.equal(isIntentionalLogout(undefined), false);
+});
+
+test('السيناريو الحقيقيّ 00:42: 401 مرّتان ثم اتصال ناجح ⇒ لا توقّف ولا طلب QR', () => {
+  const a = new UnauthorizedArbiter();
+  assert.equal(a.onUnauthorized().action, 'retry');
+  assert.equal(a.onUnauthorized().action, 'retry');
+  a.onConnectionOpen();                       // ما حدث فعلًا عند 00:54
+  assert.equal(a.attempts, 0, 'الجلسة سليمة — لا مسح ولا QR');
+});
 
 // ── تصنيف أكواد الإغلاق (DisconnectReason) ────────────────────────────────────
 test('classifyDisconnect: الأكواد الحميدة (إعادة اتصال)', () => {

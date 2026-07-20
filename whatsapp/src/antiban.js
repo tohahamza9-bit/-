@@ -78,6 +78,65 @@ export function classifyDisconnect(code) {
   return 'unknown'; // كود غير معروف → الافتراض الآمن: إعادة اتصال حميدة مع backoff (لا نُسقط الخدمة)
 }
 
+// ── 401: عابر أم خروج حقيقي؟ ─────────────────────────────────────────────────
+// 🔴 حادثة 2026-07-20 00:42: أُغلق الاتصال بـ401 مرّتين متتاليتين فرُفع علم loggedOut
+//    وتوقّف الجسر طالبًا مسح الجلسة وإعادة ربط QR — **والجلسة كانت سليمة**: إعادة تشغيل
+//    بسيطة بعدها بدقائق اقترنت فورًا بلا QR. أي أن معاملة كل 401 خروجًا نهائيًّا أوقفت
+//    الخدمة بلا سبب وطلبت مسح جلسة صالحة.
+//    السبب: واتساب يُصدر 401 أيضًا في حالات عابرة (تعارض جلسات/شبكة/إعادة تفاوض)،
+//    ولا يوجد في حدث الإغلاق ما يميّزها عن الخروج الحقيقي — إلّا **إعادة المحاولة**:
+//    الخروج الحقيقي يُعيد 401 دائمًا، والعابر ينجح.
+export const UNAUTHORIZED_CODE = 401;
+export const UNAUTHORIZED_MAX_RETRIES = 3;
+export const UNAUTHORIZED_RETRY_DELAY_MS = 5000;
+
+/**
+ * يحكم على 401: إعادة محاولة (عابر مرجَّح) أم توقّف نهائي (خروج حقيقي).
+ *
+ * القاعدة: حتى `maxRetries` محاولات متباعدة `delayMs`؛ فإن عاد 401 بعدها كلّها
+ * فهو خروج حقيقي ⇒ توقّف وطلب QR. أوّل اتصال ناجح يصفّر العدّاد.
+ *
+ * استثناء يقطع الانتظار: خروج **مقصود** صريح (`sock.logout()` أو رسالة Baileys
+ * "Intentional Logout") — لا معنى لإعادة محاولته.
+ */
+export class UnauthorizedArbiter {
+  constructor({ maxRetries = UNAUTHORIZED_MAX_RETRIES,
+                delayMs = UNAUTHORIZED_RETRY_DELAY_MS } = {}) {
+    this.maxRetries = maxRetries;
+    this.delayMs = delayMs;
+    this.attempts = 0;
+  }
+
+  /** @returns {{action:'retry'|'stop', attempt:number, delayMs:number, reason:string}} */
+  onUnauthorized({ intentional = false } = {}) {
+    if (intentional) {
+      return { action: 'stop', attempt: this.attempts, delayMs: 0,
+               reason: 'خروج مقصود صريح (logout) — لا إعادة محاولة' };
+    }
+    if (this.attempts < this.maxRetries) {
+      this.attempts += 1;
+      return { action: 'retry', attempt: this.attempts, delayMs: this.delayMs,
+               reason: `401 قد يكون عابرًا — محاولة ${this.attempts}/${this.maxRetries}` };
+    }
+    return { action: 'stop', attempt: this.attempts, delayMs: 0,
+             reason: `401 متكرّر بعد ${this.maxRetries} محاولات — خروج حقيقي` };
+  }
+
+  /** اتصال ناجح ⇒ الـ401 السابق كان عابرًا فعلًا. */
+  onConnectionOpen() {
+    this.attempts = 0;
+  }
+}
+
+/**
+ * هل يحمل خطأ الإغلاق علامة خروج **مقصود** صريح؟ (لا يُعاد المحاولة عليه)
+ * @param {any} err lastDisconnect.error
+ */
+export function isIntentionalLogout(err) {
+  const msg = err?.output?.payload?.message ?? err?.message ?? '';
+  return typeof msg === 'string' && /intentional logout/i.test(msg);
+}
+
 /**
  * تأخير إعادة الاتصال بـ backoff أُسّي + jitter متساوٍ (§14.1 — ألطف على واتساب، يمنع الحلقة اللحظية).
  * المحاولة تبدأ من 1. الناتج ضمن [ceil/2, ceil] حيث ceil = min(cap, base·2^(attempt-1)).

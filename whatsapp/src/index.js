@@ -11,7 +11,10 @@ import { makeLogger } from './logger.js';
 import { connectDb } from './db.js';
 import { makeCapture } from './capture.js';
 import { makeSender } from './sender.js';
-import { CircuitBreaker, WarmupLimiter, classifyDisconnect, reconnectDelayMs } from './antiban.js';
+import {
+  CircuitBreaker, WarmupLimiter, UnauthorizedArbiter, classifyDisconnect,
+  isIntentionalLogout, reconnectDelayMs,
+} from './antiban.js';
 
 /**
  * بذر الغرف من الإعداد (env) أول تشغيل (§شرط 4) — idempotent ($setOnInsert لا يلمس تصنيفًا موجودًا).
@@ -102,6 +105,8 @@ async function main() {
   let lastConnectedAt = Date.now(); // آخر لحظة اتصال ناجح (لقياس مدّة الانقطاع الصامت)
   let healthTimer = null;       // مؤقّت نبضة الصحّة (يُنظَّف عند الإغلاق)
   let loggedOut = false;        // 401 — الجلسة مسجّلة خروجًا: نبضة الصحّة **لا** تعيد الاتصال (تنبيه فقط)
+  // حَكَم الـ401: يفرّق العابر (يُعاد المحاولة) عن الخروج الحقيقي (يوقف ويطلب QR).
+  const unauthorized = new UnauthorizedArbiter();
   let lastLoggedOutAlertAt = 0; // خنق تنبيه loggedOut الدوريّ (كل ~5د لا كل نبضة)
   let latestQr = null;          // لوحة V2 م٥: آخر سلسلة QR للعرض (قراءة فقط عبر GET /qr) — تُمسح عند الاتصال
   let botJid = state.creds?.me?.id || '';
@@ -195,6 +200,7 @@ async function main() {
         everConnected = true;
         latestQr = null;                // م٥: اتّصل → لا حاجة لـ QR
         loggedOut = false;              // اتصال ناجح (إعادة ربط) → أطفئ علم الخروج
+        unauthorized.onConnectionOpen();  // نجح ⇒ الـ401 السابق كان عابرًا: صفّر العدّاد
         lastConnectedAt = Date.now();   // مرجع نبضة الصحّة (آخر اتصال حيّ)
         botJid = sock.user?.id || botJid;
         logger.info('✅ اتصل واتساب — البوت: %s', botJid);
@@ -207,14 +213,34 @@ async function main() {
 
         // رفض حقيقي (401/500/403/411/440) → إعادة الاتصال بلا جدوى/ضارّة.
         if (category === 'fatal') {
-          breaker.onRejection(`رفض حقيقي code=${code}`);
           if (code === DisconnectReason.loggedOut) {
-            // 401 — إعادة التشغيل تدخل حلقة QR بلا جدوى → يبقى موقوفًا (لا exit) + تنبيه، تدخّل يدوي.
-            // نرفع علم loggedOut كي **لا** تفرض نبضة الصحّة إعادة اتصال (القاطع لا يُفتح برفض واحد).
+            // 🔴 401 عابر مقابل خروج حقيقي (حادثة 2026-07-20 00:42): معاملة كل 401 خروجًا
+            //    نهائيًّا أوقفت الجسر وطلبت مسح **جلسة سليمة** — إعادة تشغيل بعدها بدقائق
+            //    اقترنت فورًا بلا QR. لا شيء في حدث الإغلاق يميّز العابر عن الحقيقي إلّا
+            //    إعادة المحاولة: الحقيقي يُعيد 401 دائمًا، والعابر ينجح.
+            const verdict = unauthorized.onUnauthorized({
+              intentional: isIntentionalLogout(lastDisconnect?.error),
+            });
+            if (verdict.action === 'retry') {
+              logger.warn('⚠️ 401 — %s؛ إعادة اتصال بعد %dms (الجلسة لم تُمسح).',
+                          verdict.reason, verdict.delayMs);
+              if (!closing && !reconnectPending) {
+                reconnectPending = true;
+                setTimeout(() => {
+                  reconnectPending = false;
+                  if (!closing) buildSocket();
+                }, verdict.delayMs);
+              }
+              return;   // لا onRejection: العابر لا يُحسب رفضًا في W0
+            }
+            // استُنفدت المحاولات (أو خروج مقصود) ⇒ خروج حقيقي: توقّف + QR يدويّ.
+            breaker.onRejection(`رفض حقيقي code=${code}`);
             loggedOut = true;
-            logger.error('🔴 تسجيل خروج (loggedOut) — احذف مجلد الجلسة وأعد الربط يدويًا. لا إعادة اتصال ولا إعادة تشغيل.');
+            logger.error('🔴 تسجيل خروج مؤكَّد (%s) — احذف مجلد الجلسة وأعد الربط يدويًا. '
+                         + 'لا إعادة اتصال ولا إعادة تشغيل.', verdict.reason);
             return;
           }
+          breaker.onRejection(`رفض حقيقي code=${code}`);
           // 440 connectionReplaced / 500 badSession / 411 / 403 — البقاء «زومبي» (مقبس ميت بلا إعادة
           // اتصال) لا يفيد؛ إغلاق نظيف ثم exit(1) ليعيد PM2 تشغيلًا نظيفًا يعيد محاولة الاتصال (§428).
           logger.error('🔴 رفض نهائي code=%s (%s) — إغلاق نظيف ثم exit(1) لإعادة تشغيل PM2.', code, category);
