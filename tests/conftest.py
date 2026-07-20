@@ -4,7 +4,9 @@
 """
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,27 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 🔴 عزل سجلّات الاختبار عن لوق الإنتاج — يُنفَّذ **وقت الاستيراد** لا في fixture
+# ═════════════════════════════════════════════════════════════════════════════
+# العطل: `setup_logging` يُستدعى من core/app.py:139 بـ`settings.log_dir` الافتراضيّ
+# (artifacts/logs)، وعشرة ملفّات اختبار تُقلِع التطبيق — فكلّ `pytest` كان يحقن في
+# bot.log الحقيقيّ آثار mock («job-1»، «d1»، «RuntimeError: MONEYADO غير مرئي»)
+# مختلطةً بسجلّات إنتاج حقيقية. اكتُشِف 2026-07-20 أثناء التحقيق في حادثة X1567:
+# اضطُرّ الفحص لطرح أدلّةٍ لأنّ مصدرها اختبارٌ لا الإنتاج. لوقٌ ملوَّثٌ = تحقيقٌ أعمى.
+#
+# طبقتا دفاع، كلتاهما قبل استيراد أيّ وحدة تقرأ الإعدادات:
+#   ١) LOG_DIR في البيئة → يغلب افتراضيّ Settings (pydantic-settings) فحتى استدعاءٌ
+#      جديد لـsetup_logging يقصد المجلّد المؤقّت.
+#   ٢) استدعاءٌ استباقيّ يُثبِّت العَلَم _CONFIGURED، فنداء app.py يصير لاغيًا.
+_TEST_LOG_DIR = Path(tempfile.gettempdir()) / "moneyado-test-logs"
+_TEST_LOG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ["LOG_DIR"] = str(_TEST_LOG_DIR)
+
+from core.logging_setup import setup_logging  # noqa: E402  (بعد ضبط البيئة عمدًا)
+
+setup_logging(str(_TEST_LOG_DIR))
 
 
 # ── قاعدة بيانات وهمية (mongomock-motor) — للوحدات التي تلمس DB ──────────────
