@@ -1461,13 +1461,31 @@ class Pipeline:
                 raw.message_key, forward_key=raw.message_key)
             # يسقط للتجميع العادي (صفقة جديدة)
 
+        # (X1242) الصفقات القائمة بنفس المرجع **قبل** التجميع — أساس وسم «المولودة من التكرار».
+        #   يشمل WAITING عمدًا، بخلاف _reference_reuse_action الذي يستثنيها: ذاك يقرّر
+        #   «تنبيه/تجاهل» ولا يصحّ أن يُنبّه على رسالةٍ ثانيةٍ شرعيّة تنتظر أُولاها؛ أمّا هنا
+        #   فالسؤال مختلف — هل نشأت صفقةٌ **جديدة** رغم وجود صفقةٍ بنفس المرجع؟
+        _prior_ids: set[str] = set()
+        if leg.reference_number:
+            async for _d in self.db.deals.col.find(
+                    {"$or": [{"sell_leg.reference_number": leg.reference_number},
+                             {"buy_leg.reference_number": leg.reference_number}]},
+                    {"deal_id": 1}):
+                _prior_ids.add(_d.get("deal_id"))
+
         # التجميع (§7.3): صفقة جديدة أو دمج طرف ثانٍ
         deal = await self.queue.try_group(leg, now, chat_jid=raw.chat_jid)
-        # (X1242) وسمُ المولودة من إعادة الاستخدام — تُستبعَد لاحقًا من ترشّح التكملات عديمة
-        #   المرجع. يُوسَم **بعد** التجميع كي لا يُوسَم دمجُ طرفٍ ثانٍ في صفقةٍ قائمة سليمة.
-        if _reuse == "reused" and deal is not None and not deal.born_from_ref_reuse:
+        # 🔴 وسمُ الشَّرَك: نشأت صفقةٌ **جديدة** بينما صفقةٌ بنفس المرجع قائمةٌ سلفًا ⇒ هذه
+        #   رسالةٌ ثانية انفصلت عن أُولاها (X1566-ب/X1567-ب في دفعة 2026-07-20). تُستبعَد من
+        #   ترشّح التكملات عديمة المرجع كي لا تكسر تقابل ١:١ فتنزاح الروابط بواحد.
+        #   الاندماجُ السليم (X1570: رسالتان بنفس المرجع → صفقة واحدة) لا يُوسَم: deal.deal_id
+        #   يكون من _prior_ids. ولا يعتمد هذا على حالة الصفقة السابقة، فلا يسقط الشرط.
+        if (deal is not None and _prior_ids and deal.deal_id not in _prior_ids
+                and not deal.born_from_ref_reuse):
             deal.born_from_ref_reuse = True
             await self.db.deals.upsert(deal)
+            log.info("(X1242) صفقة %s وُلدت بمرجع %s مستعمَلٍ سلفًا — تُستبعَد من ترشّح "
+                     "التكملات عديمة المرجع", deal.deal_id, leg.reference_number)
         # افتح خانة مُرسِل إن بقيت الصفقة تنتظر طرفًا ثانيًا (§7.3): الرسالة الثانية من نفس المُرسِل
         # خلال النافذة ستملؤها حتمًا. SI لا تفتح خانة (لا تنتظر ثانيًا §4.5) — والحالة WAITING تمنعها.
         if (deal is not None and deal.status == Status.WAITING_SECOND_LEG
