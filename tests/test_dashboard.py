@@ -870,8 +870,15 @@ async def test_correction_saved_from_dashboard_is_live_in_parser(db):
 
 
 async def test_corrections_page_served(db):
-    """صفحة /corrections تُخدَم (HTML)."""
+    """صفحة /corrections تُخدَم (HTML) — من **core.app.create_app** الذي يشغّله الكيرنل فعليًّا
+    (uvicorn core.app:get_app)، لا dashboard.app.create_app وحده. حادثة 2026-07-21: أُضيف
+    مسار الصفحة لـdashboard.app فقط فبقيت 404 حيًّا رغم نجاح API — الكيرنل يسجّل صفحاته بنفسه."""
     pytest.importorskip("fastapi")
-    async with _anon_client(db) as ac:
+    from httpx import ASGITransport, AsyncClient
+    from core.app import create_app as core_create_app
+    app = core_create_app(db, _settings(), run_worker=False)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         r = await ac.get("/corrections")
         assert r.status_code == 200 and "قاموس التصحيحات" in r.text
+    # ملاحظة: /api/corrections يُركَّب في startup (get_router) الذي لا يُشغّله ASGITransport هنا؛
+    #   بوّابته مُغطّاة بـtest_corrections_write_requires_manager عبر dashboard.app.create_app.

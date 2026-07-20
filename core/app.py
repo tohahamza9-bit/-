@@ -304,6 +304,12 @@ def create_app(db: Optional[Database] = None, settings=None, *, run_worker: bool
         html = ROOT / "dashboard" / "static" / "entity_aliases.html"
         return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
 
+    @app.get("/corrections")
+    async def corrections_page():  # noqa: ANN201
+        """قاموس التصحيحات الحيّ (مدير فقط) — عرض/بحث/إضافة/حذف؛ يسري فورًا بلا إعادة تشغيل."""
+        html = ROOT / "dashboard" / "static" / "corrections.html"
+        return FileResponse(str(html), headers={"Cache-Control": "no-cache"}) if html.exists() else JSONResponse({"status": "ok"})
+
     return app
 
 
