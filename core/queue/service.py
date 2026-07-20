@@ -27,7 +27,7 @@ from ..logging_setup import get_logger
 from ..models import Deal, ParsedLeg, RawMessage, SupplierRecord, SupplierRef, TreasuryRecord, TreasuryRef, WriteJob
 from ..parsing import extract_code_name_price_lines, parse_completion_fragment, parse_message
 from ..parsing.normalize import normalize_ar, normalize_payment, normalize_price
-from ..parsing.resolve import resolve_treasury
+from ..parsing.resolve import resolve_supplier, resolve_treasury
 from .commission import compute_commission
 from .grouping import _is_discount_identity_leg, _norm_ref, compute_grouping_key, discount_pair
 
@@ -366,6 +366,29 @@ class QueueService:
             return None
         # المورد بـ pattern-fishing (يعالج الترتيب المختلف للرسالة الثانية: الكود/المورد آخر السطر…)
         frag = parse_completion_fragment(raw.text, treasuries, suppliers)
+        # 🔴 (الموضع يحدّد النوع — X1587) سطرُ «كود+اسم+سعر» في رسالةٍ ثانيةٍ بنفس المرجع هو
+        #   **المورّد وسعره** قطعًا، لا زبونًا. وpattern-fishing يصطاد أرقامًا من حيث لا ينبغي:
+        #   في «X1587 / +20 122 1225261 / نجوى / 1.485مصري / طه6.07» التقط الكود «122» من **مقطع
+        #   رقم الهاتف** واسمَ **المستلم** «نجوى»، فأُسنِد المورّد «122 نجوى» بدل «760 طه ».
+        #   extract_code_name_price_lines يُعطي الجواب الصحيح سلفًا (يُطابق الاسم بالقائمة البيضاء
+        #   ويستكمل كوده)، فنُقدّمه هنا. حارس الالتباس: لا نعتمده إلّا إذا انحلّ سطرٌ **واحد**
+        #   بالضبط إلى مورّد مُدرَج — التعدّد أو الصفر يُترك للسلوك القائم بلا تخمين (§0).
+        if frag.supplier is None:
+            resolved = []
+            for code, name, price in extract_code_name_price_lines(raw.text, suppliers):
+                rec = resolve_supplier(name, suppliers)
+                if rec is not None:
+                    resolved.append((rec, price))
+            if len(resolved) == 1:
+                rec, price = resolved[0]
+                frag.supplier = SupplierRef(code=rec.code, name=rec.name)
+                frag.is_supplier_counterpart = True
+                if price:
+                    frag.price_raw, frag.price_normalized = normalize_price(
+                        price, self._leg_currency(frag) or target.sell_leg.currency or Currency.EGP)
+                log.info("(الموضع يحدّد النوع) سطر المورّد في الرسالة الثانية %s → «%s %s» بسعر %s "
+                         "(بدل «%s %s» من اصطياد النمط)", raw.message_key, rec.code, rec.name,
+                         frag.price_raw, frag.customer_code, frag.customer_name)
         # هوية المورد = كود رقمي في الرسالة («760 طه») **أو** اسم مُدرَج بالقائمة البيضاء بلا كود
         # («طه» وحده → يُحلّ كودُه من القائمة).
         # 🔴 لو صفقة الوجهة **بلا كود زبون** (رسالة أولى بمستلم فقط مثل «نجوى») نشترط مورداً

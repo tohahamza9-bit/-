@@ -217,3 +217,53 @@ async def test_explicit_ref_still_reaches_reuse_born_deal(db):
     await db.deals.upsert(_deal("real", "X1568", 1))
     cands = await q.pending_candidates_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5), "X1566")
     assert [c.deal_id for c in cands] == ["decoy"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (X1587) الموضع يحدّد النوع — سطر المورّد في الرسالة الثانية
+# ═════════════════════════════════════════════════════════════════════════════
+_X1587_1 = 'X1587\n+20 122 1225261\nنجوى\n1500 مصري\n\n650 عبدو طبيب6.08'
+_X1587_2 = 'X1587\n+20 122 1225261\nنجوى\n1.485مصري\n\nطه6.07'
+
+
+async def _seed_taha(db):
+    """المورّد «طه » (760) كما في الإنتاج — البذرة الافتراضية لا تحويه."""
+    from core.models import SupplierRecord
+    await db.suppliers.col.insert_one(
+        SupplierRecord(code="760", name="طه ", aliases=["طه"], active=True).model_dump())
+
+
+async def test_x1587_supplier_line_beats_phone_digits(db):
+    """«طه6.07» هو المورّد — لا «122 نجوى» من مقطع الهاتف واسم المستلم.
+
+    اصطياد النمط (parse_completion_fragment) يلتقط «122» من «+20 122 1225261» و«نجوى»
+    من سطر المستلم، فيُسنِد مورّدًا وهميًّا. الموضع يحسم: سطر «كود+اسم+سعر» في رسالةٍ
+    ثانيةٍ بنفس المرجع = المورّد وسعره."""
+    await _seed_taha(db)
+    await _run(_pipe(db), [(_X1587_1, "s1"), (_X1587_2, "s2")])
+    d = await db.deals.col.find_one({"sell_leg.reference_number": "X1587"})
+    sup = (d.get("sell_leg") or {}).get("supplier") or {}
+    assert sup.get("code") == "760", f"المورّد المُسنَد: {sup}"
+    assert "طه" in (sup.get("name") or "")
+    assert sup.get("code") != "122" and "نجوى" not in (sup.get("name") or "")
+
+
+async def test_x1587_supplier_price_is_the_buy_price(db):
+    """6.07 سعرُ المورّد (الشراء)، و6.08 سعرُ البيع للزبون — لا يختلطان."""
+    await _seed_taha(db)
+    await _run(_pipe(db), [(_X1587_1, "s1"), (_X1587_2, "s2")])
+    sell = (await db.deals.col.find_one({"sell_leg.reference_number": "X1587"}))["sell_leg"]
+    assert sell.get("price_normalized") == "6.08", sell.get("price_normalized")
+    assert sell.get("supplier_price_raw") == "6.07", sell.get("supplier_price_raw")
+
+
+async def test_customer_line_not_mistaken_for_supplier(db):
+    """حارس الالتباس: سطرٌ لا ينحلّ مورّدًا مُدرَجًا لا يُسنَد مورّدًا (لا تخمين §0)."""
+    await _seed_taha(db)
+    await _run(_pipe(db), [
+        ('X1588\n+20 122 1225261\nنجوى\n1500 مصري\n\n650 عبدو طبيب6.08', "u1"),
+        ('X1588\n+20 122 1225261\nنجوى\n1.485مصري\n\nفلان الفلاني6.07', "u2"),
+    ])
+    d = await db.deals.col.find_one({"sell_leg.reference_number": "X1588"})
+    sup = (d.get("sell_leg") or {}).get("supplier") or {}
+    assert sup.get("code") != "760", "اسمٌ غير مُدرَج أُسنِد مورّدًا"
