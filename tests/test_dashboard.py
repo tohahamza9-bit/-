@@ -773,3 +773,36 @@ def test_production_app_serves_fx_and_entity_pages():
     paths = {r.path for r in app.routes}
     assert "/fx-rates" in paths, "core.app يجب أن يقدّم /fx-rates (الإنتاج = core.app لا dashboard.app)"
     assert "/entity-aliases" in paths, "core.app يجب أن يقدّم /entity-aliases"
+
+
+# ══ تشغيل الكيرنل وهو مطفأ عبر الجسر (POST /pm2) ═══════════════════════════════
+async def test_bridge_control_requires_manager(db):
+    """توكن التحكّم سرٌّ ينفّذ أمر نظام — لا يُسلَّم لغير المدير ولا لغير مسجّل."""
+    pytest.importorskip("fastapi")
+    from core.constants import Role
+    async with _anon_client(db) as ac:                      # بلا دخول → 401
+        assert (await ac.get("/api/system/bridge-control")).status_code == 401
+    async with _client(db, Role.REVIEWER, username="rev") as ac:   # مراجع → 403
+        assert (await ac.get("/api/system/bridge-control")).status_code == 403
+
+
+async def test_bridge_control_returns_url_and_token_for_manager(db):
+    """المدير يحصل على وجهة الجسر + التوكن كي يبقى الزرّ عاملًا بعد موت الكيرنل."""
+    pytest.importorskip("fastapi")
+    st = _settings(bridge_control_token="tok-123",
+                   whatsapp_bridge_url="http://localhost:3001")
+    async with _client(db, settings=st) as ac:
+        r = await ac.get("/api/system/bridge-control")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["url"] == "http://localhost:3001/pm2"
+        assert body["token"] == "tok-123"
+        assert body["enabled"] is True
+
+
+async def test_bridge_control_disabled_without_token(db):
+    """بلا BRIDGE_CONTROL_TOKEN → enabled=False (الواجهة تُعطّل الزرّ، fail-closed)."""
+    pytest.importorskip("fastapi")
+    async with _client(db, settings=_settings(bridge_control_token="")) as ac:
+        body = (await ac.get("/api/system/bridge-control")).json()
+        assert body["enabled"] is False

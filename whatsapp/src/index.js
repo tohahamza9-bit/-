@@ -3,6 +3,7 @@
  * لا يُشغَّل ضمن الاختبارات (يستورد Baileys/Mongo). يُشغَّل: `node src/index.js`.
  */
 import http from 'node:http';
+import { execFile } from 'node:child_process';
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 
@@ -15,6 +16,12 @@ import {
   CircuitBreaker, WarmupLimiter, UnauthorizedArbiter, classifyDisconnect,
   isIntentionalLogout, reconnectDelayMs,
 } from './antiban.js';
+import { resolveControlRequest } from './control.js';
+
+// أصول اللوحة المسموح لها بنداء /pm2 من المتصفّح (محلّيّة فقط — لا wildcard).
+const ALLOWED_CONTROL_ORIGINS = new Set([
+  'http://localhost:8000', 'http://127.0.0.1:8000',
+]);
 
 /**
  * بذر الغرف من الإعداد (env) أول تشغيل (§شرط 4) — idempotent ($setOnInsert لا يلمس تصنيفًا موجودًا).
@@ -297,6 +304,51 @@ async function main() {
       if (!authed) { res.writeHead(403); res.end('forbidden'); return; }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ connected, everConnected, loggedOut, lastConnectedAt, botJid }));
+      return;
+    }
+    // ═══ تشغيل الكيرنل وهو مطفأ (POST /pm2) ═══
+    // 🔴 المسار الوحيد الباقي حين يكون الكيرنل مطفأً: هو مَن يخدم اللوحة، فلا أحد يستقبل
+    //    «شغّله». الجسر يعمل دائمًا (pm2). التوكن منفصل عن internalToken عمدًا: هذه النقطة
+    //    تنفّذ أمر نظام، فلا تشترك في سرٍّ مع نقاط القراءة.
+    //    CORS: المتصفّح يناديها من أصل اللوحة (منفذ 8000) — أصلٌ محلّيّ واحد لا wildcard.
+    if (req.url === '/pm2' && (req.method === 'POST' || req.method === 'OPTIONS')) {
+      const origin = req.headers.origin || '';
+      if (ALLOWED_CONTROL_ORIGINS.has(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Control-Token');
+        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+        res.setHeader('Vary', 'Origin');
+      }
+      if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+      let body = '';
+      req.on('data', (c) => { body += c; if (body.length > 4096) req.destroy(); });
+      req.on('end', () => {
+        let action;
+        try { action = JSON.parse(body || '{}').action; } catch { action = undefined; }
+        const verdict = resolveControlRequest({
+          token: req.headers['x-control-token'],
+          action,
+          expectedToken: cfg.controlToken,
+        });
+        if (!verdict.ok) {
+          logger.warn('رُفض طلب تحكّم (%d): %s', verdict.status, verdict.error);
+          res.writeHead(verdict.status, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, error: verdict.error }));
+          return;
+        }
+        // execFile بمصفوفة وسائط ثابتة — بلا shell، فلا حقن أوامر.
+        execFile('schtasks', verdict.args, { windowsHide: true }, (err, stdout, stderr) => {
+          if (err) {
+            logger.error({ err }, 'فشل تنفيذ أمر التحكّم');
+            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, error: String(stderr || err.message).slice(0, 300) }));
+            return;
+          }
+          logger.info('✅ نُفِّذ أمر التحكّم «%s» من اللوحة عبر الجسر.', action);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: true, action, detail: String(stdout || '').slice(0, 300) }));
+        });
+      });
       return;
     }
     if (req.method === 'GET' && req.url === '/qr') {

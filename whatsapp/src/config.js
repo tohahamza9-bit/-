@@ -46,6 +46,9 @@ export function loadConfig(env = process.env) {
     treasuryRoomJids: splitJids(env.TREASURY_ROOM_JIDS), // قراءة صامتة مطلقة
 
     internalToken: env.INTERNAL_TOKEN || '', // SEC-002 (احتياطي HTTP)
+    // توكن تشغيل الكيرنل من اللوحة عبر POST /pm2. **منفصل عن internalToken عمدًا**:
+    // تلك للقراءة وهذه تنفّذ أمر نظام. غيابه ⇒ النقطة معطّلة (fail-closed).
+    controlToken: env.BRIDGE_CONTROL_TOKEN || '',
 
     // تشغيل الجسر — مسار مطلق ثابت عبر إعادات التشغيل (مستقلّ عن cwd)
     sessionDir: resolveSessionDir(env.WA_SESSION_DIR),

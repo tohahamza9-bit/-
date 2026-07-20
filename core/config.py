@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # ── جسر WhatsApp (Baileys ↔ Python) ──
     whatsapp_bridge_url: str = Field(default="http://localhost:3001")
     internal_token: str = Field(default="")     # SEC-002 X-Internal-Token
+    # توكن تشغيل الكيرنل من اللوحة عبر الجسر (POST /pm2). يُسلَّم للمتصفّح **للمدير فقط**
+    # كي تبقى الزرّ عاملًا بعد أن يموت الكيرنل (الصفحة محمَّلة سلفًا). غيابه ⇒ النقطة معطّلة.
+    bridge_control_token: str = Field(default="")
 
     # ── MONEYADO RPA ──
     moneyado_fields_file: str = Field(default=str(CONFIG_DIR / "moneyado_fields.json"))

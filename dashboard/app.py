@@ -858,6 +858,23 @@ def get_router(db: Database, settings: Optional[Settings] = None) -> APIRouter:
         procs = await asyncio.to_thread(pc.list_processes)
         return {"available": bool(procs), "processes": procs}
 
+    @router.get("/system/bridge-control", dependencies=[manager])
+    async def system_bridge_control() -> dict:
+        """بيانات نداء الجسر لتشغيل الكيرنل وهو **مطفأ** — للمدير فقط.
+
+        🔴 لماذا يُسلَّم التوكن للمتصفّح: الكيرنل هو مَن يخدم هذه اللوحة، فإن مات لم يبقَ
+           مَن يوسّط الطلب. الصفحة تحتفظ بالتوكن من لحظة تحميلها (والكيرنل حيّ) فيظلّ زرّ
+           «تشغيل الكيرنل» عاملًا بعد موته — يناديه المتصفّح مباشرةً على الجسر.
+           الحدّ: التوكن يصل **المدير المُصادَق وحده**، والجسر يستمع على 127.0.0.1 فقط،
+           والنقطة تقبل فعلًا واحدًا مغلقًا (start-kernel) بوسائط ثابتة في الكود.
+        """
+        # إعدادات **التطبيق** لا العامّة: create_app قد يُحقَن بإعدادات مختلفة.
+        return {
+            "url": f"{settings.whatsapp_bridge_url.rstrip('/')}/pm2",
+            "token": settings.bridge_control_token,
+            "enabled": bool(settings.bridge_control_token),
+        }
+
     @router.post("/system/processes/{target}/{action}", dependencies=[manager])
     async def system_process_action(target: str, action: str,
                                     request: Request,

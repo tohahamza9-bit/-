@@ -114,12 +114,20 @@
       <button class="ghost" onclick="sysAction('all','start')">تشغيل الكل</button>
       <button onclick="sysAction('all','stop')">إيقاف الكل</button>
     </div>
+    <div class="kill" style="margin-top:10px">
+      <span class="muted">الكيرنل مطفأ؟</span>
+      <button class="ghost" id="btn_start_kernel" onclick="startKernelViaBridge()">
+        تشغيل الكيرنل عبر الجسر
+      </button>
+      <span class="muted" id="bridge_ctl_hint"></span>
+    </div>
     <p class="muted" style="margin:10px 0 0">
       إيقاف الكيرنل يوقف معالجة الوارد والكتابة في MONEYADO (الجسر يظلّ يلتقط الرسائل).
       أوامر الكيرنل تُنفَّذ بعد وصول الردّ بثوانٍ — الصفحة ستفقد الاتصال، وهذا متوقَّع.<br>
       المُشرِفان مختلفان: <b>الجسر</b> على pm2، و<b>الكيرنل</b> على مهمّة ويندوز مجدولة
       (pm2 كان يقتله كل دقيقة بـCTRL_C). حالة الكيرنل تُقرأ من المنفذ 8000 نفسه لا من مُشرِف.<br>
-      تشغيله وهو مطفأ لا يعمل من هنا (لا خادم): <code>schtasks /Run /TN moneyado-kernel</code>.
+      تشغيله وهو مطفأ يمرّ عبر <b>الجسر</b> (يعمل دائمًا) لا عبر هذا الخادم — الزرّ أعلاه
+      يفعل ذلك، ويظلّ عاملًا بعد أن يفقد الكيرنلُ الحياةَ ما دامت الصفحة محمَّلة.
     </p>
   </div>
 
@@ -270,6 +278,39 @@ async function loadSystem(){
       </td></tr>`;
   }).join("") : `<tr><td colspan="5" class="muted">لا مكوّنات — pm2 غير متاح.</td></tr>`;
 }
+// ── تشغيل الكيرنل وهو مطفأ: نداء الجسر مباشرةً من المتصفّح ──
+// 🔴 يُجلَب التوكن عند تحميل الصفحة (والكيرنل حيّ) ويُحتفَظ به في الذاكرة، فيبقى الزرّ
+//    عاملًا بعد أن يموت الكيرنل — عندها لا خادم يوسّط، فالمتصفّح هو مَن ينادي الجسر.
+let BRIDGE_CTL = null;
+async function loadBridgeControl(){
+  try{ BRIDGE_CTL = await api("/system/bridge-control"); }catch(e){ BRIDGE_CTL = null; }
+  const b=$("btn_start_kernel"), h=$("bridge_ctl_hint");
+  if(!b) return;
+  const on = !!(BRIDGE_CTL && BRIDGE_CTL.enabled);
+  b.disabled = !on;
+  if(h) h.textContent = on ? "" : "معطّل — اضبط BRIDGE_CONTROL_TOKEN في .env";
+}
+async function startKernelViaBridge(){
+  if(!BRIDGE_CTL || !BRIDGE_CTL.enabled){
+    toast("التحكّم عبر الجسر معطّل — اضبط BRIDGE_CONTROL_TOKEN"); return;
+  }
+  const b=$("btn_start_kernel"); if(b) b.disabled=true;
+  try{
+    const r=await fetch(BRIDGE_CTL.url,{
+      method:"POST",
+      headers:{"Content-Type":"application/json","X-Control-Token":BRIDGE_CTL.token},
+      body:JSON.stringify({action:"start-kernel"}),
+    });
+    const j=await r.json().catch(()=>({}));
+    toast(r.ok && j.ok ? "أُرسل أمر التشغيل للجسر ✓" : `فشل: ${j.error||r.status}`);
+  }catch(e){
+    toast("تعذّر الوصول للجسر (منفذ 3001) — هل هو يعمل؟");
+  }finally{
+    if(b) b.disabled=false;
+    setTimeout(()=>{ loadSystem(); }, 5000);
+  }
+}
+
 async function sysAction(target,action){
   // تأكيد قبل كل إيقاف (وقبل إعادة تشغيل الكل — انقطاع فعليّ للخدمة)
   if(action==="stop"||(action==="restart"&&target==="all")){
@@ -411,7 +452,7 @@ async function boot(){
   const rb=$("roleBadge"); rb.textContent=ROLE_AR[ROLE]||ROLE; rb.style.display="inline-block";
   $("logoutBtn").style.display="inline-block";
   if(ROLE!=="manager"){ document.body.classList.add("no-access"); return; }  // الإعدادات للمدير فقط
-  loadControl(); loadSystem(); loadUsers(); loadEmployees(); loadDetection(); loadLog();
+  loadControl(); loadSystem(); loadBridgeControl(); loadUsers(); loadEmployees(); loadDetection(); loadLog();
   setInterval(loadControl,15000);
   setInterval(loadSystem,15000);      // حالة حيّة للمكوّنات
 }
