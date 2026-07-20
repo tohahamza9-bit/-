@@ -103,6 +103,16 @@ def detect_post(result: Optional[ParseResult], *, min_confidence: float = 0.7) -
     if result.kind == "transfer" and float(result.confidence or 0.0) < min_confidence:
         reasons.append(f"ثقة تفكيك منخفضة ({float(result.confidence or 0.0):.2f})")
 
+    # حوالة بلا خزينة محلولة — الحالة التي وُجدت الطبقة لإنقاذها بالضبط (X1538):
+    # الخزينة إمّا في الرسالة الثانية (فيحلّها الذكاء بضمّ الرسالتين) أو ضاعت لأن رمزها
+    # استُبعد بصمت (مدينة/إملاء) فتُصعَّد بلا خزينة. الحالتان تستحقّان الذكاء.
+    # 🔴 القياس (رسائل 2026-07-19، 582 رسالة): «حوالة بلا خزينة» = 24.1%، لكن 102 من
+    #    أصل 140 يمسكها ما سبق أصلًا ⇒ **الزيادة الصافية 38 رسالة/يوم فقط** (20.4%→27.0%).
+    #    كلفة مقبولة؛ لا تُقارَن بفخّ «الكشف قبل التفكيك» (97.7%). مقيَّدة بـkind=="transfer"
+    #    كي لا تبتلع الشظايا والتكملات التي تُحلّ حتميًّا بالربط.
+    if result.kind == "transfer" and leg is not None and getattr(leg, "treasury", None) is None:
+        reasons.append("حوالة بلا خزينة محلولة")
+
     return reasons
 
 

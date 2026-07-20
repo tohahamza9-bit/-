@@ -60,7 +60,7 @@ def _match_reference(tok: str) -> Optional[str]:
     m = _REFERENCE_AR_PREFIX_RE.match(tok)
     return m.group(1) if m else None
 # رمز رقمي (سعر): يقبل الفاصلة اللاتينية «.» «,» والعربية «،» (مثل 5،84)
-_NUMERIC_TOKEN_RE = re.compile(r"^\d+(?:[.,،]\d+)?$")
+_NUMERIC_TOKEN_RE = re.compile(r"^\d+(?:[.,،:]\d+)?$")
 _ARABIC_RE = re.compile(r"[ء-ي]")
 
 # فاصل العنوان/القيمة في السطور المعنونة: «:» أو «=» («القيمة = 25000» = «القيمة: 25000»)
@@ -693,15 +693,15 @@ def _parse_customer_line(seg: str) -> Optional[tuple[str, Optional[str], Optiona
     tokens = rest.split()
     price: Optional[str] = None
     if tokens and _NUMERIC_TOKEN_RE.match(tokens[-1]):
-        price = tokens[-1].replace("،", ".")   # الفاصلة العربية → عشرية (5،82 → 5.82 §3.6)
+        price = tokens[-1].replace("،", ".").replace(":", ".")   # الفاصلة العربية → عشرية (5،82 → 5.82 §3.6)
         tokens = tokens[:-1]
     elif tokens:
         # 🔴 (إصلاح ٣ب) السعر ملتصق بالاسم بلا مسافة («بن ناصر5.98» → اسم «بن ناصر» + سعر «5.98»):
         #    نفصل عشريًّا زائلًا في آخر الرمز بعد حرف عربيّ (A9063/A9035). عشريّ فقط (\d+[.,]\d+) كي
         #    لا نفصل رقمًا هو جزء من الاسم؛ يُفحص فقط حين لم يُلتقَط سعر منفصل (elif).
-        glued = re.match(r"^(.*[ء-ي])(\d+[.,،]\d+)$", tokens[-1])
+        glued = re.match(r"^(.*[ء-ي])(\d+[.,،:]\d+)$", tokens[-1])
         if glued:
-            price = glued.group(2).replace("،", ".")
+            price = glued.group(2).replace("،", ".").replace(":", ".")
             tokens[-1] = glued.group(1)
     name = " ".join(tokens).strip()
     if not name:
@@ -720,7 +720,7 @@ def _parse_name_price_supplier(
         return None
     price: Optional[str] = None
     if _NUMERIC_TOKEN_RE.match(tokens[-1]):
-        price = tokens[-1].replace("،", ".")     # الفاصلة العربية → عشرية (§3.6)
+        price = tokens[-1].replace("،", ".").replace(":", ".")     # الفاصلة العربية → عشرية (§3.6)
         tokens = tokens[:-1]
     name = " ".join(tokens).strip()
     if not name or not _ARABIC_RE.search(name):
@@ -733,10 +733,10 @@ def _parse_name_price_supplier(
 
 # سطر «اسم كود سعر» (الكود في **الوسط** §3.2): «احمد بوزويص 876 5.88» → (code, name, price).
 # نطاق الأحرف العربية الصحيح [ء-ي] (لا [ي-ء] المقلوب). يُجرَّب بعد نمط «كود أولاً» (_parse_customer_line).
-_NAME_CODE_PRICE_RE = re.compile(r"^([ء-ي].+?)\s+(\d{2,4})\s+(\d+(?:[.,،]\d+)?)$")
+_NAME_CODE_PRICE_RE = re.compile(r"^([ء-ي].+?)\s+(\d{2,4})\s+(\d+(?:[.,،:]\d+)?)$")
 # سطر «كود سعر اسم» (السعر **قبل** الاسم §3.2): «769 6.06 طه» → (code, name, price). يميّزه اشتراط
 # سعر عشريّ في الوسط عن «كود مبلغ …» (مبلغ صحيح بلا كسر). للرسالة الثانية (سطر مورد/زبون) فقط.
-_CODE_PRICE_NAME_RE = re.compile(r"^(\d{2,4})\s+(\d+[.,،]\d+)\s+([ء-ي].+)$")
+_CODE_PRICE_NAME_RE = re.compile(r"^(\d{2,4})\s+(\d+[.,،:]\d+)\s+([ء-ي].+)$")
 
 
 # حرف عربيّ ملتصق برقم — «مومن عريبي6.02» / «طه الحافي35» (م: X1323، X1328).
@@ -778,11 +778,11 @@ def extract_code_name_price_lines(
                 continue
             m = _NAME_CODE_PRICE_RE.match(ln)     # «اسم كود سعر» (الكود في الوسط §3.2)
             if m:
-                pairs.append((m.group(2), m.group(1).strip(), m.group(3).replace("،", ".")))
+                pairs.append((m.group(2), m.group(1).strip(), m.group(3).replace("،", ".").replace(":", ".")))
                 continue
             m2 = _CODE_PRICE_NAME_RE.match(ln)    # «كود سعر اسم» (السعر قبل الاسم — م: X539 «769 6.06 طه»)
             if m2:
-                pairs.append((m2.group(1), m2.group(3).strip(), m2.group(2).replace("،", ".")))
+                pairs.append((m2.group(1), m2.group(3).strip(), m2.group(2).replace("،", ".").replace(":", ".")))
                 continue
             if suppliers:                        # بلا كود: طابِق موردًا مسجّلًا بالاسم (كوده من db)
                 s = _parse_name_price_supplier(ln, suppliers)
@@ -829,9 +829,9 @@ def _extract_code_name(val: str) -> tuple[Optional[str], Optional[str]]:
 # نُفتّش النصّ كلّه عن الأنماط بلا اعتماد على الترتيب.
 _FRAGMENT_CURRENCY = {"تونس": Currency.TND, "تونسي": Currency.TND,
                       "مصر": Currency.EGP, "مصري": Currency.EGP}
-_DECIMAL_RE = re.compile(r"^\d+[.,،]\d+$")     # رقم عشري (سعر): فيه فاصلة عشرية
+_DECIMAL_RE = re.compile(r"^\d+[.,،:]\d+$")     # رقم عشري (سعر): فيه فاصلة عشرية
 _CODE_RE = re.compile(r"^\d{2,4}$")            # كود الزبون: صحيح 2-4 خانات
-_GLUED_NAME_NUM_RE = re.compile(r"^(.*[ء-ي])(\d+(?:[.,،]\d+)?)$")   # «قريش35.5»→(«قريش»,«35.5»)
+_GLUED_NAME_NUM_RE = re.compile(r"^(.*[ء-ي])(\d+(?:[.,،:]\d+)?)$")   # «قريش35.5»→(«قريش»,«35.5»)
 _GLUED_CODE_NAME_RE = re.compile(r"^(\d{2,4})([ء-ي].*)$")           # «728معتصم»→(«728»,«معتصم»)
 
 
@@ -1003,7 +1003,7 @@ def parse_completion_fragment(
 
     # السعر = أصغر رقم عشري (السعر لا المبلغ) — الفاصلة العربية «،» → عشرية (§3.6)
     price_raw = (
-        min(prices, key=lambda p: float(p.replace("،", ".").replace(",", "."))).replace("،", ".")
+        min(prices, key=lambda p: float(p.replace("،", ".").replace(":", ".").replace(",", "."))).replace("،", ".").replace(":", ".")
         if prices else None
     )
     # 🔴 (تلوّث الاسم §7.3): الاسم من السطر الأساسيّ فقط (سطر الكود/أوّل سطر باسم)؛ الكيان الثاني ذو

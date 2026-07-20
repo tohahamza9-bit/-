@@ -95,9 +95,15 @@ def _sup(name="البراق", code="7"):
 # (١) الكاشف — نظيفة 100% لا تستدعي API
 # ═════════════════════════════════════════════════════════════════════════════
 def test_clean_message_is_not_ambiguous(db_lists=None):
-    """رسالة نظيفة بثقة عالية → لا غموض ⇒ لا نداء API إطلاقًا."""
+    """رسالة نظيفة بثقة عالية **وخزينة محلولة** → لا غموض ⇒ لا نداء API إطلاقًا.
+
+    الخزينة جزءٌ من تعريف «نظيفة 100%» منذ قاعدة X1538: حوالةٌ بلا خزينة محلولة غامضةٌ
+    مهما علت ثقتها، لأن الخزينة إمّا في رسالتها الثانية أو ضاع رمزها باستبعادٍ صامت.
+    """
+    from core.models import TreasuryRef
     leg = ParsedLeg(operation=OperationType.SELL, amount=1000.0, currency=Currency.TND, customer_code="793",
-                    customer_name="حميد", reference_number="X1258")
+                    customer_name="حميد", reference_number="X1258",
+                    treasury=TreasuryRef(code="82", name="عزالدين", type=TreasuryType.SELL_ONLY))
     res = ParseResult(kind="transfer", leg=leg, confidence=0.95)
     v = detect("X1258\n793 حميد\n1000 دت", res, [_tre()], [_sup()], min_confidence=0.7)
     assert v.ambiguous is False
@@ -126,6 +132,22 @@ def test_low_parse_confidence_flags():
     leg = ParsedLeg(operation=OperationType.SELL, amount=100.0, reference_number="X1")
     res = ParseResult(kind="transfer", leg=leg, confidence=0.42)
     assert any("ثقة تفكيك منخفضة" in r for r in detect_post(res, min_confidence=0.7))
+
+
+def test_transfer_without_resolved_treasury_flags():
+    """X1538: حوالة تُفكَّك بلا خزينة محلولة → غامضة (الخزينة في الرسالة الثانية أو
+    ضاع رمزها باستبعادٍ صامت). هذه الحالة التي وُجدت الطبقة لإنقاذها."""
+    leg = ParsedLeg(operation=OperationType.SELL, amount=390.0, currency=Currency.TND,
+                    reference_number="X1538")
+    res = ParseResult(kind="transfer", leg=leg, confidence=0.95)   # ثقة عالية عمدًا
+    assert any("بلا خزينة محلولة" in r for r in detect_post(res))
+
+
+def test_noise_without_treasury_does_not_flag():
+    """الشظايا/التكملات تُحلّ بالربط الحتميّ — لا تُصنَّف غموضًا لغياب الخزينة."""
+    leg = ParsedLeg(operation=OperationType.SELL, amount=390.0)
+    res = ParseResult(kind="noise", leg=leg, confidence=0.5)
+    assert not any("بلا خزينة" in r for r in detect_post(res))
 
 
 def test_unresolved_treasury_flags():

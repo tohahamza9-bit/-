@@ -341,3 +341,31 @@ async def test_suppliers_read_dynamically_hot_reload(db):
     assert frag1.supplier is not None
     assert (frag1.supplier.code, frag1.supplier.name) == ("760", "طه")
     assert frag1.is_supplier_counterpart is True
+
+
+# ══ الفاصلة العشريّة «:» — زلّة لوحة مفاتيح (X1538، 2026-07-20) ═══════════════
+def test_colon_decimal_separator_parses_like_period():
+    """«34:5» يقصد «34.5»: على التخطيط العربيّ تجاور «:» النقطةَ. رُصدت في X1538 فأعاد
+    الموظّف إرسالها يدويًّا مصحّحةً بعد 8 دقائق."""
+    from core.constants import Currency
+    from core.parsing.normalize import normalize_price
+    assert normalize_price("34:5", Currency.TND)[1] == normalize_price("34.5", Currency.TND)[1]
+    assert normalize_price("34:5", Currency.TND)[1] == "0.345"
+
+
+def test_malformed_price_returns_none_not_garbage():
+    """🔴 قبل الإصلاح كانت «34:5» تُنتج «0.34:5» — سلسلةً تبدو سعرًا ولا تُقرأ رقمًا،
+    تمضي صامتةً في مسار ماليّ. أيّ ناتج غير رقميّ يجب أن يكون None (فيُصعَّد)."""
+    from core.constants import Currency
+    from core.parsing.normalize import normalize_price
+    raw, norm = normalize_price("abc", Currency.TND)
+    assert raw == "abc" and norm is None
+
+
+def test_colon_price_splits_glued_line():
+    """«390 العربي34:5» يجب أن تنفصل إلى (كود، اسم، سعر) كنظيرتها بالنقطة."""
+    from core.models import SupplierRecord
+    from core.parsing.parser import extract_code_name_price_lines
+    sup = [SupplierRecord(name="العربي", code="9", aliases=[], active=True)]
+    assert extract_code_name_price_lines("390 العربي34:5", sup) == \
+           extract_code_name_price_lines("390 العربي34.5", sup)

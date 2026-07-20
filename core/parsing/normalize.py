@@ -59,6 +59,20 @@ def normalize_ar(s: Optional[str]) -> str:
 
 
 # ── العملة (§3.4) ────────────────────────────────────────────────────────────
+# ── الفاصلة العشريّة ─────────────────────────────────────────────────────────
+# 🔴 «:» فاصلةٌ عشريّة مقبولة إلى جانب «.» و«,» و«،» — زلّة لوحة مفاتيح شائعة: على
+#    التخطيط العربيّ تجاور «:» النقطةَ، فيُكتب «34:5» والمقصود «34.5». رُصدت في X1538
+#    (2026-07-20): فشل السطر فأعاد الموظّف إرسالها يدويًّا بـ«34.5» بعد ثمانِ دقائق.
+#    الأخطر أن «34:5» كانت تمرّ **صامتةً** فتُنتج سعرًا مشوَّهًا «0.34:5» لا استثناءً.
+DECIMAL_SEPS = ".,،:"
+DECIMAL_CLASS = "[.,،:]"          # صنف regex — يُدرَج في أنماط الأسعار
+
+
+def unify_decimal(s: Optional[str]) -> str:
+    """يوحّد كل الفواصل العشريّة المقبولة إلى نقطة («34،5» و«34:5» → «34.5»)."""
+    return (s or "").replace("،", ".").replace(":", ".")
+
+
 _EGP_TOKENS = {"ج", "جم", "جنيه", "مصري", "دم", "دمصري", "دمصرى"}   # «دم»/«دمصري» ملتصقة شائعة (§3.4)
 _TND_TOKENS = {"دت", "تونسي", "دينار", "دنانير"}
 
@@ -321,12 +335,14 @@ def expand_alf_amounts(raw: Optional[str]) -> tuple[str, list[dict]]:
 def normalize_price(raw: Optional[str], currency: Optional[Currency]) -> tuple[Optional[str], Optional[str]]:
     """السعر: EGP كما هو؛ TND يُطبَّع إلى `0.xxxx` (35.75→0.3575، 33→0.33) (§3.6).
 
-    يُرجع (price_raw, price_normalized)."""
+    يُرجع (price_raw, price_normalized). `price_normalized` يكون None إن تعذّر فهم الرقم
+    — **لا سلسلة مشوَّهة**: راجع الحارس في الذيل.
+    """
     if raw is None:
         return None, None
     price_raw = str(raw).strip()
-    # صيغة رقمية مبدئية: توحيد الفاصلة العربية والفراغات
-    s = price_raw.replace("،", ".").replace("'", "").replace(" ", "")
+    # صيغة رقمية مبدئية: توحيد كل الفواصل العشريّة المقبولة والفراغات
+    s = unify_decimal(price_raw).replace("'", "").replace(" ", "")
     if currency == Currency.TND:
         if s.startswith("0."):
             norm = s
@@ -336,4 +352,14 @@ def normalize_price(raw: Optional[str], currency: Optional[Currency]) -> tuple[O
     else:
         # EGP (وغير المحدّد): كما هو، مع توحيد الفاصلة العربية إلى نقطة
         norm = s.replace(",", ".") if "," in s else s
+    # 🔴 حارس: لا نُخرِج سعرًا مشوَّهًا أبدًا. قبل هذا الحارس كانت «34:5» تُنتج «0.34:5»
+    #    — سلسلةً تبدو سعرًا ولا تُقرأ رقمًا، تمضي صامتةً في مسار ماليّ (X1538، 2026-07-20).
+    #    الفشل الصريح (None) يُصعَّد؛ السلسلة المشوَّهة تُكتب.
+    if norm is not None:
+        try:
+            float(norm)
+        except ValueError:
+            log.warning("سعر غير مفهوم %r → تعذّر تطبيعه (%r) — يُترك None للتصعيد.",
+                        price_raw, norm)
+            norm = None
     return price_raw, norm
