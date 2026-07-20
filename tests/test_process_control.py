@@ -147,3 +147,38 @@ def test_kernel_reported_stopped_when_port_free(monkeypatch):
 
     monkeypatch.setattr(pc.subprocess, "run", lambda *a, **k: _R())
     assert pc._kernel_status()["status"] == "stopped"
+
+
+def test_kernel_stop_also_kills_port_owner(monkeypatch):
+    """🔴 `schtasks /End` وحده يترك الكيرنل حيًّا إن شُغِّل من الجسر (المجدوِل يفقد قبضته
+    فتبقى uvicorn يتيمةً ممسكةً بالمنفذ 8000). أُثبِت تجريبيًّا 2026-07-20. لذا يجب أن
+    يتضمّن أمرُ الإيقاف قتلَ **مالك المنفذ** صراحةً — وإلا قالت اللوحة «موقوف» والكيرنل
+    يواصل الكتابة في MONEYADO."""
+    import core.process_control as pc
+    seen = {}
+
+    class _P:
+        def __init__(self, cmd, **kw):
+            seen["cmd"] = " ".join(cmd)
+
+    monkeypatch.setattr(pc.subprocess, "Popen", _P)
+    pc.run_action("stop", pc.KERNEL)
+    assert "schtasks /End" in seen["cmd"]
+    assert "8000" in seen["cmd"] and "Stop-Process" in seen["cmd"], \
+        "الإيقاف يجب أن يُجهِز على مالك المنفذ 8000 لا أن يكتفي بـschtasks"
+
+
+def test_kernel_restart_kills_orphan_before_starting(monkeypatch):
+    """إعادة التشغيل تُجهِز على اليتيم قبل /Run — وإلا فشل الربط على منفذ مشغول."""
+    import core.process_control as pc
+    seen = {}
+
+    class _P:
+        def __init__(self, cmd, **kw):
+            seen["cmd"] = " ".join(cmd)
+
+    monkeypatch.setattr(pc.subprocess, "Popen", _P)
+    pc.run_action("restart", pc.KERNEL)
+    cmd = seen["cmd"]
+    assert "Stop-Process" in cmd
+    assert cmd.index("Stop-Process") < cmd.index("/Run"), "القتل يسبق التشغيل"

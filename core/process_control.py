@@ -110,15 +110,30 @@ def list_processes() -> list[dict]:
     return out
 
 
+# 🔴 `schtasks /End` **لا يكفي** لقتل الكيرنل: إن كانت المهمّة قد شُغِّلت من الجسر
+#    (POST /pm2، عملية node تحت pm2) فإن المجدوِل يُعلن المهمّة «Ready» بينما تبقى عملية
+#    uvicorn حيّةً ممسكةً بالمنفذ 8000 — يتيمةً خارج قبضته. تحقّقتُ منه تجريبيًّا 2026-07-20:
+#    تشغيلٌ مباشر ⇒ /End يقتل؛ تشغيلٌ عبر الجسر ⇒ /End يترك العملية حيّة.
+#    الأثر لو تُرك: اللوحة تقول «موقوف» والكيرنل يواصل الكتابة في MONEYADO — وهو بالضبط
+#    الفخّ الذي بُني عليه هذا الملفّ («الحقيقة من المنفذ لا من المُشرِف»).
+#    العلاج: بعد /End نقتل **مالك المنفذ 8000** صراحةً. المنفذ ثابت في الكود لا من المستخدم.
+_KILL_PORT_8000 = (
+    'powershell -NoProfile -ExecutionPolicy Bypass -Command '
+    '"Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | '
+    'ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"'
+)
+
+
 def _run_kernel_task(action: str) -> dict:
     """أوامر الكيرنل عبر مُشرِف ويندوز (schtasks) — يُنفَّذ **منفصلًا مؤجَّلًا دائمًا** لأن
     كل أوامره تمسّ الخادم الذي يخدم الطلب (حتى start: يعقبه /End في restart)."""
     if action == "start":
         inner = f'schtasks /Run /TN {TASK_KERNEL}'
     elif action == "stop":
-        inner = f'schtasks /End /TN {TASK_KERNEL}'
-    else:                                          # restart — أُنهِ ثم شغّل
-        inner = f'schtasks /End /TN {TASK_KERNEL} & timeout /t 3 /nobreak >nul & schtasks /Run /TN {TASK_KERNEL}'
+        inner = f'schtasks /End /TN {TASK_KERNEL} & {_KILL_PORT_8000}'
+    else:                                          # restart — أُنهِ (وأجهِز على اليتيم) ثم شغّل
+        inner = (f'schtasks /End /TN {TASK_KERNEL} & {_KILL_PORT_8000}'
+                 f' & timeout /t 3 /nobreak >nul & schtasks /Run /TN {TASK_KERNEL}')
     flags = 0
     if sys.platform == "win32":
         flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
