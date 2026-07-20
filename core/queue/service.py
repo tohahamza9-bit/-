@@ -845,11 +845,23 @@ class QueueService:
         #   _fragment_targets يعرف القاعدة أصلًا: ردٌّ يحمل كودًا يخصّ صفقةً **بلا كود**.
         #   يُطبَّق تفضيلًا لا إقصاءً: إن لم يوافق أحدٌ نعود للمجموعة كاملةً، فتبقى ضمانة
         #   «لا سقوط صامت» قائمةً كما كانت.
-        targeted = [d for d in pool if self._fragment_targets(d, frag)] if frag is not None else []
+        # 🔴 استبعادُ المولودة من إعادة استخدام مرجع (X1242) — حتميّ، بلا مرجع صريح فقط.
+        #   تلك صفقةٌ نشأت من رسالةٍ **ثانية** انفصلت عن أُولاها، فمحتواها كاملٌ سلفًا ولا
+        #   تنتظر تكملةً عديمة المرجع. جلوسها في الطابور يكسر تقابل ١:١ الذي تفترضه FIFO
+        #   فتنزاح كلّ الروابط بواحد (X850‑X853، ودفعة 2026-07-20: k8 هبطت على X1566 وصاحبها
+        #   X1568). المرجع الصريح ما زال يبلغها فوق هذا الاستبعاد عبر bind_by_reference أعلاه.
+        #   إن أفرغ الاستبعادُ المجموعةَ، تُحفَظ الرسالة ردًّا معلّقًا ثمّ تُصعَّد ⚠️ — ظهورٌ
+        #   صريح لا سقوط صامت (§0).
+        eligible = [d for d in pool if not d.born_from_ref_reuse]
+        if len(eligible) != len(pool):
+            _log_link_decision("pending_for_sender", message_key, pool, None,
+                               f"excluded-ref-reuse:{len(pool) - len(eligible)}")
+        targeted = [d for d in eligible if self._fragment_targets(d, frag)] if frag is not None else []
         if targeted:
             _log_link_decision("pending_for_sender", message_key, targeted,
                                targeted[0], "content-targeted")
             return targeted
+        pool = eligible
         _log_link_decision("pending_for_sender", message_key, pool,
                            pool[0] if pool else None, "fifo-pool")
         return pool

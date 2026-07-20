@@ -1463,6 +1463,11 @@ class Pipeline:
 
         # التجميع (§7.3): صفقة جديدة أو دمج طرف ثانٍ
         deal = await self.queue.try_group(leg, now, chat_jid=raw.chat_jid)
+        # (X1242) وسمُ المولودة من إعادة الاستخدام — تُستبعَد لاحقًا من ترشّح التكملات عديمة
+        #   المرجع. يُوسَم **بعد** التجميع كي لا يُوسَم دمجُ طرفٍ ثانٍ في صفقةٍ قائمة سليمة.
+        if _reuse == "reused" and deal is not None and not deal.born_from_ref_reuse:
+            deal.born_from_ref_reuse = True
+            await self.db.deals.upsert(deal)
         # افتح خانة مُرسِل إن بقيت الصفقة تنتظر طرفًا ثانيًا (§7.3): الرسالة الثانية من نفس المُرسِل
         # خلال النافذة ستملؤها حتمًا. SI لا تفتح خانة (لا تنتظر ثانيًا §4.5) — والحالة WAITING تمنعها.
         if (deal is not None and deal.status == Status.WAITING_SECOND_LEG

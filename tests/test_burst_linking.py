@@ -45,13 +45,20 @@ def _pipe(db, ai_client=None):
                     customer_room_jids=[], treasury_room_jids=[], ai_client=ai_client)
 
 
-async def _run(pipe, msgs, *, gap=1.5, ticks=(30, 70, 100)):
-    """يلتقط الدفعة بفواصل واقعية ثمّ يُدير نبضات تتخطّى نافذة الاستقرار (60ث)."""
-    for i, (txt, key) in enumerate(msgs):
-        await pipe.capture(RawMessage(message_key=key, chat_jid=CENTRAL, sender_jid=S1,
-                                      text=txt, received_at=NOW + timedelta(seconds=i * gap)))
+async def _run(pipe, msgs, *, gap=1.5, tail_ticks=(90, 130, 200)):
+    """يحاكي التشغيل الحيّ: التقاطٌ ثمّ نبضةُ عاملٍ بعده مباشرةً (العامل يدور كلّ ٢ث).
+
+    🔴 التشابك ليس تفصيلًا تجميليًّا: `_reference_reuse_action` يستثني الصفقات في
+    WAITING_SECOND_LEG، فلا يُكتشَف «مرجعٌ مُعاد استخدامه» إلّا بعد أن تُغادر الأُولى
+    الانتظار. حصادٌ دفعيّ (كلّ الالتقاط ثمّ نبضة) يُبقي الجميع منتظِرين فلا يقع الكشف
+    أبدًا — وهو ما جعل حزمة اختبارٍ سابقة تُخالف الإنتاج وتُخفي أثر الإصلاح."""
     with contextlib.redirect_stderr(io.StringIO()):
-        for t in ticks:
+        for i, (txt, key) in enumerate(msgs):
+            at = NOW + timedelta(seconds=i * gap)
+            await pipe.capture(RawMessage(message_key=key, chat_jid=CENTRAL, sender_jid=S1,
+                                          text=txt, received_at=at))
+            await pipe.process_inbox(at + timedelta(seconds=0.5))
+        for t in tail_ticks:                    # ما بقي معلّقًا يتخطّى نافذة الاستقرار (60ث)
             await pipe.process_inbox(NOW + timedelta(seconds=t))
 
 
@@ -168,3 +175,46 @@ async def test_burst_refless_continuations_reach_true_owner(db):
         if [r for r, keys in pairs.items() if key in keys] != [ref]
     }
     assert not wrong, f"تكملات وصلت أصحابًا خطأً: {wrong}"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# آليّة الاستبعاد — تُختبَر على مستوى الوحدة لأنّ شرطها لا يتحقّق عبر الأنبوب
+# ═════════════════════════════════════════════════════════════════════════════
+def _deal(deal_id, ref, offset, *, reuse=False, code=None):
+    from core.constants import OperationType, Status
+    from core.models import Deal, ParsedLeg
+    leg = ParsedLeg(operation=OperationType.SELL, reference_number=ref, customer_code=code,
+                    amount=5000.0, sender_jid=S1, source_message_key=f"{deal_id}-a")
+    at = NOW + timedelta(seconds=offset)
+    return Deal(deal_id=deal_id, status=Status.WAITING_SECOND_LEG, sell_leg=leg, created_at=at,
+                updated_at=at, chat_jid=CENTRAL, first_received_at=at,
+                source_message_keys=[f"{deal_id}-a"], born_from_ref_reuse=reuse)
+
+
+def _frag_k8():
+    """«1277 شركة القت 6،02 / طه6.08» — تكملة X1568، عديمة المرجع."""
+    from core.constants import OperationType
+    from core.models import ParsedLeg
+    return ParsedLeg(operation=OperationType.SELL, customer_code="1277",
+                     customer_name="شركة القت", price_raw="6.02", price_normalized="6.02")
+
+
+async def test_reuse_born_deal_excluded_from_refless_candidates(db):
+    """الصفقة المولودة من إعادة استخدام مرجع تُستبعَد رغم أنّها **الأقدم**."""
+    from core.queue.service import QueueService
+    q = QueueService(db)
+    await db.deals.upsert(_deal("decoy", "X1566", 0, reuse=True))
+    await db.deals.upsert(_deal("real", "X1568", 1))
+    cands = await q.pending_candidates_for_sender(
+        CENTRAL, S1, NOW + timedelta(seconds=5), frag=_frag_k8())
+    assert [c.deal_id for c in cands] == ["real"], "الشَّرَك لم يُستبعَد"
+
+
+async def test_explicit_ref_still_reaches_reuse_born_deal(db):
+    """الاستبعاد للتكملات عديمة المرجع وحدها — المرجع الصريح يبلغها دائمًا."""
+    from core.queue.service import QueueService
+    q = QueueService(db)
+    await db.deals.upsert(_deal("decoy", "X1566", 0, reuse=True))
+    await db.deals.upsert(_deal("real", "X1568", 1))
+    cands = await q.pending_candidates_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5), "X1566")
+    assert [c.deal_id for c in cands] == ["decoy"]
