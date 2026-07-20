@@ -405,3 +405,53 @@ async def test_rejected_proposal_escalates_with_suggestion(db):
     out = await p._ai_first(raw, res, _d(raw.text, res, tre, sup), tre, sup, None, NOW)
     assert out is None
     assert any("لم يجتز التحقّق" in m for m in bus.admin_msgs)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (نقطة أ) الثغرة: فشل تفكيك **بلا مرجع** يجب أن يصل الذكاء — إن بدا حوالةً
+# ═════════════════════════════════════════════════════════════════════════════
+from core.queue.stabilization import looks_like_transfer_attempt
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("01044669692\n11000 جنيه", True),      # هاتف + مبلغ بعملة
+    ("01044669692\nلفلان", True),           # هاتف وحده = إشارة حوالة
+    ("11000 جنيه لفلان", True),             # مبلغ بعملة وحده
+    ("حول لفلان خمسة", False),              # بلا رقم/عملة = كلام
+    ("تمام يا باشا", False),                # هدرزة
+    ("شكرا يا غالي", False),                # هدرزة
+    ("", False),
+])
+def test_looks_like_transfer_attempt(text, expected):
+    """المميّز البنيويّ: مبلغ بعملة أو هاتف = محاولة حوالة؛ الكلام الصرف = لا."""
+    assert looks_like_transfer_attempt(text) is expected
+
+
+async def _process_central(db, ai, texts):
+    """يلتقط رسائل مركزية ويُعالجها بعد استقرارها — يُرجع FakeAi لفحص .calls."""
+    import contextlib
+    import io
+    p = _pipe(db, _RecBus(), ai)
+    base = NOW
+    for i, txt in enumerate(texts):
+        await p.capture(_raw(f"m{i}", txt, at=base + timedelta(seconds=i * 0.3)))
+    with contextlib.redirect_stderr(io.StringIO()):
+        await p.process_inbox(base + timedelta(seconds=95))   # يتخطّى الاستقرار + انتظار التكملة
+        await p.process_inbox(base + timedelta(seconds=160))
+    return ai
+
+
+async def test_failed_transfer_attempt_without_ref_reaches_ai(db):
+    """رسالةٌ فشل تفكيكها بلا مرجع لكنها تبدو حوالة (هاتف + مبلغ) → تصل الذكاء (نقطة أ).
+
+    قبل الإصلاح: البوّابة (kind==transfer or _has_reference) تُسقطها noise بلا أن يراها الذكاء."""
+    await _enable(db)
+    ai = await _process_central(db, _FakeAi(), ["01044669692\n11000 جنيه لفلان بدون تفاصيل"])
+    assert ai.calls, "فشل التفكيك بلا مرجع لم يصل الذكاء — الثغرة باقية"
+
+
+async def test_pure_chatter_does_not_reach_ai(db):
+    """هدرزة صرفة (بلا رقم/عملة) تبقى noise ولا تُستنزف النموذج (تصميم منع التصعيد المفرط)."""
+    await _enable(db)
+    ai = await _process_central(db, _FakeAi(), ["تمام يا باشا وصلني شكرا"])
+    assert ai.calls == [], "الهدرزة وصلت الذكاء — تصعيد مفرط"

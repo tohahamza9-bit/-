@@ -97,6 +97,22 @@ def looks_like_complete_transfer(text: str) -> bool:
     return si_hits >= 2
 
 
+def looks_like_transfer_attempt(text: str) -> bool:
+    """هل الرسالة **تحاول** أن تكون حوالة (حتى لو فشل تفكيكها وبلا رقم إشاري)؟
+
+    تمييزٌ للكاشف (نقطة أ من AI-first): رسالةٌ صُنّفت noise بلا مرجع صريح — هل نُرسِلها للذكاء
+    أم نتركها هدرزةً؟ المعيار **بنيويّ لا لفظيّ**: تحمل إشارة حوالة ملموسة (مبلغ بعملة أو
+    مجرى هاتف)، لا مجرّد كلام. «01044669692 / 11000 جنيه» → نعم؛ «تمام يا باشا» → لا.
+
+    أضعف من looks_like_complete_transfer عمدًا (لا يشترط مرجعًا): المرجع يُغطّيه الكاشف سلفًا
+    عبر _has_reference، وهذه للفئة الفائتة — فشل بلا مرجع. حارس التصعيد المفرط (§ambiguity):
+    الهدرزة الصرفة بلا رقمٍ ولا عملة تبقى noise فلا يُستنزَف النموذج على «شكرًا»."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_AMOUNT_CUR_RE.search(t)) or _has_phone(t)
+
+
 def is_short_placeholder(text: str) -> bool:
     """«الحرف» — كلمة قصيرة قابلة للتعديل (حجز مكان)، بلا بنية حوالة."""
     t = (text or "").strip()

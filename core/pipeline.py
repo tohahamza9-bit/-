@@ -80,7 +80,7 @@ from .queue.service import (
     is_treasury_second_reply,
     missing_mandatory_fields,
 )
-from .queue.stabilization import is_stable
+from .queue.stabilization import is_stable, looks_like_transfer_attempt
 from .verification.sql_verifier import SqlVerifier
 from .writers.base import Writer
 
@@ -1178,13 +1178,24 @@ class Pipeline:
         # ═══ AI-first: أيّ شكّ → ذكاء فورًا بالرسالتين معًا (§1-§3) ═══
         # يسبق تصعيد «المبلغ الملتبس» أدناه عمدًا: ذاك أحد إشارات الغموض، فيُعطى الذكاء فرصته
         # قبل التصعيد لا بعده. مطفأ ما لم يُفعَّل ai_first_enabled (سلوك اليوم مطابق حين يكون off).
+        # 🔴 بوّابة الوصول للذكاء (نقطة أ): حوالة مفكَّكة، **أو** مرجع صريح، **أو** رسالةٌ فشل
+        #   تفكيكها لكنّها **تبدو محاولة حوالة** (مبلغ بعملة/هاتف) بلا مرجع. الفرع الثالث يسدّ
+        #   الثغرة: قبله كان الفشل بلا مرجع يسقط noise بلا أن يراه الذكاء. الهدرزة الصرفة (بلا
+        #   رقمٍ ولا عملة) تبقى خارجه فلا يُستنزَف النموذج على «تمام يا باشا» (§ambiguity — تصميم
+        #   منع التصعيد المفرط 97.7%).
+        _looks_attempt = looks_like_transfer_attempt(raw.text or "")
         _cfg_af = await self.db.detection.get()
         if getattr(_cfg_af, "ai_first_enabled", False) and getattr(_cfg_af, "ai_enabled", False) \
-                and (result.kind == "transfer" or _has_reference(raw.text or "")):
+                and (result.kind == "transfer" or _has_reference(raw.text or "") or _looks_attempt):
             _verdict = detect_ambiguity(
                 raw.text or "", result, treasuries, suppliers,
                 min_confidence=float(getattr(_cfg_af, "ai_min_parse_confidence", 0.7)))
-            if _verdict.ambiguous:
+            # 🔴 (نقطة أ) رسالةٌ **تبدو حوالة** لكن التفكيك لم يُنتجها حوالةً (noise/فشل) بلا مرجع =
+            #   غموضٌ بذاته يستحقّ الذكاء، حتى لو لم تُطلقه قواعد detect_ambiguity (التي تقيس الحوالات
+            #   المفكَّكة أساسًا). الشرط البنيويّ (_looks_attempt) سبق أن ميّزها عن الهدرزة في البوّابة.
+            _failed_attempt = result.kind != "transfer" and not _has_reference(raw.text or "") \
+                and _looks_attempt
+            if _verdict.ambiguous or _failed_attempt:
                 _partner = self._pair_partner(
                     raw, batch or [], treasuries, suppliers,
                     window_seconds=float(getattr(_cfg_af, "ai_pair_wait_seconds", 3.0)))
