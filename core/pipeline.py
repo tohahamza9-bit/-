@@ -557,37 +557,38 @@ class Pipeline:
         return None
 
     def _narrow_second_pairs(self, cands: list[Deal], pairs: list, suppliers: list) -> list[Deal]:
-        """(الخيار أ) تضييق مرشّحي صيغة السطرين بالمحتوى الحتميّ قبل الذكاء/FIFO. **تفضيلٌ لا
-        إقصاء**: كلّ خطوةٍ تُضيّق فقط إن أبقت مرشّحًا؛ إن أفرغت المجموعةَ نعود لما قبلها (لا سقوط).
+        """(العرض 2-A) تضييق مرشّحي صيغة السطرين بالمحتوى الحتميّ **إقصاءً لا تفضيلًا**: كل خطوةٍ
+        صارمةٍ تُقصي المخالف حتى لو أفرغت المجموعة (0 ⇒ لا مطابق متوافق ⇒ يُعلَّق/يُصعَّد في الأنبوب،
+        بلا رجوعٍ للطابور الكامل ولا تخمين الأقدم). ما بقي متعدّدًا (>1) = التباس يُعلَّقه الأنبوب.
 
-        الترتيب: ① العملة (تكملة مصريّة لا تلمس تونسيّة) → ② كود الزبون (صفقة قائمة بنفس الكود =
-        إعادة إرسال) → ③ المورّد (صفقةٌ واحدةٌ فقط ذات صلة). ما بقي متعدّدًا يُحسَم لاحقًا بالذكاء ثم FIFO."""
+        الترتيب: ① العملة صارمة (تكملة مصريّة لا تلمس تونسيّة، عملتها من سعرها 6.02→EGP/34→TND) →
+        ② كود الزبون (إن طابق كودٌ صفقةً ⇒ حصرًا هي) → ③ المورّد (إن انحلّ ⇒ حصرًا المنتظِرون موردًا)."""
         if len(cands) <= 1:
             return cands
         q = self.queue
         ccode, _cname, cprice = pairs[0]
         sprice = pairs[1][2] if len(pairs) > 1 else None
-        # ① العملة — من سعر سطر الزبون أو المورّد (6.02→EGP، 34→TND)
+        # ① العملة — إقصاء صارم (لا رجوع للطابور الكامل إن أفرغت: 0 = عدم توافق حقيقيّ)
         frag_cur = q._currency_from_price(cprice) or q._currency_from_price(sprice)
         if frag_cur is not None:
-            cur_match = [c for c in cands if q._currency_compatible(c, frag_cur)]
-            if cur_match:
-                cands = cur_match
+            cands = [c for c in cands if q._currency_compatible(c, frag_cur)]
         if len(cands) <= 1:
             return cands
-        # ② كود الزبون — صفقةٌ قائمةٌ بنفس الكود بالضبط (نادر لحوالة A، لكنه يحسم إعادة الإرسال)
+        # ② كود الزبون — إن طابق كودٌ صفقةً/صفقاتٍ بالضبط ⇒ حصرًا هنّ (إقصاء غير المطابق)
         if ccode:
             code_match = [c for c in cands
                           if c.sell_leg is not None and c.sell_leg.customer_code == str(ccode)]
-            if len(code_match) == 1:
-                return code_match
-        # ③ المورّد — إن انحلّ سطرُ المورّد لمورّدٍ مُدرَجٍ وانتظرته صفقةٌ واحدةٌ فقط (بلا مورّد بعد)
+            if code_match:
+                cands = code_match
+        if len(cands) <= 1:
+            return cands
+        # ③ المورّد — إن انحلّ سطرُ المورّد لمورّدٍ مُدرَجٍ ⇒ حصرًا الصفقات المنتظِرة موردًا (إقصاء)
         srec = resolve_supplier(pairs[1][1], suppliers) if len(pairs) > 1 else None
         if srec is not None:
             sup_wait = [c for c in cands
                         if c.sell_leg is not None and c.sell_leg.supplier is None]
-            if len(sup_wait) == 1:
-                return sup_wait
+            if sup_wait:
+                cands = sup_wait
         return cands
 
     async def _ai_link_choice(self, raw: RawMessage, cands: list[Deal],
@@ -637,13 +638,14 @@ class Pipeline:
 
     async def _choose_link_target(self, raw: RawMessage, cands: list[Deal],
                                   treasuries: list, suppliers: list, now: datetime, *,
-                                  text_ref: str | None = None, stage: str = "link") -> Deal | None:
-        """(R1+R2+R3) نقطة التحكيم **الوحيدة** لاختيار هدف التكملة.
+                                  text_ref: str | None = None, stage: str = "link",
+                                  frag: "ParsedLeg | None" = None) -> Deal | None:
+        """(R1+R2+2-A) نقطة التحكيم **الوحيدة** لاختيار هدف التكملة.
 
-        الترتيب صارم: مرجعٌ صريح ⇒ حسمٌ فوريّ (القائمة مُصفّاة بالمرجع سلفًا في طبقة الطابور،
-        و[] تعني رفض ربط لا «لا مرشّحين»). ثمّ مرشَّحٌ واحد ⇒ هو. ثمّ **الذكاء يرجّح بالمحتوى**
-        عند التعدّد (حادثة X1571: FIFO أعطت تكملتَها لـX1568 بلا فحص محتوى). وأخيرًا FIFO
-        احتياطًا حين يكون الذكاء مطفأً/فاشلًا/دون العتبة — السلوك القائم بلا تغيير."""
+        الترتيب صارم: مرجعٌ صريح ⇒ حسمٌ فوريّ ([] تعني رفض ربط لا «لا مرشّحين»). ثمّ **إقصاءٌ صارم
+        بالمحتوى** (العملة + نوع المحتوى عبر narrow_by_content) — لا تفضيل يرجع للطابور الكامل. ثمّ
+        مرشَّحٌ واحد ⇒ هو. عند التعدّد يرجّح الذكاء (auto فقط)؛ وإلّا (العرض 2-A) **تعليق + تصعيد بلا
+        تخمين الأقدم** — استُبدلت FIFO الاحتياطيّة التي أعطت تكملتَها لأقدم معلّقة (X1706–X1711)."""
         if not cands:
             _log_link_decision(stage, raw.message_key, [], None,
                                "rejected-ref-mismatch" if text_ref else "no-candidates", text_ref)
@@ -657,8 +659,18 @@ class Pipeline:
             chosen = matched[0] if matched else None
             _log_link_decision(stage, raw.message_key, cands, chosen, reason, text_ref)
             return chosen
+        # (العرض 2-A) إقصاءٌ صارمٌ بالمحتوى قبل أيّ قرار — يُقصي المخالف عملةً/نوعَ محتوى حتى لو أفرغ.
+        if frag is not None:
+            narrowed = self.queue.narrow_by_content(cands, frag)
+            if len(narrowed) != len(cands):
+                _log_link_decision(stage, raw.message_key, cands, None,
+                                   f"strict-narrow:{len(cands)}->{len(narrowed)}")
+            cands = narrowed
+            if not cands:
+                _log_link_decision(stage, raw.message_key, [], None, "no-content-compatible")
+                return None
         if len(cands) == 1:
-            _log_link_decision(stage, raw.message_key, cands, cands[0], "single-candidate")
+            _log_link_decision(stage, raw.message_key, cands, cands[0], "content/single")
             return cands[0]
         choice = await self._ai_link_choice(raw, cands, treasuries, suppliers, now)
         if choice is not None and choice.action == "auto":
@@ -669,21 +681,19 @@ class Pipeline:
                 f"(ثقة {choice.confidence:.2f}) بصفقة {self._ref(chosen) or '؟'}. راجعها.",
                 raw.message_key, forward_key=raw.message_key)
             return chosen
-        if choice is not None and choice.action == "ask":
-            _log_link_decision(stage, raw.message_key, cands, cands[choice.index],
-                               f"ai-ask:{choice.confidence:.2f}")
-            opts = "\n".join(
-                f"{i+1}) {self._ref(c) or '؟'} — "
-                f"{(c.sell_leg.customer_name if c.sell_leg else None) or '؟'}"
-                for i, c in enumerate(cands))
-            await self.bus.notify_admin(
-                f"⚠️ تكملة بلا رقم إشاري + {len(cands)} صفقات معلّقة. الذكاء يرجّح "
-                f"الخيار {choice.index + 1} بثقة {choice.confidence:.2f} (دون الحسم). "
-                f"أيّها؟ **رد برقم الخيار**:\n{opts}",
-                raw.message_key, forward_key=raw.message_key)
-            return None
-        _log_link_decision(stage, raw.message_key, cands, cands[0], "fifo-fallback")
-        return cands[0]
+        # (العرض 2-A) >1 مرشّح متوافق محتوىً + بلا حسمِ ذكاء ⇒ **تعليق + تصعيد** بلا تخمين الأقدم.
+        _pick = f"الذكاء يرجّح الخيار {choice.index + 1} بثقة {choice.confidence:.2f} (دون الحسم). " \
+            if (choice is not None and choice.action == "ask") else ""
+        opts = "\n".join(
+            f"{i+1}) {self._ref(c) or '؟'} — "
+            f"{(c.sell_leg.customer_name if c.sell_leg else None) or '؟'}"
+            for i, c in enumerate(cands))
+        await self.bus.notify_admin(
+            f"⚠️ تكملة بلا رقم إشاري + {len(cands)} صفقات معلّقة متوافقة محتوىً — **لم تُربَط** "
+            f"(التباس، بلا تخمين الأقدم). {_pick}أيّها؟ **رد برقم الخيار**:\n{opts}",
+            raw.message_key, forward_key=raw.message_key)
+        _log_link_decision(stage, raw.message_key, cands, None, "ambiguous-hold")
+        return None
 
     async def _ai_rescue_parse(self, raw: RawMessage, treasuries: list, suppliers: list):
         """(الفهم الذكي — توسعة X1325) رسالة أولى تحمل مرجعًا وفشل تفكيكها → صحّح كلمة العملة
@@ -1362,13 +1372,24 @@ class Pipeline:
             if txt_ref:                                    # الطبقة ١ — بالمرجع حصرًا (مُلزِم)
                 target = await self.queue.waiting_by_reference(raw.chat_jid, txt_ref, now)
                 _link_reason = "مرجع" if target is not None else "رفض — مرجع بلا مطابقة"
-            elif not _is_two_line:                         # الطبقة ٢ — FIFO لنفس المُرسِل (رد مورد/خزينة فقط)
+            elif not _is_two_line:                         # الطبقة ٢ — تحكيمٌ محتوائيّ لنفس المُرسِل (رد مورد/خزينة)
+                # (العرض 2-A) بدل FIFO الأقدم: مرشّحو نفس المُرسِل ← إقصاءٌ صارم بالمحتوى في نقطة
+                #   التحكيم الوحيدة (_choose_link_target): 1→ربط، 0→لا مطابق، >1→تعليق+تصعيد بلا تخمين.
                 frag2 = parse_completion_fragment(raw.text, treasuries, suppliers, corrections)
-                target = await self.queue.oldest_waiting_for_sender(
-                    raw.chat_jid, raw.sender_jid, now, frag2, message_key=raw.message_key)
-                _link_reason = "FIFO مُرسِل"
+                _cands2 = await self.queue.pending_candidates_for_sender(
+                    raw.chat_jid, raw.sender_jid, now, txt_ref,
+                    frag=frag2, message_key=raw.message_key)
+                target = await self._choose_link_target(
+                    raw, _cands2, treasuries, suppliers, now,
+                    text_ref=txt_ref, stage="second_leg", frag=frag2)
+                _link_reason = "محتوى/تحكيم مُرسِل"
             # صيغة السطرين بلا مرجع ⇒ target=None هنا عمدًا، فتسقط للفرع B (المطابقة بالمحتوى أدناه).
             if target is not None and target.status == Status.WAITING_SECOND_LEG:
+                # (العرض 2-B) ادّعاءٌ ذرّيّ قبل الابتلاع — لا كيرنلان يبتلعان نفس الصفقة.
+                if not await self.db.deals.claim_completion_attempt(target.deal_id, now):
+                    log.info("الطبقة ٢ %s: خسِرت الادّعاء الذرّيّ للصفقة %s (سباق) — تخطٍّ",
+                             raw.message_key, target.deal_id)
+                    return None
                 absorbed = await self.queue.absorb_second_into(
                     target, raw, now, treasuries, suppliers)
                 if absorbed is not None:
@@ -1376,6 +1397,9 @@ class Pipeline:
                     log.info("ربط الرسالة الثانية %s بالصفقة %s (%s)", raw.message_key,
                              merged.deal_id, _link_reason)
                     return merged
+                # لم يُبتلَع (شكلٌ لا يلائم absorb_second_into) → **حرّر الادّعاء** كي يُعيد المسارُ
+                #   التالي لنفس الرسالة (اليتيم) الادّعاءَ بلا خسارةٍ كاذبة (باگ X1300: بقيت عالقة WAITING).
+                await self.db.deals.release_completion_attempt(target.deal_id)
 
         # 🔴 ربط الرسالة الثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون ثم مورد §7.3) بصفقة معلّقة
         #    في نفس الغرفة خلال النافذة — **قبل التصنيف** كي لا تُسقَط noise/خارج-النطاق. المطابقة
@@ -1395,10 +1419,16 @@ class Pipeline:
                 # (الخيار أ) تضييقٌ حتميّ **بالمحتوى** قبل الذكاء/FIFO (منع الانزياح داخل العملة):
                 #   ① العملة — تكملة مصريّة لا تلمس صفقة تونسيّة (سعرها 6.02→EGP / 34→TND).
                 #   ② كود الزبون — إن حملته التكملة وطابق كودَ صفقةٍ قائمة بالضبط ⇒ هي (إعادة إرسال).
-                #   ③ المورّد — إن انحلّ سطرُ المورّد لمورّدٍ مُدرَجٍ وانتظرته صفقةٌ **واحدةٌ** فقط ⇒ هي.
-                #   تفضيلٌ لا إقصاء: إن أفرغ التضييقُ المجموعةَ نعود لما قبله (لا سقوط صامت §0).
+                #   ③ المورّد — إن انحلّ سطرُ المورّد لمورّدٍ مُدرَجٍ ⇒ حصرًا المنتظِرون موردًا.
+                #   (العرض 2-A) إقصاءٌ لا تفضيل: 0 = لا مطابق (يسقط للمعالجة العاديّة)، >1 = التباس (تعليق+تصعيد).
                 cands = self._narrow_second_pairs(cands, pairs, suppliers)
             if len(cands) == 1:
+                # (العرض 2-B) ادّعاءٌ ذرّيّ قبل الابتلاع — يمنع كيرنلَين متزامنَين من ابتلاع نفس الصفقة.
+                if not await self.db.deals.claim_completion_attempt(cands[0].deal_id, now):
+                    _log_link_decision("second_pairs", raw.message_key, cands, None, "claim-lost")
+                    log.info("تكملة السطرين %s: خسِرت الادّعاء الذرّيّ للصفقة %s (سباق) — تخطٍّ",
+                             raw.message_key, cands[0].deal_id)
+                    return None
                 merged = await self.queue.absorb_customer_supplier(
                     cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
                 _log_link_decision("second_pairs", raw.message_key, cands, cands[0], "content/single")
@@ -1407,6 +1437,9 @@ class Pipeline:
                 # ═══ (§5) تعدّد المعلّقات + تكملة واحدة → الذكاء يرى الكل ويقرّر (عالية→ربط، وسط→خيارين) ═══
                 choice = await self._ai_link_choice(raw, cands, treasuries, suppliers, now)
                 if choice is not None and choice.action == "auto":
+                    if not await self.db.deals.claim_completion_attempt(cands[choice.index].deal_id, now):
+                        _log_link_decision("second_pairs", raw.message_key, cands, None, "claim-lost")
+                        return None
                     merged = await self.queue.absorb_customer_supplier(
                         cands[choice.index], pairs[0], pairs[1], raw.message_key, treasuries, now)
                     await self.bus.notify_admin(
@@ -1416,28 +1449,24 @@ class Pipeline:
                     log.info("(AI-first §5) ربط تلقائيّ لتكملة %s بالصفقة #%d (ثقة %.2f)",
                              raw.message_key, choice.index, choice.confidence)
                     return merged
-                if choice is not None and choice.action == "ask":
-                    opts = "\n".join(
-                        f"{i+1}) {self._ref(c) or '؟'} — "
-                        f"{(c.sell_leg.customer_name if c.sell_leg else None) or '؟'}"
-                        for i, c in enumerate(cands))
-                    await self.bus.notify_admin(
-                        f"⚠️ تكملة بلا رقم إشاري + {len(cands)} صفقات معلّقة. الذكاء يرجّح "
-                        f"الخيار {choice.index + 1} بثقة {choice.confidence:.2f} (دون الحسم). "
-                        f"أيّها؟ **رد برقم الخيار**:\n{opts}",
-                        raw.message_key, forward_key=raw.message_key)
-                    log.info("(AI-first §5) تصعيد بخيارات لتكملة %s (ثقة %.2f)",
-                             raw.message_key, choice.confidence)
-                    return None
-                # (الخيار أ — قرار المالك) ثقة منخفضة/بلا ذكاء ⇒ **FIFO الأقدم** لا تصعيد. صيغة
-                #   السطرين تحمل الهويّة كاملةً وتصل بترتيب العمل؛ الأقدم يغادر المرشّحين بعد ربطه
-                #   فتلتقط التالية التالي — تقابل ١:١ يحفظ تسلسل الموظّف بلا إيقاف عمل.
-                merged = await self.queue.absorb_customer_supplier(
-                    cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
-                _log_link_decision("second_pairs", raw.message_key, cands, cands[0], "fifo-oldest")
-                log.info("رسالة ثانية بلا رقم + تعدّد معلّقات (%d) — FIFO الأقدم %s (الخيار أ).",
-                         len(cands), merged.deal_id)
-                return merged
+                # (العرض 2-A، قرار المالك المُحدَّث) ثقة منخفضة/بلا ذكاء + >1 مرشّح متوافق محتوىً ⇒
+                #   **تعليق + تصعيد** بلا تخمين الأقدم (كان fifo-oldest يبتلعها بأقدم معلّقة — بلاغ
+                #   X1706–X1711 الحيّ). التضييق الإقصائيّ حسم العملة/الكود/المورّد؛ ما تبقّى التباسٌ
+                #   حقيقيّ لا يُخمَّن. رسالةُ خيارات للمسؤول (تشمل ترجيح الذكاء إن وُجد).
+                _pick = f"الذكاء يرجّح الخيار {choice.index + 1} بثقة {choice.confidence:.2f} (دون الحسم). " \
+                    if (choice is not None and choice.action == "ask") else ""
+                opts = "\n".join(
+                    f"{i+1}) {self._ref(c) or '؟'} — "
+                    f"{(c.sell_leg.customer_name if c.sell_leg else None) or '؟'}"
+                    for i, c in enumerate(cands))
+                await self.bus.notify_admin(
+                    f"⚠️ تكملة بلا رقم إشاري + {len(cands)} صفقات معلّقة متوافقة محتوىً — **لم تُربَط** "
+                    f"(التباس، بلا تخمين الأقدم). {_pick}أيّها؟ **رد برقم الخيار**:\n{opts}",
+                    raw.message_key, forward_key=raw.message_key)
+                _log_link_decision("second_pairs", raw.message_key, cands, None, "ambiguous-hold")
+                log.warning("رسالة ثانية بلا رقم + تعدّد معلّقات (%d) متوافقة — تعليق+تصعيد "
+                            "(العرض 2-A، بلا FIFO الأقدم).", len(cands))
+                return None
 
         # 🔴 خزينة SI معنونة لم تُحلّ (§4.5): تُلتقط مجهولةً للإسناد اليدويّ من اللوحة (بلا تخمين §0).
         if result.leg is not None and result.leg.unresolved_treasury:
@@ -1477,9 +1506,25 @@ class Pipeline:
                 frag = parse_completion_fragment(raw.text, treasuries, suppliers, corrections)
                 frag.sender_jid = raw.sender_jid          # مُرسِل الرد (لربطه بصفقة نفس المُرسِل §7.3)
                 frag.source_message_key = raw.message_key
-                # ربط حتميّ (§7.3، بلا تجاور/تصعيد): مرجع صريح → بالمرجع؛ وإلا → أقدم صفقة مطابِقة FIFO
-                #    (absorb_fragment → _find_recent_waiting). fallback حين لا تلتقطه طبقتا خانة المُرسِل
-                #    (رد وصل قبل حوالته/عبر مُرسِل مختلف). تعدّد المرشّحين يُحسَم بالأقدم لا بالتصعيد.
+                # (العرض 2-A) ربطٌ حتميّ عبر نقطة التحكيم الوحيدة: مرشّحو نفس الغرفة (مُصفّون عملةً
+                #    ومحتوىً في fragment_link_candidates) ← _choose_link_target: مرجع→بالمرجع،
+                #    واحد→ربط، >1→تعليق+تصعيد بلا تخمين الأقدم. لا مرشّح → يُحفَظ ردًّا معلّقًا.
+                fcands = await self.queue.fragment_link_candidates(
+                    raw.chat_jid, now, frag, txt_ref, message_key=raw.message_key)
+                if fcands:
+                    target = await self._choose_link_target(
+                        raw, fcands, treasuries, suppliers, now,
+                        text_ref=txt_ref, stage="fragment", frag=frag)
+                    if target is None:
+                        return None                       # التباس (>1) → صُعِّد داخل التحكيم
+                    # (العرض 2-B) ادّعاءٌ ذرّيّ قبل التطبيق — لا ابتلاع مزدوج تحت السباق.
+                    if not await self.db.deals.claim_completion_attempt(target.deal_id, now):
+                        log.info("الجزء المكمّل %s: خسِرت الادّعاء الذرّيّ للصفقة %s — تخطٍّ",
+                                 raw.message_key, target.deal_id)
+                        return None
+                    return await self.queue.apply_orphan_completion(
+                        target, frag, raw.sender_jid, raw.message_key, now)
+                # لا صفقة معلّقة مطابِقة → يُحفَظ ردًّا معلّقًا (Fix 2، وصل قبل حوالته).
                 return await self.queue.absorb_fragment(
                     frag, raw.chat_jid, raw.message_key, now, text_ref=txt_ref
                 )
@@ -1497,9 +1542,16 @@ class Pipeline:
                     cands = await self.queue.pending_candidates_for_sender(
                         raw.chat_jid, raw.sender_jid, now, txt_ref,
                         frag=frag2, message_key=raw.message_key)
+                    # (العرض 2-A) إقصاءٌ صارم بالمحتوى في نقطة التحكيم: >1 ⇒ تعليق+تصعيد بلا تخمين الأقدم.
                     target = await self._choose_link_target(
                         raw, cands, treasuries, suppliers, now,
-                        text_ref=txt_ref, stage="orphan_completion")
+                        text_ref=txt_ref, stage="orphan_completion", frag=frag2)
+                    # (العرض 2-B) ادّعاءٌ ذرّيّ قبل التطبيق — لا ابتلاع مزدوج تحت السباق.
+                    if target is not None and not await self.db.deals.claim_completion_attempt(
+                            target.deal_id, now):
+                        log.info("اليتيم %s: خسِرت الادّعاء الذرّيّ للصفقة %s (سباق) — تخطٍّ",
+                                 raw.message_key, target.deal_id)
+                        target = None
                     if target is not None:
                         merged = await self.queue.apply_orphan_completion(
                             target, frag2, raw.sender_jid, raw.message_key, now)

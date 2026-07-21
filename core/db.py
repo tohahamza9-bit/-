@@ -278,6 +278,15 @@ class DealRepo(_Repo):
         )
         return res.modified_count == 1
 
+    async def release_completion_attempt(self, deal_id: str) -> None:
+        """يحرّر ادّعاءً لم يُثمِر ابتلاعًا (بقيت الصفقة WAITING): يعيد completion_attempted_at=None
+        كي يتمكّن **مسارٌ تالٍ لنفس الرسالة** (طبقة ٢ → يتيم) من إعادة الادّعاء بلا خسارةٍ كاذبة.
+        محصورٌ بالصفقات التي ما زالت منتظِرة (لا يمسّ ما اكتمل). لا يُنقِص العدّاد (أثرُ المحاولة يبقى)."""
+        await self.col.update_one(
+            {"deal_id": deal_id, "status": Status.WAITING_SECOND_LEG.value},
+            {"$set": {"completion_attempted_at": None, "updated_at": utcnow()}},
+        )
+
     async def completed_since(self, since: datetime) -> list[Deal]:
         """الصفقات المكتملة (COMPLETED) التي تحدّثت منذ `since` — للتدقيق الدوري (§ Reconciliation).
         قراءة فقط، خارج المسار الحيّ. الترشيح الزمنيّ في بايثون (توحيد naive/aware كبقية المستودعات)."""

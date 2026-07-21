@@ -1047,6 +1047,26 @@ class QueueService:
             return not leg.customer_code          # هوية → لصفقة بلا كود حصرًا (يمنع تلوّث A9015)
         return leg.treasury is None               # خزينة فقط («بلس») → لصفقة تنتظر خزينة
 
+    @classmethod
+    def narrow_by_content(cls, cands: list[Deal], frag: "ParsedLeg | None") -> list[Deal]:
+        """(العرض 2-A) إقصاءٌ صارمٌ بالمحتوى لمرشّحي رسالةٍ ثانية `frag` عديمة‑المرجع — يُبقي فقط
+        المتوافقين، **بلا رجوعٍ للطابور الكامل** (بخلاف السلوك القديم «تفضيل»):
+          • **العملة** صارمة (`_currency_compatible`): تكملةٌ مصريّةٌ لا تلمس تونسيّة (عملتها من
+            خزينتها أو سعرها 6.02→EGP/34→TND). مجهولةٌ ⇒ متوافقة (لا رفض كاذب).
+          • **نوع المحتوى** صارم (`_fragment_targets`): كود→صفقة بلا كود، مورد→تنتظر موردًا،
+            خزينة→تنتظر خزينة.
+        ناتجٌ فارغ (0) = لا مطابق متوافق (يُعلَّق/يُحفَظ معلّقًا، لا يُخمَّن)؛ >1 = التباسٌ يُعلَّق+يُصعَّد.
+        الهاتف/المبلغ: الجزء نادرًا يحملهما (أسطر خزينة/مورد/كود)؛ حين يحمل هاتفًا يبقى صارمًا في
+        مطابقة الغرف المنفصلة، والمبلغ تسامحيّ (تمييزٌ لا إقصاء) فلا يُدرَج هنا."""
+        if not cands:
+            return cands
+        frag_cur = cls._leg_currency(frag) or (
+            cls._currency_from_price(frag.price_raw) if frag is not None else None)
+        out = [d for d in cands if cls._currency_compatible(d, frag_cur)]
+        if frag is not None:
+            out = [d for d in out if cls._fragment_targets(d, frag)]
+        return out
+
     @staticmethod
     def _needs_completion(deal: Deal) -> bool:
         """
