@@ -808,6 +808,32 @@ def extract_code_name_price_lines(
     return pairs
 
 
+def unresolved_supplier_in_second(text: str, suppliers: list[SupplierRecord]) -> Optional[str]:
+    """(البند 4، rule 5) اسمُ سطرٍ في الرسالة الثانية **يبدو موردًا** (اسم+سعر بلا كود رقميّ) لكنه
+    **لم يُحلّ** في قائمة الموردين — لتصعيدٍ يسمّي النوع «المورد X غير معروف» بدل «لا خزينة».
+
+    الموضع يحدّد النوع (بلا بحث متقاطع): سطرٌ بكودٍ رقميّ = زبون (يُتخطّى)؛ سطرٌ بعملة = مبلغ
+    (يُتخطّى)؛ سطرُ اسمٍ+سعرٍ بلا كود = مورّد — إن حلّه resolve_supplier فهو مُدرَج (لا يُصعَّد)،
+    وإلّا فمورّدٌ مجهول. سطرُ اسمٍ **بلا سعر** = خزينة (لا يُعدّ موردًا مجهولًا هنا). يُرجِع أوّل
+    اسمٍ غير محلول أو None."""
+    for raw_line in normalize_digits(text or "").splitlines():
+        for ln in raw_line.split("/"):
+            ln = _split_glued_number(ln.strip())
+            if not ln or detect_currency(ln):
+                continue
+            r = _parse_customer_line(ln)
+            if r is not None and r[0] and r[1]:          # كود+اسم = زبون → ليس موردًا
+                continue
+            if _NAME_CODE_PRICE_RE.match(ln) or _CODE_PRICE_NAME_RE.match(ln):
+                continue                                  # صيغ الكود في الوسط/البداية = زبون
+            toks = ln.split()
+            if len(toks) >= 2 and _NUMERIC_TOKEN_RE.match(toks[-1]):   # اسم + سعر (بلا كود) = مورّد
+                name = " ".join(toks[:-1]).strip()
+                if name and _ARABIC_RE.search(name) and resolve_supplier(name, suppliers) is None:
+                    return name
+    return None
+
+
 def _extract_code_name(val: str) -> tuple[Optional[str], Optional[str]]:
     """يستخرج الكود والاسم من نص الزبون: «مروان الشاوش كود 1284» → (1284, مروان الشاوش).
 

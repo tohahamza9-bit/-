@@ -1035,6 +1035,12 @@ class QueueService:
         leg = deal.sell_leg or deal.buy_leg
         if leg is None:
             return False
+        # 🔴 (البند 4، الموضع يحدّد النوع) سطر مورّدٍ صريحٍ محلول (اسم+سعر بلا كود، is_supplier_counterpart)
+        #   يخصّ صفقةً تنتظر **موردًا** (بلا مورد ولا طرف شراء) — بصرف النظر عن كود الزبون. سطر المورّد
+        #   لا يحمل هوية زبون فلا يُقاس بقاعدة «بلا كود» (X1277: الزبون 1277 في الأولى، «شركة البراق»
+        #   في الثانية موردٌ لا هوية — كان يُرفَض لأنّ اسمه يُسرِّب لـcustomer_name فيبدو هويّةً).
+        if frag is not None and frag.is_supplier_counterpart:
+            return leg.supplier is None and deal.buy_leg is None
         # «يحمل هوية» = كود أو اسم زبون (بعض الأكواد أحاديّة الرقم تُفوَّت لكن الاسم يُلتقَط).
         frag_has_identity = frag is not None and bool(frag.customer_code or (frag.customer_name or "").strip())
         if frag_has_identity:

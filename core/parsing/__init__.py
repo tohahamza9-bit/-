@@ -12,9 +12,10 @@ from __future__ import annotations
 from .classify import detect_control, is_out_of_scope
 from .parser import (
     extract_code_name_price_lines, first_reference, parse_completion_fragment, parse_message,
+    unresolved_supplier_in_second,
 )
 
 __all__ = [
     "parse_message", "parse_completion_fragment", "extract_code_name_price_lines",
-    "first_reference", "detect_control", "is_out_of_scope",
+    "first_reference", "unresolved_supplier_in_second", "detect_control", "is_out_of_scope",
 ]

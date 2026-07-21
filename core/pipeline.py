@@ -55,6 +55,7 @@ from .parsing import (
     extract_code_name_price_lines,
     parse_completion_fragment,
     parse_message,
+    unresolved_supplier_in_second,
 )
 from .corrections import apply_corrections
 from .ai_context import build_sender_context
@@ -1448,11 +1449,22 @@ class Pipeline:
                 if merged is not None:
                     missing = missing_mandatory_fields(merged.sell_leg or merged.buy_leg)
                     if missing:
-                        await self._mandatory_alert(
-                            merged,
-                            f"وصلت تكملةٌ من الرسالة «{(raw.text or '').strip()[:60]}» وربطتُها، لكن ما "
-                            f"زال ناقصًا: {'، '.join(missing)} (اسم غير معروف/لم يُحلّ)",
-                            raw.message_key)
+                        # 🔴 (البند 4، rule 5) الموضع يحدّد النوع: سطر «اسم+سعر بلا كود» موردٌ — إن لم
+                        #   يُحلّ فالناقص **مورّدٌ مجهول** لا «خزينة». نُسمّي النوع الصحيح ونحفظه على
+                        #   الطرف كي يسمّيه التصعيد النهائيّ أيضًا (بدل «لا خزينة محلولة» المضلِّل).
+                        _unres_sup = unresolved_supplier_in_second(raw.text or "", suppliers)
+                        _leg = merged.sell_leg or merged.buy_leg
+                        if _unres_sup and _leg is not None and "الخزينة" in missing:
+                            _leg.unresolved_supplier = _unres_sup
+                            await self.db.deals.upsert(merged)
+                            _detail = (f"وصلت تكملةٌ من الرسالة «{(raw.text or '').strip()[:60]}» "
+                                       f"وربطتُها، لكن **المورد «{_unres_sup}» غير معروف** — غير مُدرَج "
+                                       f"في قائمة الموردين.")
+                        else:
+                            _detail = (f"وصلت تكملةٌ من الرسالة «{(raw.text or '').strip()[:60]}» "
+                                       f"وربطتُها، لكن ما زال ناقصًا: {'، '.join(missing)} "
+                                       f"(اسم غير معروف/لم يُحلّ)")
+                        await self._mandatory_alert(merged, _detail, raw.message_key)
                     log.info("(البند 1) رُبطت رسالة تكملة غير محلولة %s بالصفقة %s (ناقص=%s)",
                              raw.message_key, merged.deal_id, missing)
                     return merged
@@ -1846,11 +1858,18 @@ class Pipeline:
                     deal.mark = Mark.FAILED
                     await self.db.deals.upsert(deal)
                     await self.matcher.apply_mark(deal, Mark.FAILED)   # 🔴 على المركزية (§8.3)
+                    # 🔴 (البند 4، rule 5) إن كان الناقص مورّدًا مجهولًا (حُفِظ على الطرف في الفرع E)
+                    #   نسمّي النوع الصحيح «المورد X غير معروف» بدل «لا خزينة محلولة» المضلِّل.
+                    _lg = deal.sell_leg or deal.buy_leg
+                    _unres_sup = _lg.unresolved_supplier if _lg is not None else None
+                    _fail_msg = (
+                        f"🔴 فشل: {self._ref(deal)} — المورد «{_unres_sup}» غير معروف "
+                        f"(غير مُدرَج في قائمة الموردين §0)." if _unres_sup else
+                        f"🔴 فشل: {self._ref(deal)} — لا خزينة محلولة (تعذّر تحديد الحساب).")
                     await self.bus.notify_admin(
-                        f"🔴 فشل: {self._ref(deal)} — لا خزينة محلولة (تعذّر تحديد الحساب).",
-                        self._deal_key(deal), forward_key=self._deal_key(deal),
-                    )
-                    log.warning("🔴 لا خزينة (non-SI) للصفقة %s — تصعيد لغرفة المسؤول", deal.deal_id)
+                        _fail_msg, self._deal_key(deal), forward_key=self._deal_key(deal))
+                    log.warning("🔴 لا خزينة/مورد مجهول (non-SI) للصفقة %s — تصعيد لغرفة المسؤول",
+                                deal.deal_id)
                     return deal
                 deal.status = Status.HELD
                 deal.mark = Mark.MATCHED   # 🟡 «قيد المراجعة» — انتظار لا فشل (قرار المالك)
