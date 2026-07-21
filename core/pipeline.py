@@ -68,7 +68,7 @@ from .ambiguity import treasury_role_conflict
 from .fx_rates import ingest_price_message, price_room_currency
 from .parsing.normalize import normalize_price
 from .parsing.parser import _has_reference, first_reference
-from .parsing.resolve import resolve_bold, resolve_treasury
+from .parsing.resolve import resolve_bold, resolve_supplier, resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
 from .queue.service import (
     QueueService,
@@ -499,6 +499,40 @@ class Pipeline:
             if nf and nf in ntext:
                 return form
         return None
+
+    def _narrow_second_pairs(self, cands: list[Deal], pairs: list, suppliers: list) -> list[Deal]:
+        """(الخيار أ) تضييق مرشّحي صيغة السطرين بالمحتوى الحتميّ قبل الذكاء/FIFO. **تفضيلٌ لا
+        إقصاء**: كلّ خطوةٍ تُضيّق فقط إن أبقت مرشّحًا؛ إن أفرغت المجموعةَ نعود لما قبلها (لا سقوط).
+
+        الترتيب: ① العملة (تكملة مصريّة لا تلمس تونسيّة) → ② كود الزبون (صفقة قائمة بنفس الكود =
+        إعادة إرسال) → ③ المورّد (صفقةٌ واحدةٌ فقط ذات صلة). ما بقي متعدّدًا يُحسَم لاحقًا بالذكاء ثم FIFO."""
+        if len(cands) <= 1:
+            return cands
+        q = self.queue
+        ccode, _cname, cprice = pairs[0]
+        sprice = pairs[1][2] if len(pairs) > 1 else None
+        # ① العملة — من سعر سطر الزبون أو المورّد (6.02→EGP، 34→TND)
+        frag_cur = q._currency_from_price(cprice) or q._currency_from_price(sprice)
+        if frag_cur is not None:
+            cur_match = [c for c in cands if q._currency_compatible(c, frag_cur)]
+            if cur_match:
+                cands = cur_match
+        if len(cands) <= 1:
+            return cands
+        # ② كود الزبون — صفقةٌ قائمةٌ بنفس الكود بالضبط (نادر لحوالة A، لكنه يحسم إعادة الإرسال)
+        if ccode:
+            code_match = [c for c in cands
+                          if c.sell_leg is not None and c.sell_leg.customer_code == str(ccode)]
+            if len(code_match) == 1:
+                return code_match
+        # ③ المورّد — إن انحلّ سطرُ المورّد لمورّدٍ مُدرَجٍ وانتظرته صفقةٌ واحدةٌ فقط (بلا مورّد بعد)
+        srec = resolve_supplier(pairs[1][1], suppliers) if len(pairs) > 1 else None
+        if srec is not None:
+            sup_wait = [c for c in cands
+                        if c.sell_leg is not None and c.sell_leg.supplier is None]
+            if len(sup_wait) == 1:
+                return sup_wait
+        return cands
 
     async def _ai_link_choice(self, raw: RawMessage, cands: list[Deal],
                               treasuries: list, suppliers: list, now: datetime):
@@ -1259,15 +1293,23 @@ class Pipeline:
         #      واحدة هنا ويُلزِم كلّ الفروع أدناه.
         txt_ref = (result.leg.reference_number if result.leg is not None else None) \
             or first_reference(raw.text or "")
+        # (الخيار أ، 2026-07-21) صيغة السطرين «كود+اسم+سعر / مورّد+سعر» تحمل هويّة الزبون كاملةً،
+        #   فتُوجَّه للمطابقة بالمحتوى (الفرع B) لا لـFIFO العمياء في الفرع A. الفرع A كان يبتلعها
+        #   موردًا فقط (يفقد الزبون) بأقدم معلّقة أيًّا كان محتواها — فتلوّثت X1624 وتعثّرت
+        #   X1626/X1631/X1635. تُحسَب مرّةً هنا وتُستعمل في الفرعين.
+        pairs = extract_code_name_price_lines(raw.text, suppliers)
+        _is_two_line = len(pairs) >= 2
         if raw.sender_jid and not (result.leg is not None and result.leg.is_si_format):
+            target = None
             if txt_ref:                                    # الطبقة ١ — بالمرجع حصرًا (مُلزِم)
                 target = await self.queue.waiting_by_reference(raw.chat_jid, txt_ref, now)
                 _link_reason = "مرجع" if target is not None else "رفض — مرجع بلا مطابقة"
-            else:                                          # الطبقة ٢ — FIFO لنفس المُرسِل (حسب نوع الرسالة)
+            elif not _is_two_line:                         # الطبقة ٢ — FIFO لنفس المُرسِل (رد مورد/خزينة فقط)
                 frag2 = parse_completion_fragment(raw.text, treasuries, suppliers, corrections)
                 target = await self.queue.oldest_waiting_for_sender(
                     raw.chat_jid, raw.sender_jid, now, frag2, message_key=raw.message_key)
                 _link_reason = "FIFO مُرسِل"
+            # صيغة السطرين بلا مرجع ⇒ target=None هنا عمدًا، فتسقط للفرع B (المطابقة بالمحتوى أدناه).
             if target is not None and target.status == Status.WAITING_SECOND_LEG:
                 absorbed = await self.queue.absorb_second_into(
                     target, raw, now, treasuries, suppliers)
@@ -1278,10 +1320,9 @@ class Pipeline:
                     return merged
 
         # 🔴 ربط الرسالة الثانية بلا رقم إشاري (سطرا «كود+اسم+سعر»: زبون ثم مورد §7.3) بصفقة معلّقة
-        #    في نفس الغرفة خلال النافذة — **قبل التصنيف** كي لا تُسقَط noise/خارج-النطاق. لو نجح الربط
-        #    → return فورًا؛ وإلا نكمل المسار العادي. حماية الالتباس: تعدّد المعلّقات → تصعيد لا تخمين (§0).
-        pairs = extract_code_name_price_lines(raw.text, suppliers)
-        if len(pairs) >= 2:
+        #    في نفس الغرفة خلال النافذة — **قبل التصنيف** كي لا تُسقَط noise/خارج-النطاق. المطابقة
+        #    بالمحتوى (عملة → كود → مورّد) ثمّ الذكاء ثمّ FIFO الأقدم (لا تصعيد — الخيار أ).
+        if _is_two_line:
             cands = await self.queue.waiting_candidates_for_second(raw.chat_jid, now)
             # (R1) مرجعٌ صريح في النصّ ⇒ يُصفّي المرشّحين حصرًا؛ بلا مطابقة ⇒ **لا ربط** (لا ذكاء
             #      ولا FIFO) — تسقط الرسالة لتصعيد has_ref أدناه بدل أن تلوّث صفقةً أجنبية.
@@ -1292,12 +1333,20 @@ class Pipeline:
                                    cands[0] if cands else None, _reason, txt_ref)
                 if not cands:
                     return None
+            else:
+                # (الخيار أ) تضييقٌ حتميّ **بالمحتوى** قبل الذكاء/FIFO (منع الانزياح داخل العملة):
+                #   ① العملة — تكملة مصريّة لا تلمس صفقة تونسيّة (سعرها 6.02→EGP / 34→TND).
+                #   ② كود الزبون — إن حملته التكملة وطابق كودَ صفقةٍ قائمة بالضبط ⇒ هي (إعادة إرسال).
+                #   ③ المورّد — إن انحلّ سطرُ المورّد لمورّدٍ مُدرَجٍ وانتظرته صفقةٌ **واحدةٌ** فقط ⇒ هي.
+                #   تفضيلٌ لا إقصاء: إن أفرغ التضييقُ المجموعةَ نعود لما قبله (لا سقوط صامت §0).
+                cands = self._narrow_second_pairs(cands, pairs, suppliers)
             if len(cands) == 1:
                 merged = await self.queue.absorb_customer_supplier(
                     cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
+                _log_link_decision("second_pairs", raw.message_key, cands, cands[0], "content/single")
                 return merged   # المعالجة مؤجَّلة لفرز الدفعة بـ first_received_at (§7.3)
             if len(cands) > 1:
-                # ═══ (§5) تعدّد المعلّقات + تكملة واحدة → الذكاء يرى الكل ويقرّر ═══
+                # ═══ (§5) تعدّد المعلّقات + تكملة واحدة → الذكاء يرى الكل ويقرّر (عالية→ربط، وسط→خيارين) ═══
                 choice = await self._ai_link_choice(raw, cands, treasuries, suppliers, now)
                 if choice is not None and choice.action == "auto":
                     merged = await self.queue.absorb_customer_supplier(
@@ -1322,14 +1371,15 @@ class Pipeline:
                     log.info("(AI-first §5) تصعيد بخيارات لتكملة %s (ثقة %.2f)",
                              raw.message_key, choice.confidence)
                     return None
-                # choice is None أو action == "fifo" ⇒ السلوك الحتميّ كما كان (تصعيد §0)
-                await self.bus.notify_admin(
-                    f"⚠️ رسالة ثانية بلا رقم إشاري وتعدّد صفقات معلّقة ({len(cands)}) في الغرفة "
-                    f"— تعذّر الربط التلقائي؛ مراجعة يدوية: {(raw.text or '').strip()[:60]}",
-                    raw.message_key,
-                )
-                log.warning("رسالة ثانية بلا رقم + تعدّد معلّقات (%d) — تصعيد (§0).", len(cands))
-                return None
+                # (الخيار أ — قرار المالك) ثقة منخفضة/بلا ذكاء ⇒ **FIFO الأقدم** لا تصعيد. صيغة
+                #   السطرين تحمل الهويّة كاملةً وتصل بترتيب العمل؛ الأقدم يغادر المرشّحين بعد ربطه
+                #   فتلتقط التالية التالي — تقابل ١:١ يحفظ تسلسل الموظّف بلا إيقاف عمل.
+                merged = await self.queue.absorb_customer_supplier(
+                    cands[0], pairs[0], pairs[1], raw.message_key, treasuries, now)
+                _log_link_decision("second_pairs", raw.message_key, cands, cands[0], "fifo-oldest")
+                log.info("رسالة ثانية بلا رقم + تعدّد معلّقات (%d) — FIFO الأقدم %s (الخيار أ).",
+                         len(cands), merged.deal_id)
+                return merged
 
         # 🔴 خزينة SI معنونة لم تُحلّ (§4.5): تُلتقط مجهولةً للإسناد اليدويّ من اللوحة (بلا تخمين §0).
         if result.leg is not None and result.leg.unresolved_treasury:

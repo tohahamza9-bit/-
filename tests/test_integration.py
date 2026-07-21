@@ -675,8 +675,10 @@ async def test_reference_less_second_slash_separated(db):
     assert result.sell_leg.supplier is not None and result.sell_leg.supplier.code == "760"
 
 
-async def test_reference_less_second_ambiguous_escalates(db):
-    """رسالة ثانية بلا رقم + **أكثر من صفقة معلّقة** في الغرفة → تصعيد للمسؤول لا تخمين (§0)."""
+async def test_reference_less_two_line_second_links_fifo_oldest(db):
+    """(الخيار أ، قرار المالك 2026-07-21) رسالة ثانية بصيغة السطرين بلا رقم + عدّة معلّقات بنفس
+    العملة → **FIFO الأقدم** لا تصعيد. صيغة السطرين تحمل هويّة الزبون كاملةً وتصل بترتيب العمل،
+    فالأقدم يغادر المرشّحين بعد ربطه (تقابل ١:١) — يقلّل التنبيهات بلا إيقاف عمل. (كان يُصعِّد.)"""
     from core.constants import Currency
     from core.models import Deal, ParsedLeg
     now = PAST + timedelta(seconds=1000)
@@ -684,16 +686,14 @@ async def test_reference_less_second_ambiguous_escalates(db):
         sell = ParsedLeg(operation=OperationType.SELL, reference_number=f"A81{i}",
                          amount=1000.0, currency=Currency.EGP)
         await db.deals.upsert(Deal(deal_id=f"d{i}", status=Status.WAITING_SECOND_LEG,
-                                   created_at=now - timedelta(seconds=10), updated_at=now,
-                                   chat_jid=CENTRAL, sell_leg=sell))
+                                   created_at=now - timedelta(seconds=10 - i), updated_at=now,
+                                   chat_jid=CENTRAL, sell_leg=sell))     # d1 أقدم من d2
     pipe = _make_pipeline(db, rooms=False)
     raw = _raw("m2", "1300 عبد الله معتيق 5.82\n1163 مومن عريبي 5.86", jid=CENTRAL, at=now)
     result = await pipe._ingest(raw, now)
-    assert result is None                                       # لا ربط (التباس)
-    for i in (1, 2):
-        assert (await db.deals.get(f"d{i}")).sell_leg.supplier is None
-    outs = await db.outgoing.next_unsent(50)
-    assert any(o["chat_jid"] == ADMIN and "تعذّر الربط" in (o.get("text") or "") for o in outs)
+    assert result is not None and result.deal_id == "d1"        # FIFO → الأقدم (لا تصعيد)
+    assert (await db.deals.get("d1")).sell_leg.customer_code == "1300"   # الهويّة محفوظة
+    assert (await db.deals.get("d2")).sell_leg.supplier is None          # الأحدث لم تُمَسّ
 
 
 async def test_auto_trust_skips_room_matching_and_completes(db):

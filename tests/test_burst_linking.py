@@ -267,3 +267,40 @@ async def test_customer_line_not_mistaken_for_supplier(db):
     d = await db.deals.col.find_one({"sell_leg.reference_number": "X1588"})
     sup = (d.get("sell_leg") or {}).get("supplier") or {}
     assert sup.get("code") != "760", "اسمٌ غير مُدرَج أُسنِد مورّدًا"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (الخيار أ) صيغة السطرين → مطابقة بالمحتوى في الفرع B لا FIFO العمياء في الفرع A
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_two_line_completions_link_in_order_same_currency(db):
+    """ثلاث حوالات مصريّة (X1626/X1631/X1635) + ثلاث تكملات بترتيبها → كلٌّ لصاحبها.
+
+    تكملة X1631 «1201 الهادي لخبولي 6.02 / طه6.07» تذهب لـX1631 لا لـX1626 رغم أنّهما نفس
+    العملة — الفرع B يحفظ الهويّة ويربط بالأقدم المتبقّي (تقابل ١:١)، بخلاف الفرع A الذي كان
+    يبتلعها موردًا فقط بأقدم معلّقة."""
+    await _seed_taha(db)                                   # طه مورّد مُدرَج (كالإنتاج) — يُكوّن سطر المورّد
+    await _run(_pipe(db), [
+        ("X1626\nفودافون\n01000153879\n8850 ج م\nبدون خصم", "e1"),
+        ("X1631\n01070869056\n15340 ج م\nفودافون\nبدون خصم", "e2"),
+        ("X1635\n01015965576\n3229 ج.م\nفودافون\nمن دون خصم", "e3"),
+        ("825 عبد العاطي هروس 6.08\nطه6.07", "e1b"),      # تكملة X1626 (الأقدم)
+        ("1201 الهادي لخبولي 6.02\nطه6.07", "e2b"),        # تكملة X1631
+        ("1277 شركة القن 6.02\nطه6.07", "e3b"),            # تكملة X1635
+    ])
+    pairs = await _pairs(db)
+    assert "e2b" in pairs.get("X1631", set()), f"تكملة X1631 لم تصل X1631: {pairs}"
+    assert "e2b" not in pairs.get("X1626", set()), "تكملة X1631 ذهبت لـX1626 (انزياح)"
+    assert "e1b" in pairs.get("X1626", set()) and "e3b" in pairs.get("X1635", set())
+
+
+async def test_two_line_completion_content_survives(db):
+    """التكملة تحمل هويّة الزبون (كود+اسم) — تُحفَظ في صاحبتها (لا تُبتلَع موردًا فقط)."""
+    await _seed_taha(db)
+    await _run(_pipe(db), [
+        ("X1640\n01011112222\n5000 ج م\nفودافون\nبدون خصم", "f1"),
+        ("1201 الهادي لخبولي 6.02\nطه6.07", "f1b"),
+    ])
+    d = await db.deals.col.find_one({"sell_leg.reference_number": "X1640"})
+    sl = d["sell_leg"]
+    assert sl.get("customer_code") == "1201", f"هويّة الزبون ضاعت: {sl.get('customer_code')}"
+    assert (sl.get("supplier") or {}).get("code") == "760"        # طه المورّد
