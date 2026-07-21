@@ -22,6 +22,7 @@ from core.models import (
 from .classify import (
     detect_control,
     detect_explicit_operation,
+    detect_hand_delivery,
     has_silent_keyword,
     is_out_of_scope,
 )
@@ -185,6 +186,11 @@ def parse_message(
         )
 
     leg, conf = _parse_transfer(text, treasuries, suppliers)
+    # تسليم يد (delivery_type=يد، قرار المالك): علامة «باليد/بيد/تسليم يد» صريحة → تُثبَّت على الطرف
+    #   (لا تُسقِط الحوالة، لا تُحلّ خزينةً/مورّدًا). المسار العاديّ يُنشئ الصفقة؛ الأنبوب يوقفها
+    #   ويُصعّدها نظيفًا للإدخال اليدويّ حين تبقى بلا خزينة (X1702). آمنة: لا أثر ما دامت الخزينة محلولة.
+    if leg is not None and detect_hand_delivery(text):
+        leg.delivery_type = "يد"
     # حوالة واضحة = مبلغ + مرساة هوية (كود زبون أو رقم إشاري). الرقم الإشاري مرساة صالحة
     # لصيغ بلا كود زبون (مثل A06/صافي) — متّسق مع stabilization.looks_like_complete_transfer.
     # حماية من false positives: الرقم الإشاري يُلتقط بنمط صارم على مقطع مستقلّ (_REFERENCE_RE)،

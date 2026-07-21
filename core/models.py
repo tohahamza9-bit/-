@@ -89,6 +89,7 @@ class ParsedLeg(BaseModel):
     phone_alt: Optional[str] = None            # 🔴 (فيكس ج) رقم ثانٍ عند وجود مرشّحَين بالضبط — يُحفَظ مرتبطًا بالحوالة
     ambiguous_amount: Optional[list[float]] = None  # 🔴 (فيكس د) أرقام مجرّدة متعدّدة مرشّحة للمبلغ بلا حسم → للتصعيد (§0)
     payment_method: Optional[str] = None       # فودافون كاش / إنستا باي (§3.4)
+    delivery_type: Optional[str] = None        # «يد» = تسليم باليد (بلا خزينة، إدخال يدويّ §تسليم-يد 2026-07-21)
     recipient_name: Optional[str] = None       # اسم المستلم → خانة الملاحظات (§11.1-12)
     notes: Optional[str] = None                # نص حرّ من الرسالة الأولى (صافي/خصم/ملاحظات §3.2) → خانة الملاحظات
     country: Optional[str] = None              # العاصمة/سوسة.. أو من مفتاح الهاتف

@@ -13,6 +13,7 @@ from core.constants import (
     RERUN_KEYWORDS,
     EXPLICIT_BUY_KEYWORDS,
     EXPLICIT_SELL_KEYWORDS,
+    HAND_DELIVERY_KEYWORDS,
     OUT_OF_SCOPE_PHRASES,
     OUT_OF_SCOPE_WORDS,
     SILENT_IGNORE_KEYWORDS,
@@ -53,6 +54,13 @@ def is_out_of_scope(text: str) -> bool:
     if any(normalize_ar(w) in tokens for w in OUT_OF_SCOPE_WORDS):
         return True
     return any(normalize_ar(p) in norm for p in OUT_OF_SCOPE_PHRASES)
+
+
+def detect_hand_delivery(text: str) -> bool:
+    """تسليم يد (delivery_type=يد): علامة «باليد/بيد/تسليم يد» صريحة (كلمات كاملة) — تُميّز الحوالة
+    كتسليمٍ يدويّ. أوسع من is_out_of_scope في أنها تُطبَّق **حتى مع وجود رقم إشاري** (X1702)، وأضيق
+    في أنها **لا** تشمل «تسليم» وحدها (تسليمٌ لمستلم). النتيجة تُلتقَط على الطرف لا تُسقِط الحوالة."""
+    return _has_keyword(text, HAND_DELIVERY_KEYWORDS)
 
 
 def detect_explicit_operation(text: str) -> tuple[Optional[OperationType], bool]:

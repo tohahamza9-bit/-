@@ -1829,6 +1829,25 @@ class Pipeline:
             #     يمنع تحوّلها tech_failed بسبب عدم توفّر التطبيق (بدل الفشل واحدة-واحدة صمتًا).
             if await self._moneyado_gate(now):
                 return deal
+            # (0·تسليم يد) حوالة تسليم باليد (delivery_type=يد، قرار المالك 2026-07-21): بلا خزينة
+            #     بطبيعتها والكاتب لا يكتب بلا خزينة (foreign_account إلزاميّ §11.1) ⇒ **صفقة موقوفة +
+            #     تصعيد نظيف** للإدخال اليدويّ (لا مطابقة غرف، لا إنقاذ ذكيّ، لا «سعر غير موجود» مضلِّل).
+            _dl = deal.sell_leg or deal.buy_leg
+            if _dl is not None and _dl.delivery_type == "يد" and _dl.treasury is None:
+                deal.status = Status.ESCALATED
+                deal.mark = Mark.WARN
+                deal.hold_reason = "تسليم يد — يُدخَل يدويًّا في MONEYADO (لا خزينة)"
+                await self.db.deals.upsert(deal)
+                await self.matcher.apply_mark(deal, Mark.WARN)   # ⚠️ نصّ بالسبب على المركزية (§8.3)
+                _who = _dl.customer_name or (
+                    f"كود {_dl.customer_code}" if _dl.customer_code else "زبون غير مذكور")
+                _cur = _dl.currency.value if _dl.currency else ""
+                await self.bus.notify_admin(
+                    f"✋ تسليم يد — إدخال يدويّ في MONEYADO:\n"
+                    f"{self._ref(deal)} · {_who} · {_dl.amount or '—'} {_cur} · هاتف {_dl.phone or '—'}",
+                    self._deal_key(deal), forward_key=self._deal_key(deal))
+                log.info("✋ تسليم يد %s — صفقة موقوفة + تصعيد نظيف (إدخال يدويّ)", deal.deal_id)
+                return deal
             # (طبقة قروب الخزينة، توجيه المالك) خزينةٌ غير محلولة من النص → جرّبها من **قروبات الخزائن**
             #   (هاتف+قيمة، ±نافذة) **قبل** أيّ تصعيد. النافذة (~50s) أقصر من مهلة التصعيد (90s) فلا توقف
             #   شيئًا؛ ضمنها بلا مطابقة → انتظار (النبضة تعيد)؛ بعدها بلا مطابقة → المسار الحاليّ (تصعيد).
