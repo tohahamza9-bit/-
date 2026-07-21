@@ -641,12 +641,12 @@ async def test_edit_channel_updates_and_reviewer_forbidden(db):
 
 async def test_edit_employee_name_only_preserves_number_and_alerts(db):
     pytest.importorskip("fastapi")
-    await db.employees.upsert(EmployeeRecord(whatsapp_number="20100", name="اسم قديم"))
+    await db.employees.upsert(EmployeeRecord(whatsapp_number="201000000000", name="اسم قديم"))
     async with _client(db, settings=_admin_settings()) as ac:
-        r = await ac.post("/api/employees/20100", json={"whatsapp_number": "20100", "name": "اسم جديد"})
+        r = await ac.post("/api/employees/201000000000", json={"whatsapp_number": "201000000000", "name": "اسم جديد"})
         assert r.status_code == 200
-    doc = await db.employees.col.find_one({"whatsapp_number": "20100"})
-    assert doc["name"] == "اسم جديد" and doc["whatsapp_number"] == "20100", "الاسم يتغيّر والرقم ثابت"
+    doc = await db.employees.col.find_one({"whatsapp_number": "201000000000"})
+    assert doc["name"] == "اسم جديد" and doc["whatsapp_number"] == "201000000000", "الاسم يتغيّر والرقم ثابت"
     assert any("اسم جديد" in (m.get("text") or "") for m in await _alerts(db))
 
 
@@ -654,10 +654,11 @@ async def test_edit_employee_reviewer_forbidden_and_404(db):
     pytest.importorskip("fastapi")
     from core.constants import Role
     async with _client(db, Role.REVIEWER, username="rev") as ac:
-        r = await ac.post("/api/employees/20100", json={"whatsapp_number": "20100", "name": "x"})
+        r = await ac.post("/api/employees/201000000000", json={"whatsapp_number": "201000000000", "name": "x"})
         assert r.status_code == 403
     async with _client(db) as ac:
-        r = await ac.post("/api/employees/غير-موجود", json={"whatsapp_number": "غير-موجود", "name": "x"})
+        # معرّفٌ صالح الصيغة لكن غير موجود → 404 (لا 422): يمرّ التحقّق ويبلغ منطق «غير موجود»
+        r = await ac.post("/api/employees/999999999999", json={"whatsapp_number": "999999999999", "name": "x"})
         assert r.status_code == 404
 
 
@@ -882,3 +883,53 @@ async def test_corrections_page_served(db):
         assert r.status_code == 200 and "قاموس التصحيحات" in r.text
     # ملاحظة: /api/corrections يُركَّب في startup (get_router) الذي لا يُشغّله ASGITransport هنا؛
     #   بوّابته مُغطّاة بـtest_corrections_write_requires_manager عبر dashboard.app.create_app.
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# الموظفون المعتمدون — قبول @lid + رسالة خطأ واضحة + اعتماد المدير التلقائيّ
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_employee_accepts_lid_identifier(db):
+    """معرّف واتساب «<أرقام>@lid» يُقبَل (صيغة المُرسِل الفعليّة) — لا أرقام هاتف فقط."""
+    pytest.importorskip("fastapi")
+    async with _client(db) as ac:
+        r = await ac.post("/api/employees",
+                          json={"whatsapp_number": "111110871117915@lid", "name": "المالك"})
+        assert r.status_code == 201, r.text
+        assert r.json()["whatsapp_number"] == "111110871117915@lid"
+        # ورقم هاتف عاديّ يبقى مقبولًا
+        assert (await ac.post("/api/employees",
+                json={"whatsapp_number": "218912345678", "name": "أحمد"})).status_code == 201
+
+
+async def test_employee_invalid_identifier_clear_error(db):
+    """معرّف غير صالح → 422 برسالةٍ عربيّة واضحة (لا فشل صامت)."""
+    pytest.importorskip("fastapi")
+    async with _client(db) as ac:
+        r = await ac.post("/api/employees", json={"whatsapp_number": "abc!!", "name": "x"})
+        assert r.status_code == 422
+        msg = r.json()["detail"][0]["msg"]
+        assert "المعرّف يجب أن يكون" in msg and "@lid" in msg
+
+
+async def test_employee_lid_delete_roundtrip(db):
+    """حذف موظف بمعرّف @lid (الواجهة تُرمّز @→%40، الخادم يفكّها) — لا 404."""
+    pytest.importorskip("fastapi")
+    import urllib.parse
+    async with _client(db) as ac:
+        await ac.post("/api/employees", json={"whatsapp_number": "111110871117915@lid", "name": "م"})
+        enc = urllib.parse.quote("111110871117915@lid", safe="")
+        assert (await ac.request("DELETE", "/api/employees/" + enc)).status_code == 200
+
+
+async def test_manager_with_whatsapp_jid_is_auto_authorized(db):
+    """(المشكلة 3) المدير معتمدٌ تلقائيًّا لأوامر التحكّم («تم»/«أعد») عبر whatsapp_jid — بلا
+    إضافته موظفًا يدويًّا. ربطُ الحساب بمعرّف @lid في users يكفي."""
+    from core.constants import Role
+    from core.db import utcnow
+    from core.models import UserRecord
+    from dashboard.auth import hash_password
+    await db.users.create(UserRecord(username="owner", password_hash=hash_password("pw-123456"),
+                                     role=Role.MANAGER, active=True, created_at=utcnow(),
+                                     whatsapp_jid="111110871117915@lid"))
+    assert await db.employees.is_authorized("111110871117915@lid") is True   # المدير معتمد
+    assert await db.employees.is_authorized("999999@lid") is False            # غيره لا

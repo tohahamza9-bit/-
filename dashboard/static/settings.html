@@ -153,9 +153,9 @@
   <div class="card">
     <h2>الموظفون المعتمدون <span class="muted">(«تم» تُقبل من هؤلاء فقط)</span></h2>
     <div class="row">
-      <input id="e_num" placeholder="رقم واتساب">
+      <input id="e_num" placeholder="رقم واتساب أو معرّف @lid">
       <input id="e_name" placeholder="الاسم">
-      <button onclick="addEmployee()">إضافة</button>
+      <button type="button" onclick="addEmployee()">إضافة</button>
     </div>
     <table><thead><tr><th>الاسم</th><th>رقم واتساب</th><th>الحالة</th><th></th></tr></thead>
       <tbody id="e_body"></tbody></table>
@@ -252,7 +252,15 @@ async function api(path, method="GET", body=null){
   if(body){opt.headers["Content-Type"]="application/json";opt.body=JSON.stringify(body);}
   const r=await fetch("/api"+path,opt);
   if(r.status===401){location.replace("/login");throw new Error(401);}
-  if(!r.ok){let d="";try{d=(await r.json()).detail;}catch(e){}toast("خطأ "+r.status+(d?": "+d:""));throw new Error(r.status);}
+  if(!r.ok){
+    // detail قد يكون نصًّا (HTTPException) أو قائمةً (تحقّق pydantic 422) — نستخرج رسالةً مقروءة
+    let d=""; try{ const j=await r.json();
+      d = Array.isArray(j.detail)
+        ? j.detail.map(e=>(e&&e.msg)||"").join("؛ ").replace(/Value error, /g,"")
+        : (j.detail||"");
+    }catch(e){}
+    toast("خطأ "+r.status+(d?": "+d:"")); throw new Error(r.status);
+  }
   return r.status===204?null:r.json();
 }
 const ROLE_AR={manager:"مدير",reviewer:"مراجع",data_entry:"مُدخل بيانات"};
@@ -400,11 +408,20 @@ async function saveEmployee(i){
   toast("عُدّل الموظف"); loadEmployees(); loadLog();
 }
 async function addEmployee(){
-  if(!$("e_num").value||!$("e_name").value) return toast("الرقم والاسم مطلوبان");
-  await api("/employees","POST",{whatsapp_number:$("e_num").value,name:$("e_name").value});
-  $("e_num").value="";$("e_name").value=""; loadEmployees(); loadLog();
+  const num=($("e_num").value||"").trim(), name=($("e_name").value||"").trim();
+  if(!num||!name){ toast("المعرّف والاسم مطلوبان"); return; }
+  // قبولٌ صريح: رقم هاتف أو صيغة @lid — تحقّقٌ عميلٌ برسالةٍ واضحة قبل النداء (والخادم يتحقّق أيضًا)
+  if(!/^(?:\+?\d{7,15}|\d{1,20}@(?:lid|s\.whatsapp\.net))$/.test(num)){
+    toast("معرّف غير صالح — أدخل رقم هاتف أو صيغة @lid (مثل 111110871117915@lid)"); return;
+  }
+  try{ await api("/employees","POST",{whatsapp_number:num,name}); }catch(err){ return; }  // الخطأ يُعرَض في api
+  $("e_num").value=""; $("e_name").value=""; toast("أُضيف الموظف ✓"); loadEmployees(); loadLog();
 }
-async function delEmployee(n){ await api(`/employees/${n}`,"DELETE"); loadEmployees(); loadLog(); }
+async function delEmployee(n){
+  // n مُرمَّز مسبقًا (encodeURIComponent) — @ تصبح %40؛ الخادم يفكّها. لا نُرمّز مرّتين.
+  try{ await api(`/employees/${n}`,"DELETE"); }catch(err){ return; }
+  toast("حُذف الموظف ✓"); loadEmployees(); loadLog();
+}
 
 // ── كشف الاحتيال (م٢) ──
 async function loadDetection(){

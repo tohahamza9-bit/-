@@ -22,7 +22,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+import re as _re
+
+from pydantic import BaseModel, Field, field_validator
 
 from core.config import Settings, get_settings
 from core.constants import Currency, EntityType, Role, RoomType, TreasuryType
@@ -91,10 +93,26 @@ class ChannelIn(BaseModel):
     active: bool = True
 
 
+# معرّف واتساب معتمد: رقم هاتف (اختياري +، 7-15 خانة) أو معرّف كامل «<أرقام>@lid» /
+#   «<أرقام>@s.whatsapp.net» (صيغة المُرسِل الفعليّة في واتساب — كما تظهر في اللوق). المطابقة
+#   لأوامر التحكّم («تم»/«أعد») تتمّ على المعرّف الكامل، فلا بدّ من قبول @lid لا الأرقام فقط.
+_EMP_ID_RE = _re.compile(r"^(?:\+?\d{7,15}|\d{1,20}@(?:lid|s\.whatsapp\.net))$")
+
+
 class EmployeeIn(BaseModel):
     whatsapp_number: str = Field(..., min_length=1)
     name: str = Field(..., min_length=1)
     active: bool = True
+
+    @field_validator("whatsapp_number")
+    @classmethod
+    def _valid_identifier(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not _EMP_ID_RE.match(v):
+            raise ValueError(
+                "المعرّف يجب أن يكون رقم هاتف (مثل 218912345678) أو صيغة واتساب "
+                "«<أرقام>@lid» (مثل 111110871117915@lid).")
+        return v
 
 
 class UnknownTermAssignIn(BaseModel):
