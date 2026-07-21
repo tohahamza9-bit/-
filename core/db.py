@@ -474,6 +474,20 @@ class CorrectionsListRepo(_Repo):
             upsert=True,
         )
 
+    async def learn_if_absent(self, rec: CorrectionRecord) -> bool:
+        """(التعلّم التلقائي) يحفظ تصحيحًا **فقط إن لم يوجد** تصحيحٌ بنفس الرمز الخاطئ (أيًّا كان
+        منشئه). يضمن ضمانتَي المالك: **اليدويّ يكسب دائمًا** (لا يُدهَس)، و**لا تكرار**. يُرجِع
+        True إن حُفِظ جديدًا، False إن كان موجودًا سلفًا (يدويّ أو تلقائيّ).
+
+        $setOnInsert وحده: مستندٌ قائمٌ لا يُمَسّ إطلاقًا؛ الغائب يُدرَج. upserted_id يميّز الحالتين."""
+        payload = self._dump(rec)
+        payload["_norm"] = self._key(rec.wrong_text)
+        payload["created_at"] = rec.created_at or utcnow()
+        payload.setdefault("times_used", 0)
+        res = await self.col.update_one(
+            {"_norm": payload["_norm"]}, {"$setOnInsert": payload}, upsert=True)
+        return res.upserted_id is not None
+
     async def all_active(self) -> list[CorrectionRecord]:
         cur = self.col.find({"active": True})
         return [CorrectionRecord(**{k: v for k, v in d.items() if k not in ("_id", "_norm")})

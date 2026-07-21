@@ -303,9 +303,10 @@ class CorrectionRecord(BaseModel):
     wrong_text: str                              # الرمز كما يرد خطأً
     correct_value: str                           # ما يجب أن يُستبدَل به
     active: bool = True                          # إيقاف بلا حذف (§13)
-    created_by: str = "system"                   # مستخدم اللوحة أو "attention" (زر الحفظ التلقائيّ)
+    created_by: str = "system"                   # مستخدم اللوحة | "attention" (زرّ الحفظ) | "ai_auto" (تعلّم تلقائيّ)
     created_at: Optional[datetime] = None
     times_used: int = 0                          # كم مرّة أطلق الاستبدال فعليًّا (رصد أثر)
+    confidence: Optional[float] = None           # ثقة النموذج عند التعلّم التلقائيّ (ai_auto فقط)
 
 
 class EmployeeRecord(BaseModel):

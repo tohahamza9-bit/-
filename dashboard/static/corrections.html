@@ -32,6 +32,9 @@
   .pill.off { background:rgba(239,68,68,.15); color:var(--warn); }
   .ft { font-size:12px; font-weight:700; padding:1px 9px; border-radius:999px;
         background:rgba(59,130,246,.13); color:var(--accent); }
+  .auto { font-size:12px; font-weight:700; padding:1px 9px; border-radius:999px;
+          background:rgba(168,85,247,.16); color:#c084fc; border:1px solid rgba(168,85,247,.4); }
+  tr.autolearn td { background:rgba(168,85,247,.05); }
   .addbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; background:var(--card);
             border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin-bottom:12px; }
   .addbar input, .addbar select { min-width:120px; }
@@ -109,19 +112,21 @@ async function api(path, method="GET", body=null){
 
 function render(){
   $("empty").style.display=ROWS.length?"none":"block";
-  $("tbody").innerHTML=ROWS.map(r=>`<tr class="${r.active?'':'inactive'}">
+  $("tbody").innerHTML=ROWS.map(r=>{ const auto=r.created_by==="ai_auto"; return `<tr class="${[r.active?'':'inactive', auto?'autolearn':''].filter(Boolean).join(' ')}">
     <td><code>${esc(r.wrong_text)}</code></td>
     <td><code>${esc(r.correct_value)}</code></td>
     <td><span class="ft">${TYPE_AR[r.field_type]||esc(r.field_type)}</span></td>
     <td>${r.times_used||0}</td>
-    <td class="muted">${esc(r.created_by||'')}</td>
+    <td>${auto
+        ? `<span class="auto" title="تعلَّمه البوت تلقائيًّا من نجاح الذكاء${r.confidence!=null?' (ثقة '+Math.round(r.confidence*100)+'٪)':''} — احذفه ليعود للذكاء">🤖 تلقائيّ</span>`
+        : `<span class="muted">${esc(r.created_by||'')}</span>`}</td>
     <td><span class="pill ${r.active?'on':'off'}">${r.active?'فعّال':'موقوف'}</span></td>
     <td>${!canWrite()?'':`
       ${r.active
         ? `<button class="ghost" onclick="setActive('${esc(r.wrong_text)}',false)">إيقاف</button>`
         : `<button class="ghost" onclick="setActive('${esc(r.wrong_text)}',true)">تفعيل</button>`}
       <button class="ghost danger" onclick="del('${esc(r.wrong_text)}')">حذف</button>`}</td>
-  </tr>`).join("");
+  </tr>`; }).join("");
 }
 
 // البحث خادميّ (q=) — يشمل المطبَّع العربيّ. تأخير خفيف كي لا نُغرق الخادم بكل ضغطة.

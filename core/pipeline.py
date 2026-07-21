@@ -48,7 +48,7 @@ from .guard import Guard, build_reversal, is_out_of_active_window
 from .logging_setup import get_logger
 from .matching.service import MatchingService
 from .models import (
-    Deal, LedgerEntry, ParsedLeg, RawMessage, SupplierRef, TreasuryRef, WriteJob,
+    CorrectionRecord, Deal, LedgerEntry, ParsedLeg, RawMessage, SupplierRef, TreasuryRef, WriteJob,
 )
 from .parsing import (
     detect_control,
@@ -464,6 +464,9 @@ class Pipeline:
             "stage": verdict.stage,
             "paired": is_pair,
         })
+        # (التعلّم التلقائي) سجّل أزواج «خطأ→صحيح» المُتحقَّق منها على الطرف — تُحفَظ في القاموس
+        #   **بعد** الكتابة الناجحة في MONEYADO فقط (نجاحٌ مؤكَّد، لا اقتراحٌ مرفوض).
+        self._record_learnable_corrections(res.leg, fixes, prop.model)
         await self.bus.notify_admin(
             f"⚠️ {res.leg.reference_number or '؟'} فُهمت بالذكاء الاصطناعي ({prop.model}) — "
             f"سبب التصنيف غامضةً: {verdict.as_note()}"
@@ -473,6 +476,58 @@ class Pipeline:
         log.info("(AI-first) طُبِّق على %s (سبب=%s، مزدوجة=%s، نموذج=%s)",
                  raw.message_key, verdict.as_note(), is_pair, prop.model)
         return res
+
+    @staticmethod
+    def _record_learnable_corrections(leg, fixes: list, model: str) -> None:
+        """(التعلّم التلقائي) يُثبِّت أزواج تصحيح الذكاء المُتحقَّق منها على الطرف (deviation_log،
+        field=«ai_learn») كي تُحفَظ في القاموس **بعد** الكتابة الناجحة. `fixes` = VerifiedCorrection
+        (raw/official/entity_type/confidence) — مُتحقَّقٌ منها حتميًّا سلفًا (raw في النصّ، official
+        سجلٌّ مسجَّل، ثقة ≥ العتبة). نخزّن النصّ الخام→الاسم الرسميّ بنوعه (supplier/treasury)."""
+        if leg is None or not fixes:
+            return
+        for c in fixes:
+            wrong = (getattr(c, "raw", "") or "").strip()
+            correct = (getattr(c, "official", "") or "").strip()
+            ftype = getattr(c, "entity_type", None)
+            if not wrong or not correct or wrong == correct or ftype not in ("supplier", "treasury"):
+                continue
+            leg.deviation_log.append({
+                "field": "ai_learn", "field_type": ftype,
+                "wrong_text": wrong, "correct_value": correct,
+                "confidence": float(getattr(c, "confidence", 0.0) or 0.0), "model": model,
+            })
+
+    async def _learn_from_ai_success(self, deal: Deal) -> None:
+        """(التعلّم التلقائي، قرار المالك) بعد كتابةٍ **ناجحةٍ ومؤكَّدة** في MONEYADO: احفظ تصحيحات
+        الذكاء (المثبَّتة في deviation_log بـfield=«ai_learn») في القاموس الحيّ بـcreated_by=«ai_auto».
+
+        الضمانات: (١) تعلّمٌ من النجاحات فقط (تُستدعى داخل فرع الكتابة الناجحة). (٢) ثقة ≥ 0.9.
+        (٣) learn_if_absent: اليدويّ يكسب دائمًا ولا تكرار. (٤) يسري فورًا (نفس all_active)."""
+        for leg in (deal.sell_leg, deal.buy_leg):
+            if leg is None:
+                continue
+            for dv in (leg.deviation_log or []):
+                if dv.get("field") != "ai_learn":
+                    continue
+                wrong = (dv.get("wrong_text") or "").strip()
+                correct = (dv.get("correct_value") or "").strip()
+                ftype = dv.get("field_type") or "supplier"
+                conf = dv.get("confidence")
+                if not wrong or not correct or wrong == correct:
+                    continue
+                if conf is not None and float(conf) < 0.9:        # ضمان الثقة ≥ 0.9
+                    continue
+                rec = CorrectionRecord(
+                    field_type=ftype, wrong_text=wrong, correct_value=correct, active=True,
+                    created_by="ai_auto", created_at=utcnow(), confidence=conf)
+                try:
+                    saved = await self.db.corrections.learn_if_absent(rec)
+                except Exception as exc:                          # §6 fail-open — لا يوقف الكتابة
+                    log.warning("(تعلّم تلقائي) تعذّر حفظ «%s»→«%s»: %s", wrong, correct, exc)
+                    continue
+                if saved:
+                    log.info("(تعلّم تلقائي ✓) «%s»→«%s» (%s، ثقة %s) من الصفقة %s — يسري فورًا",
+                             wrong, correct, ftype, conf, deal.deal_id)
 
     @staticmethod
     def _treasury_source_token(prop, rec, text: str) -> Optional[str]:
@@ -767,6 +822,8 @@ class Pipeline:
                 "method": "ai", "confidence": int(c.confidence * 100), "model": prop.model,
                 "correction": names,
             })
+            # (التعلّم التلقائي) سجّل أزواج «خطأ→صحيح» المُتحقَّق منها (مورد/خزينة) لحفظها بعد النجاح
+            self._record_learnable_corrections(lg, corrections, prop.model)
             await self.db.deals.upsert(merged)
             await self.bus.notify_admin(
                 f"⚠️ {self._ref(merged)} فُهمت بالذكاء الاصطناعي ({prop.model}): "
@@ -2162,6 +2219,9 @@ class Pipeline:
         # اكتملت كل الأطراف بنجاح (أو Kill Switch إيقاف)
         if commit:
             deal.status = Status.COMPLETED                       # 🔴 قرار الحالة كما هو (لا تغيير منطق)
+            # (التعلّم التلقائي) كتابةٌ ناجحةٌ في MONEYADO (commit + بلا dry_run) = نجاحٌ مؤكَّد →
+            #   احفظ تصحيحات الذكاء المثبَّتة في القاموس (created_by=ai_auto). fail-open: لا يوقف الإكمال.
+            await self._learn_from_ai_success(deal)
             if self.verifier.enabled:
                 # ✅ فقط عند تأكيد SQL الفعليّ (§11.4) — اليقين الوحيد أن MONEYADO حفظت السجل.
                 deal.mark = Mark.DONE
