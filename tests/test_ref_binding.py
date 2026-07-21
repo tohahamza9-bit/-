@@ -336,3 +336,75 @@ async def test_geny_does_not_swallow_tnd(db):
     tre, sup = await db.treasuries.all_active(), await db.suppliers.all_active()
     res = parse_message("X9\n0917133939\nالمبلغ 800 دت\nصفاقس", tre, sup)
     assert res.leg is not None and res.leg.currency == Currency.TND
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (ح) حارس العملة — تكملة مصريّة لا تلوّث صفقة تونسيّة والعكس (X1624، 2026-07-21)
+# ═════════════════════════════════════════════════════════════════════════════
+def _cur_deal(deal_id, ref, offset, currency, sender=S1, code=None):
+    from core.constants import Currency, OperationType, Status
+    from core.models import Deal, ParsedLeg
+    leg = ParsedLeg(operation=OperationType.SELL, reference_number=ref, customer_code=code,
+                    amount=5000.0, currency=currency, sender_jid=sender,
+                    source_message_key=f"{deal_id}-a")
+    at = NOW + timedelta(seconds=offset)
+    return Deal(deal_id=deal_id, status=Status.WAITING_SECOND_LEG, sell_leg=leg, created_at=at,
+                updated_at=at, chat_jid=CENTRAL, first_received_at=at,
+                source_message_keys=[f"{deal_id}-a"])
+
+
+def _completion_frag(code, name, price):
+    """تكملة «كود اسم سعر» بلا مرجع — العملة تُستنتَج من السعر (6.02→EGP، 34→TND)."""
+    from core.constants import OperationType
+    from core.models import ParsedLeg
+    return ParsedLeg(operation=OperationType.SELL, customer_code=code, customer_name=name,
+                     price_raw=price, price_normalized=price, sender_jid=S1)
+
+
+async def test_egyptian_completion_rejects_tunisian_deal(db):
+    """X1624 حرفيًّا: صفقة تونسيّة (2500 د.ت) لا تبتلع تكملةً مصريّة (سعر 6.02).
+
+    الأقدم تونسيّة والأحدث مصريّة؛ التكملة المصريّة تتخطّى الأقدم التونسيّة إلى المصريّة."""
+    from core.constants import Currency
+    from core.queue.service import QueueService
+    q = QueueService(db)
+    await db.deals.upsert(_cur_deal("dTND", "X1624", 0, Currency.TND))   # الأقدم — تونسيّة
+    await db.deals.upsert(_cur_deal("dEGP", "X1700", 1, Currency.EGP))   # الأحدث — مصريّة
+    frag = _completion_frag("131", "الساعدي عبد الوهاب", "6.02")         # سعر مصريّ
+    chosen = await q.oldest_waiting_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5), frag)
+    assert chosen is not None and chosen.deal_id == "dEGP", "التكملة المصريّة لوّثت الصفقة التونسيّة"
+
+
+async def test_tunisian_completion_rejects_egyptian_deal(db):
+    """العكس: تكملة تونسيّة (سعر 34) لا تُربَط بصفقة مصريّة."""
+    from core.constants import Currency
+    from core.queue.service import QueueService
+    q = QueueService(db)
+    await db.deals.upsert(_cur_deal("dEGP", "X1626", 0, Currency.EGP))
+    await db.deals.upsert(_cur_deal("dTND", "X1624", 1, Currency.TND))
+    frag = _completion_frag("1007", "مبروك دردور", "34")                # سعر تونسيّ
+    chosen = await q.oldest_waiting_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5), frag)
+    assert chosen is not None and chosen.deal_id == "dTND"
+
+
+async def test_egyptian_completion_links_egyptian_deal(db):
+    """X1626 حرفيًّا: تكملة مصريّة (8.762) تُربَط بصفقة مصريّة معلّقة — العملة لا تعيق الصحيح."""
+    from core.constants import Currency
+    from core.queue.service import QueueService
+    q = QueueService(db)
+    await db.deals.upsert(_cur_deal("dEGP", "X1626", 0, Currency.EGP))
+    frag = _completion_frag("825", "عبد العاطي هروس", "6.08")
+    chosen = await q.oldest_waiting_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5), frag)
+    assert chosen is not None and chosen.deal_id == "dEGP"
+
+
+async def test_currency_guard_in_pending_candidates(db):
+    """نفس الحارس في المسار الثاني (pending_candidates_for_sender)."""
+    from core.constants import Currency
+    from core.queue.service import QueueService
+    q = QueueService(db)
+    await db.deals.upsert(_cur_deal("dTND", "X1624", 0, Currency.TND))
+    await db.deals.upsert(_cur_deal("dEGP", "X1700", 1, Currency.EGP))
+    frag = _completion_frag("131", "الساعدي", "6.02")                   # مصريّة
+    cands = await q.pending_candidates_for_sender(CENTRAL, S1, NOW + timedelta(seconds=5), frag=frag)
+    assert [c.deal_id for c in cands] == ["dEGP"], "التونسيّة لم تُستبعَد بالعملة"

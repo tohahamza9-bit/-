@@ -834,8 +834,15 @@ class QueueService:
             chosen = matched[0] if matched else None
             _log_link_decision("oldest_waiting_for_sender", message_key, pool, chosen, reason, text_ref)
             return chosen
+        # 🔴 حارس العملة (تلوّث X1624، 2026-07-21): صفقةٌ تونسيّة (2500 د.ت) ابتلعت تكملةً
+        #   مصريّة «131 الساعدي 6.02 / طه6.07» لأنّ هذا المسار كان يُصفّي بالشكل والمُرسِل فقط
+        #   بلا عملة — بخلاف fragment_link_candidates. عملة التكملة من سعرها (6.02→EGP، 34→TND).
+        #   incompatible ⇒ تُرفَض فتذهب لصفقةٍ بعملتها، وتلتقط الأولى تكملتها الصحيحة.
+        frag_cur = self._leg_currency(frag) or (
+            self._currency_from_price(frag.price_raw) if frag is not None else None)
         chosen = next((d for d in pool
-                       if self._fragment_targets(d, frag) and self._leg_sender(d) == sender_jid), None)
+                       if self._fragment_targets(d, frag) and self._leg_sender(d) == sender_jid
+                       and self._currency_compatible(d, frag_cur)), None)
         _log_link_decision("oldest_waiting_for_sender", message_key, pool, chosen, "fifo-fallback")
         return chosen
 
@@ -875,10 +882,16 @@ class QueueService:
         #   X1568). المرجع الصريح ما زال يبلغها فوق هذا الاستبعاد عبر bind_by_reference أعلاه.
         #   إن أفرغ الاستبعادُ المجموعةَ، تُحفَظ الرسالة ردًّا معلّقًا ثمّ تُصعَّد ⚠️ — ظهورٌ
         #   صريح لا سقوط صامت (§0).
-        eligible = [d for d in pool if not d.born_from_ref_reuse]
+        # 🔴 حارس العملة (تلوّث X1624، 2026-07-21): تُستبعَد الصفقات المخالفة لعملة التكملة قبل
+        #   أيّ ترشيح — تونسيّة لا تبتلع مصريّة والعكس. عملة التكملة من سعرها (6.02→EGP، 34→TND)؛
+        #   None (مجهولة) ⇒ متوافقة (لا رفض كاذب).
+        frag_cur = self._leg_currency(frag) or (
+            self._currency_from_price(frag.price_raw) if frag is not None else None)
+        eligible = [d for d in pool
+                    if not d.born_from_ref_reuse and self._currency_compatible(d, frag_cur)]
         if len(eligible) != len(pool):
             _log_link_decision("pending_for_sender", message_key, pool, None,
-                               f"excluded-ref-reuse:{len(pool) - len(eligible)}")
+                               f"excluded(reuse/currency):{len(pool) - len(eligible)}")
         targeted = [d for d in eligible if self._fragment_targets(d, frag)] if frag is not None else []
         if targeted:
             _log_link_decision("pending_for_sender", message_key, targeted,
