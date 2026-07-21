@@ -11,10 +11,10 @@ import {
 
 const TOK = 'secret-token-abc';
 
-test('فعل مسموح بتوكن صحيح → ينفَّذ بوسائط ثابتة', () => {
+test('فعل مسموح بتوكن صحيح → verdict رمزيّ (الأمر يُبنى في index.js: عامل بايثون يحرّر المنفذ ثمّ يشغّل)', () => {
   const v = resolveControlRequest({ token: TOK, action: 'start-kernel', expectedToken: TOK });
   assert.equal(v.ok, true);
-  assert.deepEqual(v.args, ['/Run', '/TN', TASK_KERNEL]);
+  assert.equal(v.action, 'start-kernel');       // رمزيّ — لا وسائط schtasks خام (إصلاح عفريت الكيرنل)
 });
 
 test('🔴 fail-closed: بلا توكن في البيئة النقطة معطّلة (لا مفتوحة)', () => {
@@ -39,11 +39,10 @@ test('🔴 فعل خارج القائمة المغلقة → 400 قبل أيّ �
   }
 });
 
-test('🔴 لا حقن أوامر: الوسائط ثابتة ولا يأتي شيء منها من الطلب', () => {
+test('🔴 لا حقن أوامر: verdict لا يعكس شيئًا من الطلب سوى الفعل من القائمة المغلقة', () => {
   const v = resolveControlRequest({ token: TOK, action: 'start-kernel', expectedToken: TOK });
-  assert.ok(v.args.every((a) => typeof a === 'string'));
-  assert.ok(!v.args.some((a) => /[&|;><$`]/.test(a)), 'لا رموز صدفة في الوسائط');
-  assert.equal(v.args.at(-1), TASK_KERNEL, 'اسم المهمّة ثابت من الكود');
+  assert.equal(v.action, 'start-kernel');                 // من allow-list حصرًا
+  assert.equal(typeof v.args, 'undefined', 'لا وسائط خام تُمرَّر — الأمر يُبنى بمسارات ثابتة في index.js');
 });
 
 test('القائمة المغلقة لا تحوي stop/restart (الكيرنل الحيّ ينفّذهما بنفسه)', () => {
@@ -58,9 +57,8 @@ test('safeEqual: مقارنة صحيحة وطول مختلف', () => {
   assert.equal(safeEqual(undefined, ''), true);
 });
 
-test('تعديل الوسائط المُعادة لا يلوّث القائمة الأصليّة', () => {
+test('القائمة المغلقة مُجمّدة (Object.freeze) — لا تُعدَّل من الخارج', () => {
+  assert.ok(Object.isFrozen(CONTROL_ACTIONS));
   const v = resolveControlRequest({ token: TOK, action: 'start-kernel', expectedToken: TOK });
-  v.args.push('/EXTRA');
-  const again = resolveControlRequest({ token: TOK, action: 'start-kernel', expectedToken: TOK });
-  assert.deepEqual(again.args, ['/Run', '/TN', TASK_KERNEL]);
+  assert.equal(v.action, 'start-kernel');       // ثابتٌ بين النداءات
 });

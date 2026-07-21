@@ -15,13 +15,21 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from core.logging_setup import get_logger
 
 log = get_logger(__name__)
+
+_ROOT = Path(__file__).resolve().parent.parent
+KERNEL_PORT = 8000                       # ثابت في الكود — لا يأتي من إدخال المستخدم
+PORT_FREE_TIMEOUT = 10.0                 # ثوانٍ: مهلة الانتظار حتى يتحرّر المنفذ (قرار المالك)
 
 KERNEL = "moneyado-kernel"               # ⚠️ ليس تحت pm2 — مهمّة ويندوز مجدولة (انظر أدناه)
 BRIDGE = "moneyado-wa"
@@ -51,27 +59,83 @@ def _validate(action: str, target: str) -> None:
         raise ValueError(f"هدف غير مسموح: {target!r}")
 
 
+def _listeners_on_port(port: int = KERNEL_PORT) -> list[int]:
+    """PIDs المستمعة (LISTENING) على المنفذ — من netstat. [] إن لا أحد أو تعذّر الفحص.
+
+    قد تُرجِع أكثر من PID (عفريتٌ + عملية جديدة تحت السباق) — نقتلها كلّها في free_port."""
+    pids: list[int] = []
+    try:
+        res = subprocess.run(["cmd", "/c", "netstat", "-ano", "-p", "TCP"], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=20)
+        for line in (res.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[0] == "TCP" and parts[1].endswith(f":{port}") \
+                    and parts[3].upper() == "LISTENING":
+                try:
+                    pids.append(int(parts[4]))
+                except ValueError:
+                    pass
+    except Exception as exc:
+        log.warning("تعذّر فحص المنفذ %s (متابعة): %s", port, exc)
+    return list(dict.fromkeys(pids))          # فريدة، محافِظةً على الترتيب
+
+
+def _port_is_free(port: int = KERNEL_PORT) -> bool:
+    """True إن **رفض** المنفذ الاتصال (لا مستمع) — إشارة «connection refused» الحقيقيّة التي
+    طلبها المالك، أدقّ من غياب سطر netstat وحده (تلتقط TIME_WAIT/الإغلاق الجاري)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.6)
+            return s.connect_ex(("127.0.0.1", port)) != 0   # 0 = يوجد مستمع؛ غيره = مرفوض/حرّ
+    except OSError:
+        return True
+
+
+def _kill_pid(pid: int) -> None:
+    """قتلٌ قسريّ (taskkill /F) — الوحيد الذي يضمن موت العفريت (schtasks /End لا يضمنه)."""
+    try:
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                       capture_output=True, text=True, timeout=15)
+    except Exception as exc:
+        log.warning("تعذّر قتل PID %s: %s", pid, exc)
+
+
+def free_port(port: int = KERNEL_PORT, timeout: float = PORT_FREE_TIMEOUT,
+              poll_interval: float = 0.4) -> bool:
+    """يضمن تحرّر المنفذ: يقتل كلّ مالكٍ له (taskkill /F) ثمّ **يستطلع حتى connection refused**
+    أو انقضاء المهلة. يُرجِع True إن تحرّر، False إن بقي مشغولًا (عفريتٌ عنيد — يُسجَّل خطأً).
+
+    هذا جوهر إصلاح عفريت الكيرنل: schtasks /End يُرسِل إشارةً لا تضمن الموت، فتبقى عمليةٌ
+    قديمةٌ تحجز المنفذ وتردّ /health=200 بينما عاملها ميت. القتل بالـPID + الاستطلاع يحسمها."""
+    deadline = time.monotonic() + timeout
+    killed: set[int] = set()
+    while True:
+        if _port_is_free(port):
+            return True
+        for pid in _listeners_on_port(port):
+            log.info("(free_port) قتل مالك المنفذ %s: PID=%s", port, pid)
+            _kill_pid(pid)
+            killed.add(pid)
+        if time.monotonic() >= deadline:
+            free = _port_is_free(port)
+            if not free:
+                log.error("المنفذ %s ما زال مشغولًا بعد %.0fs رغم قتل %s — عفريتٌ عنيد.",
+                          port, timeout, sorted(killed) or "—")
+            return free
+        time.sleep(poll_interval)
+
+
 def _kernel_status() -> dict:
     """حالة الكيرنل من مصدرها الحقيقيّ: **المنفذ 8000** (مستمع = يعمل) لا من مُشرِف.
 
     مقصود ألّا نصدّق المُشرِف وحده: تجربة pm2 أظهرت «online» بينما العملية تتقلّب. المنفذ
     هو الحقيقة التي يهمّ المستخدم (هل تُخدَم اللوحة والمعالجة؟).
     """
-    status, pid = "stopped", None
-    try:
-        res = subprocess.run(["cmd", "/c", "netstat", "-ano", "-p", "TCP"], capture_output=True,
-                             text=True, encoding="utf-8", errors="replace", timeout=20)
-        for line in (res.stdout or "").splitlines():
-            parts = line.split()
-            if len(parts) >= 5 and parts[0] == "TCP" and parts[1].endswith(":8000") \
-                    and parts[3].upper() == "LISTENING":
-                status, pid = "online", int(parts[4])
-                break
-    except Exception as exc:
-        log.warning("تعذّر فحص منفذ الكيرنل (متابعة): %s", exc)
-        return {"name": KERNEL, "status": "unknown", "restarts": 0, "pid": None,
+    pids = _listeners_on_port(KERNEL_PORT)
+    if pids:
+        return {"name": KERNEL, "status": "online", "restarts": 0, "pid": pids[0],
                 "supervisor": "scheduled-task"}
-    return {"name": KERNEL, "status": status, "restarts": 0, "pid": pid,
+    return {"name": KERNEL, "status": "stopped", "restarts": 0, "pid": None,
             "supervisor": "scheduled-task"}
 
 
@@ -112,38 +176,87 @@ def list_processes() -> list[dict]:
 
 # 🔴 `schtasks /End` **لا يكفي** لقتل الكيرنل: إن كانت المهمّة قد شُغِّلت من الجسر
 #    (POST /pm2، عملية node تحت pm2) فإن المجدوِل يُعلن المهمّة «Ready» بينما تبقى عملية
-#    uvicorn حيّةً ممسكةً بالمنفذ 8000 — يتيمةً خارج قبضته. تحقّقتُ منه تجريبيًّا 2026-07-20:
-#    تشغيلٌ مباشر ⇒ /End يقتل؛ تشغيلٌ عبر الجسر ⇒ /End يترك العملية حيّة.
-#    الأثر لو تُرك: اللوحة تقول «موقوف» والكيرنل يواصل الكتابة في MONEYADO — وهو بالضبط
-#    الفخّ الذي بُني عليه هذا الملفّ («الحقيقة من المنفذ لا من المُشرِف»).
-#    العلاج: بعد /End نقتل **مالك المنفذ 8000** صراحةً. المنفذ ثابت في الكود لا من المستخدم.
-_KILL_PORT_8000 = (
-    'powershell -NoProfile -ExecutionPolicy Bypass -Command '
-    '"Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | '
-    'ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"'
-)
+#    uvicorn حيّةً ممسكةً بالمنفذ 8000 — يتيمةً خارج قبضته (تحقّقتُ منه تجريبيًّا 2026-07-20،
+#    وتكرّر مرارًا في إعادات التشغيل اليدويّة). العلاج (قرار المالك 2026-07-21): قبل أيّ تشغيل
+#    جديد، نقتل مالك المنفذ بالـPID (taskkill /F) ثمّ **نستطلع حتى connection refused** بمهلة
+#    ١٠ث، فلا يبدأ الكيرنل الجديد على منفذٍ محجوز. المنطق في بايثون (free_port) — مُختبَرٌ
+#    وحتميّ، لا `timeout` أعمى ولا Stop-Process يبتلع أخطاءه.
+
+
+def _schtasks(verb: str) -> None:
+    """schtasks /End أو /Run على مهمّة الكيرنل — قائمة مغلقة (verb ثابت، لا إدخال مستخدم)."""
+    if verb not in ("End", "Run"):
+        raise ValueError(f"verb غير مسموح: {verb!r}")
+    try:
+        subprocess.run(["schtasks", f"/{verb}", "/TN", TASK_KERNEL],
+                       capture_output=True, text=True, timeout=20)
+    except Exception as exc:
+        log.warning("schtasks /%s فشل (متابعة): %s", verb, exc)
+
+
+def _wlog(msg: str) -> None:
+    """سجلّ العامل المنفصل — إلى ملفٍ مخصّص (العامل بلا setup_logging، فلوقه العاديّ يضيع)."""
+    try:
+        p = _ROOT / "artifacts" / "logs" / "kernel_ctl.log"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now(timezone.utc).isoformat()} | {msg}\n")
+    except Exception:
+        pass
+
+
+def _detached_worker(action: str) -> None:
+    """يُنفَّذ في **عمليةٍ منفصلة** تعيش بعد موت الكيرنل: تحرير المنفذ حتمًا ثمّ التشغيل.
+
+    الترتيب حاسم — القتل **قبل** /Run (بند ٣ من الإصلاح): stop/restart يُنهي المهمّة ثمّ يحرّر
+    المنفذ (يقتل العفريت)، وrestart/start لا يشغّل إلّا بعد تأكّد التحرّر (وإلّا فشل الربط)."""
+    time.sleep(SELF_KILL_DELAY)                    # عودة ردّ HTTP قبل موت الخادم الذي يخدم الطلب
+    _wlog(f"worker start: action={action}")
+    if action in ("stop", "restart"):
+        _schtasks("End")                           # يمنع إعادة التشغيل التلقائيّ للمهمّة أولًا
+        freed = free_port(KERNEL_PORT)
+        _wlog(f"after End+free_port: freed={freed}")
+    if action in ("start", "restart"):
+        # ضمانٌ إضافيّ: لا نشغّل على منفذٍ محجوز (start قد يجد عفريتًا؛ restart بعد تحريرٍ سابق).
+        freed = free_port(KERNEL_PORT)
+        _schtasks("Run")
+        _wlog(f"after free_port+Run: freed={freed}")
+
+
+def bridge_start_kernel() -> int:
+    """يُستدعى من الجسر حين الكيرنل **مطفأ** (لا خادم يستقبل «شغّله»): يحرّر المنفذ — يقتل أيّ
+    عفريتٍ عالقٍ يحجزه — ثمّ يشغّل المهمّة، **متزامنًا** (الجسر عمليةٌ منفصلة لا يقتل نفسه، فلا
+    تأجيل/انفصال). يُرجِع 0 إن تحرّر المنفذ وشُغِّلت المهمّة، 1 إن بقي محجوزًا (عفريتٌ عنيد).
+
+    (بند ٤ من الإصلاح: نفس منطق free_port في مسار الجسر — مصدرُ حقيقةٍ واحد لا تكرار في node.)"""
+    freed = free_port(KERNEL_PORT)
+    _schtasks("Run")
+    _wlog(f"bridge_start_kernel: freed={freed}")
+    return 0 if freed else 1
 
 
 def _run_kernel_task(action: str) -> dict:
-    """أوامر الكيرنل عبر مُشرِف ويندوز (schtasks) — يُنفَّذ **منفصلًا مؤجَّلًا دائمًا** لأن
-    كل أوامره تمسّ الخادم الذي يخدم الطلب (حتى start: يعقبه /End في restart)."""
-    if action == "start":
-        inner = f'schtasks /Run /TN {TASK_KERNEL}'
-    elif action == "stop":
-        inner = f'schtasks /End /TN {TASK_KERNEL} & {_KILL_PORT_8000}'
-    else:                                          # restart — أُنهِ (وأجهِز على اليتيم) ثم شغّل
-        inner = (f'schtasks /End /TN {TASK_KERNEL} & {_KILL_PORT_8000}'
-                 f' & timeout /t 3 /nobreak >nul & schtasks /Run /TN {TASK_KERNEL}')
+    """يُطلِق العامل المنفصل (kill+poll+start) — يعيش بعد موت الكيرنل الذي يخدم الطلب.
+
+    يُشغَّل بمفسّر الـvenv نفسه (sys.executable) مع cwd=جذر المستودع كي يستورد core.*.
+    قائمة مغلقة: action محقَّقٌ سلفًا في run_action، ولا شيء من إدخال المستخدم يصل هنا."""
+    worker = (
+        "import sys; sys.path.insert(0, r'%s'); "
+        "from core.process_control import _detached_worker; _detached_worker('%s')"
+        % (str(_ROOT), action)
+    )
     flags = 0
     if sys.platform == "win32":
         flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    cmd = ["cmd", "/c", f"timeout /t {SELF_KILL_DELAY} /nobreak >nul & {inner}"]
     try:
-        subprocess.Popen(cmd, creationflags=flags, close_fds=True, stdin=subprocess.DEVNULL,
+        subprocess.Popen([sys.executable, "-c", worker], cwd=str(_ROOT), creationflags=flags,
+                         close_fds=True, stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log.info("مهمّة الكيرنل: جُدوِل «%s» منفصلًا بعد %ss.", action, SELF_KILL_DELAY)
+        log.info("مهمّة الكيرنل: جُدوِل «%s» عاملًا منفصلًا (قتل بالـPID + استطلاع %.0fs).",
+                 action, PORT_FREE_TIMEOUT)
         return {"ok": True, "deferred": True,
-                "detail": f"سيُنفَّذ «{action}» على مهمّة الكيرنل خلال {SELF_KILL_DELAY} ثوانٍ."}
+                "detail": f"سيُنفَّذ «{action}» على مهمّة الكيرنل خلال {SELF_KILL_DELAY} ثوانٍ "
+                          f"(تحرير المنفذ بالقتل ثمّ الاستطلاع)."}
     except Exception as exc:
         log.error("تعذّرت جدولة أمر الكيرنل %s: %s", action, exc)
         return {"ok": False, "deferred": True, "detail": str(exc)}

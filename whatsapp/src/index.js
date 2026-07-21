@@ -3,6 +3,8 @@
  * لا يُشغَّل ضمن الاختبارات (يستورد Baileys/Mongo). يُشغَّل: `node src/index.js`.
  */
 import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
@@ -336,18 +338,27 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: verdict.error }));
           return;
         }
-        // execFile بمصفوفة وسائط ثابتة — بلا shell، فلا حقن أوامر.
-        execFile('schtasks', verdict.args, { windowsHide: true }, (err, stdout, stderr) => {
-          if (err) {
-            logger.error({ err }, 'فشل تنفيذ أمر التحكّم');
-            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ ok: false, error: String(stderr || err.message).slice(0, 300) }));
-            return;
-          }
-          logger.info('✅ نُفِّذ أمر التحكّم «%s» من اللوحة عبر الجسر.', action);
-          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ ok: true, action, detail: String(stdout || '').slice(0, 300) }));
-        });
+        // 🔴 (إصلاح عفريت الكيرنل 2026-07-21) التشغيل عبر **عامل بايثون** لا schtasks المباشر:
+        //    يحرّر المنفذ ٨٠٠٠ أولًا (يقتل أيّ عفريتٍ عالقٍ بالـPID ثمّ يستطلع حتى التحرّر) ثمّ
+        //    يشغّل المهمّة — فلا يبدأ الكيرنل الجديد على منفذٍ محجوز. مصدرُ الحقيقة واحد
+        //    (core.process_control.free_port)، لا تكرار في node. مسارٌ ثابتٌ من جذر المستودع،
+        //    بمصفوفة وسائط، بلا shell — فلا حقن أوامر.
+        const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+        const pyExe = path.join(repoRoot, '.venv', 'Scripts', 'python.exe');
+        const pyArgs = ['-c',
+          'from core.process_control import bridge_start_kernel; import sys; sys.exit(bridge_start_kernel())'];
+        execFile(pyExe, pyArgs, { cwd: repoRoot, windowsHide: true, timeout: 20000 },
+          (err, stdout, stderr) => {
+            if (err) {
+              logger.error({ err }, 'فشل تنفيذ أمر التحكّم');
+              res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ ok: false, error: String(stderr || err.message).slice(0, 300) }));
+              return;
+            }
+            logger.info('✅ نُفِّذ أمر التحكّم «%s» من اللوحة عبر الجسر (تحرير المنفذ ثمّ تشغيل).', action);
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: true, action, detail: String(stdout || '').slice(0, 300) }));
+          });
       });
       return;
     }

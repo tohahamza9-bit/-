@@ -45,11 +45,11 @@ def test_kernel_touching_commands_are_deferred(target, expected):
     assert pc.affects_kernel(target) is expected
 
 
-def test_deferred_command_is_detached_and_delayed(monkeypatch):
-    """أمر الكيرنل: Popen منفصل (DETACHED) وفيه تأخير — لا تنفيذ متزامن يقتل الخادم قبل الردّ.
+def test_deferred_command_is_detached(monkeypatch):
+    """أمر الكيرنل: Popen منفصل (DETACHED) لعامل بايثون — لا تنفيذ متزامن يقتل الخادم قبل الردّ.
 
-    (المُنفِّذ صار schtasks بعد إخراج الكيرنل من pm2؛ العقد المُختبَر هنا هو **التأجيل والانفصال**
-    لا الأداة — أداة الكيرنل يغطّيها test_kernel_commands_go_to_schtasks_not_pm2.)"""
+    العقد المُختبَر: **الانفصال + إطلاق العامل**. التأخير صار **داخل العامل** (time.sleep) لا في
+    cmd، وترتيب End/free_port/Run يغطّيه tests/test_process_control_orphan.py."""
     seen = {}
 
     class _P:
@@ -62,9 +62,8 @@ def test_deferred_command_is_detached_and_delayed(monkeypatch):
     res = pc.run_action("restart", "moneyado-kernel")
     assert res["ok"] and res["deferred"] is True
     joined = " ".join(seen["cmd"])
-    assert "moneyado-kernel" in joined
-    assert "timeout" in joined                       # تأخير يسمح بعودة الردّ
-    assert seen["kw"].get("creationflags", 0) != 0    # منفصل عن العملية الأمّ
+    assert "_detached_worker" in joined and "restart" in joined    # عامل التحرير+التشغيل
+    assert seen["kw"].get("creationflags", 0) != 0                 # منفصل عن العملية الأمّ
 
 
 def test_immediate_command_runs_inline(monkeypatch):
@@ -108,8 +107,9 @@ def test_list_processes_filters_foreign_apps(monkeypatch):
 
 
 # ── الكيرنل خارج pm2: مهمّة ويندوز مجدولة (2026-07-19) ────────────────────────────
-def test_kernel_commands_go_to_schtasks_not_pm2(monkeypatch):
-    """🔴 أوامر الكيرنل تذهب لـschtasks — pm2 كان يقتله كل دقيقة (CTRL_C 3221225786)."""
+def test_kernel_commands_not_pm2(monkeypatch):
+    """🔴 أوامر الكيرنل لا تذهب لـpm2 (كان يقتله كل دقيقة، CTRL_C 3221225786) — بل لعامل بايثون
+    (core.process_control._detached_worker) الذي يستعمل schtasks داخليًّا."""
     seen = {}
 
     class _P:
@@ -118,10 +118,10 @@ def test_kernel_commands_go_to_schtasks_not_pm2(monkeypatch):
             seen["kw"] = kw
 
     monkeypatch.setattr(pc.subprocess, "Popen", _P)
-    monkeypatch.setattr(pc.subprocess, "run", lambda *a, **k: pytest.fail("لا pm2 للكيرنل"))
+    monkeypatch.setattr(pc.subprocess, "run", lambda *a, **k: pytest.fail("لا تنفيذ متزامن للكيرنل"))
     res = pc.run_action("restart", "moneyado-kernel")
     assert res["ok"] and res["deferred"] is True
-    assert "schtasks" in seen["cmd"] and "moneyado-kernel" in seen["cmd"]
+    assert "core.process_control" in seen["cmd"] and "_detached_worker" in seen["cmd"]
     assert "pm2" not in seen["cmd"]                  # لا رجعة لـpm2 للكيرنل
     assert seen["kw"].get("creationflags", 0) != 0    # منفصل
 
@@ -149,12 +149,10 @@ def test_kernel_reported_stopped_when_port_free(monkeypatch):
     assert pc._kernel_status()["status"] == "stopped"
 
 
-def test_kernel_stop_also_kills_port_owner(monkeypatch):
-    """🔴 `schtasks /End` وحده يترك الكيرنل حيًّا إن شُغِّل من الجسر (المجدوِل يفقد قبضته
-    فتبقى uvicorn يتيمةً ممسكةً بالمنفذ 8000). أُثبِت تجريبيًّا 2026-07-20. لذا يجب أن
-    يتضمّن أمرُ الإيقاف قتلَ **مالك المنفذ** صراحةً — وإلا قالت اللوحة «موقوف» والكيرنل
-    يواصل الكتابة في MONEYADO."""
-    import core.process_control as pc
+def test_kernel_stop_launches_worker(monkeypatch):
+    """الإيقاف يُطلِق عامل بايثون (stop): يُنهي المهمّة ثمّ **يقتل مالك المنفذ** (free_port) —
+    schtasks /End وحده يترك اليتيم حيًّا (أُثبِت 2026-07-20). ترتيب End→free_port والقتل
+    الفعليّ مُختبَران في tests/test_process_control_orphan.py."""
     seen = {}
 
     class _P:
@@ -163,14 +161,12 @@ def test_kernel_stop_also_kills_port_owner(monkeypatch):
 
     monkeypatch.setattr(pc.subprocess, "Popen", _P)
     pc.run_action("stop", pc.KERNEL)
-    assert "schtasks /End" in seen["cmd"]
-    assert "8000" in seen["cmd"] and "Stop-Process" in seen["cmd"], \
-        "الإيقاف يجب أن يُجهِز على مالك المنفذ 8000 لا أن يكتفي بـschtasks"
+    assert "_detached_worker" in seen["cmd"] and "stop" in seen["cmd"]
 
 
-def test_kernel_restart_kills_orphan_before_starting(monkeypatch):
-    """إعادة التشغيل تُجهِز على اليتيم قبل /Run — وإلا فشل الربط على منفذ مشغول."""
-    import core.process_control as pc
+def test_kernel_restart_launches_worker(monkeypatch):
+    """إعادة التشغيل تُطلِق العامل (restart): تحرير المنفذ **قبل** /Run — وإلا فشل الربط على
+    منفذ مشغول. الترتيب الحتميّ في tests/test_process_control_orphan.py."""
     seen = {}
 
     class _P:
@@ -179,6 +175,4 @@ def test_kernel_restart_kills_orphan_before_starting(monkeypatch):
 
     monkeypatch.setattr(pc.subprocess, "Popen", _P)
     pc.run_action("restart", pc.KERNEL)
-    cmd = seen["cmd"]
-    assert "Stop-Process" in cmd
-    assert cmd.index("Stop-Process") < cmd.index("/Run"), "القتل يسبق التشغيل"
+    assert "_detached_worker" in seen["cmd"] and "restart" in seen["cmd"]

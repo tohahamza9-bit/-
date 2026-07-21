@@ -16,9 +16,11 @@
 /** اسم المهمّة المجدولة — ثابت، لا يأتي من الطلب أبدًا. */
 export const TASK_KERNEL = 'moneyado-kernel';
 
-/** الأفعال المسموحة ووسائطها الثابتة. لا stop/restart هنا: الكيرنل الحيّ ينفّذهما بنفسه. */
+/** الأفعال المسموحة — قائمة مغلقة (allow-list). القيمة true علامةُ سماح؛ الأمر الفعليّ يُبنى
+ *  في index.js (عامل بايثون يحرّر المنفذ ثمّ يشغّل — إصلاح عفريت الكيرنل). لا stop/restart هنا:
+ *  الكيرنل الحيّ ينفّذهما بنفسه. */
 export const CONTROL_ACTIONS = Object.freeze({
-  'start-kernel': ['/Run', '/TN', TASK_KERNEL],
+  'start-kernel': true,
 });
 
 /**
@@ -47,9 +49,8 @@ export function resolveControlRequest({ token, action, expectedToken } = {}) {
   if (!token || !safeEqual(token, expectedToken)) {
     return { ok: false, status: 403, error: 'forbidden' };
   }
-  const args = CONTROL_ACTIONS[action];
-  if (!args) {
+  if (!CONTROL_ACTIONS[action]) {
     return { ok: false, status: 400, error: `فعل غير مسموح: ${String(action)}` };
   }
-  return { ok: true, args: args.slice() };
+  return { ok: true, action };
 }
