@@ -227,16 +227,24 @@ class DealRepo(_Repo):
         doc = await self.col.find_one({"source_message_keys": message_key})
         return Deal(**doc) if doc else None
 
+    # 🔴 مفتاح الترتيب الحتميّ للكتابة/المطابقة (إصلاح «التنزيل العشوائيّ»، العرض 1-أ): `created_at`
+    #    يُختَم **وقت النبضة** لا وقت الرسالة، فدفعةٌ كاملة تُنشأ في نبضةٍ واحدة تحمل `created_at`
+    #    متطابقًا للمِلّي ثانية → عند التساوي يُرجِع Mongo الوثائق بترتيب `$natural` عشوائيّ (X1706–X1711).
+    #    الحلّ: كسر تعادلٍ ثانويّ بـ`first_received_at` (وقت وصول الرسالة الأولى الحقيقيّ، متمايز
+    #    بالثانية) ثم `_id` (حتميّ نهائيّ) — فيعود الترتيب لترتيب الوصول الفعليّ بلا لمس دلالة
+    #    `created_at` (نوافذ التصعيد/الربط/الإلغاء تبقى كما هي).
+    _WRITE_ORDER = [("created_at", 1), ("first_received_at", 1), ("_id", 1)]
+
     async def waiting_in_room(self, chat_jid: str) -> list[Deal]:
         """الصفقات المنتظِرة طرفًا ثانيًا في غرفة معيّنة (§7.3 ربط رد الخزينة/المورد بنفس الغرفة)."""
         cur = self.col.find(
             {"status": Status.WAITING_SECOND_LEG.value, "chat_jid": chat_jid}
-        ).sort("created_at", 1)
+        ).sort(self._WRITE_ORDER)
         return [Deal(**d) async for d in cur]
 
     async def by_status(self, *statuses: Status) -> list[Deal]:
         vals = [s.value for s in statuses]
-        cur = self.col.find({"status": {"$in": vals}}).sort("created_at", 1)
+        cur = self.col.find({"status": {"$in": vals}}).sort(self._WRITE_ORDER)
         return [Deal(**d) async for d in cur]
 
     async def set_status(self, deal_id: str, status: Status, **fields: Any) -> None:
