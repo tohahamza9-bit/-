@@ -260,6 +260,24 @@ class DealRepo(_Repo):
         )
         return res.modified_count == 1
 
+    async def claim_completion_attempt(self, deal_id: str, now: datetime) -> bool:
+        """ادّعاء ذرّيّ لحقّ إكمال صفقةٍ منتظِرة برسالةٍ ثانية عديمة المرجع (العرض 2-A).
+
+        يمنع **الابتلاع المزدوج** تحت السباق (كيرنل مكرّر) أو إعادة المعالجة: أوّل مُطالِبٍ يفوز،
+        والفلتر يشترط `status=WAITING_SECOND_LEG` و`completion_attempted_at=None`، فينجح واحد فقط
+        (نمط begin_cancelling). يُرجع True إن فاز هذا الاستدعاء بالادّعاء، False إن سبقه غيره أو
+        لم تعد الصفقة منتظِرة. يُستدعى **قبل** الدمج؛ الخاسر يتخطّى الهدف (لا يبتلع صفقةً محجوزة).
+
+        استبعادُ المُدّعاة سلفًا من إعادة الترشّح مسؤوليةُ استعلامات المرشّحين (completion_attempted_at
+        is None) — فصفقةٌ جرت محاولةُ إكمالها لا تُعاد ترشيحًا لتكملةٍ عديمة مرجع أخرى بلا تخمين."""
+        res = await self.col.update_one(
+            {"deal_id": deal_id, "status": Status.WAITING_SECOND_LEG.value,
+             "completion_attempted_at": None},
+            {"$set": {"completion_attempted_at": _naive_utc(now), "updated_at": utcnow()},
+             "$inc": {"completion_attempt_count": 1}},
+        )
+        return res.modified_count == 1
+
     async def completed_since(self, since: datetime) -> list[Deal]:
         """الصفقات المكتملة (COMPLETED) التي تحدّثت منذ `since` — للتدقيق الدوري (§ Reconciliation).
         قراءة فقط، خارج المسار الحيّ. الترشيح الزمنيّ في بايثون (توحيد naive/aware كبقية المستودعات)."""
