@@ -20,6 +20,24 @@ from .parsing.normalize import normalize_ar
 _TOKEN_SPLIT = re.compile(r"([^\s/]+)")
 
 
+def _norm_tokens(s: str) -> list[str]:
+    """رموز النصّ مطبَّعةً (نفس تقسيم _TOKEN_SPLIT: مسافة/سطر/«/»)."""
+    return [normalize_ar(m.group(1)) for m in _TOKEN_SPLIT.finditer(s or "")]
+
+
+def is_non_idempotent_correction(wrong: str, correct: str) -> bool:
+    """قاعدةٌ **غير مُتَّسِقة**: `wrong_text` تتابعُ رموزٍ **داخل** `correct_value` (بادئة/رمز)، فتطبيقُها
+    فوق ناتجها يُضاعِف: «بلاس»→«بلاس فون» على «بلاس فون» ينتج «بلاس فون فون» (بلاغ SI5225/SI5227)،
+    و«فودافون»→«فودافون بالخصم» على «فودافون بالخصم» ينتج تكرارًا. تُرفَض **تعلّمًا** (ai_auto)
+    وتُتخطّى **تطبيقًا** (الحارس الموضعيّ في apply_corrections). القواعد التصحيحيّة الحقيقيّة
+    (خطأٌ إملائيّ ≠ رمزٌ من الصواب، مثل «فدفون»→«فودافون بالخصم») تبقى سليمة."""
+    w = _norm_tokens(wrong)
+    cv = _norm_tokens(correct)
+    if not w or not cv or w == cv or len(w) >= len(cv):
+        return False
+    return any(cv[i:i + len(w)] == w for i in range(len(cv) - len(w) + 1))
+
+
 def build_correction_map(corrections: Iterable[CorrectionRecord]) -> dict[str, str]:
     """{الرمز الخاطئ المطبَّع: القيمة الصحيحة} — النشطة فقط، مع حارس التباس (§0).
 
@@ -52,23 +70,41 @@ def apply_corrections(text: str, corrections: Iterable[CorrectionRecord]) -> tup
     if not text or not cmap:
         return text, []
     fired: list[str] = []
-    # عكسُ الخريطة: من المطبَّع إلى الرمز الأصليّ (لأوّل تصحيح بذلك المفتاح) — لتسجيل times_used
-    # بالنصّ كما خزّنه المالك. غير حرج (best-effort) فالمفتاح المطبَّع كافٍ للمطابقة في bump_usage.
+    tokens = list(_TOKEN_SPLIT.finditer(text))
 
-    def _sub_token(tok: str) -> str:
+    def _already_present(cv: str, tok_i: int) -> bool:
+        """(حارس الاتّساق) هل `correct_value` **حاضرٌ سلفًا** بدءًا من هذا الرمز؟ أي هل الرموز
+        التالية (بما فيها الحاليّ) تُهجّي `cv` كاملًا؟ إن نعم، فالتطبيق يُضاعِف — نتخطّاه
+        (X: «بلاس فون»+قاعدة«بلاس→بلاس فون» = «بلاس فون فون»). cv أحاديّ الرمز لا يُضاعِف فلا يُحرَس."""
+        cv_toks = _norm_tokens(cv)
+        if len(cv_toks) <= 1:
+            return False
+        ahead = [normalize_ar(tokens[j].group(1)) for j in range(tok_i, min(tok_i + len(cv_toks), len(tokens)))]
+        return ahead == cv_toks
+
+    out: list[str] = []
+    last = 0
+    for i, mo in enumerate(tokens):
+        tok = mo.group(1)
+        start, end = mo.span(1)
+        out.append(text[last:start])                          # الفاصل قبل الرمز
+        last = end
         # التقاط بادئةٍ عربيّةٍ ملتصقةٍ برقم/سعر: «طه6.07» → جزّئ «طه» عن «6.07» وصحّح الأوّل.
         m = re.match(r"^([^\d]+?)(\d.*)$", tok)
         head, tail = (m.group(1), m.group(2)) if m else (tok, "")
         key = normalize_ar(head)
         if key in cmap:
-            fired.append(head)
-            return cmap[key] + (" " + tail if tail else "")
-        # الرمز كاملًا (بلا التصاق رقميّ) — طابِق المطبَّع
-        key_full = normalize_ar(tok)
-        if key_full in cmap:
-            fired.append(tok)
-            return cmap[key_full]
-        return tok
-
-    out = _TOKEN_SPLIT.sub(lambda mo: _sub_token(mo.group(1)), text)
-    return out, fired
+            orig, cv, suffix = head, cmap[key], (" " + tail if tail else "")
+        elif normalize_ar(tok) in cmap:
+            orig, cv, suffix = tok, cmap[normalize_ar(tok)], ""
+        else:
+            out.append(tok)
+            continue
+        # (حارس الاتّساق) لا تُطبّق إن كان الصواب حاضرًا سلفًا عند الموضع → منع التضاعف.
+        if _already_present(cv, i):
+            out.append(tok)
+            continue
+        fired.append(orig)
+        out.append(cv + suffix)
+    out.append(text[last:])
+    return "".join(out), fired

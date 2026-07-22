@@ -57,7 +57,7 @@ from .parsing import (
     parse_message,
     unresolved_supplier_in_second,
 )
-from .corrections import apply_corrections
+from .corrections import apply_corrections, is_non_idempotent_correction
 from .ai_context import build_sender_context
 from .ai_understanding import (
     OpenRouterClient, _num_in_text, apply_text_corrections, join_pair, validate_corrections,
@@ -491,6 +491,11 @@ class Pipeline:
             ftype = getattr(c, "entity_type", None)
             if not wrong or not correct or wrong == correct or ftype not in ("supplier", "treasury"):
                 continue
+            # (حارس التعلّم، بلاغ SI5225) لا نتعلّم قاعدةً **غير مُتَّسِقة** (wrong رمزٌ داخل correct)
+            #   فتطبيقُها فوق الصواب يُضاعِف («بلاس»→«بلاس فون»). الاسم كاملٌ سلفًا فلا حاجة لها.
+            if is_non_idempotent_correction(wrong, correct):
+                log.info("(تعلّم) تخطّي قاعدة غير مُتَّسِقة %r→%r (تُضاعِف)", wrong, correct)
+                continue
             leg.deviation_log.append({
                 "field": "ai_learn", "field_type": ftype,
                 "wrong_text": wrong, "correct_value": correct,
@@ -514,6 +519,9 @@ class Pipeline:
                 ftype = dv.get("field_type") or "supplier"
                 conf = dv.get("confidence")
                 if not wrong or not correct or wrong == correct:
+                    continue
+                if is_non_idempotent_correction(wrong, correct):  # حارس التعلّم (بلاغ SI5225): لا نُضاعِف
+                    log.info("(تعلّم) تخطّي حفظ قاعدة غير مُتَّسِقة %r→%r", wrong, correct)
                     continue
                 if conf is not None and float(conf) < 0.9:        # ضمان الثقة ≥ 0.9
                     continue
