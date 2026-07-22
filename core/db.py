@@ -819,19 +819,24 @@ class PendingReplyRepo(_Repo):
         await self.col.update_one({"message_key": message_key}, {"$set": {"consumed": True}})
 
     async def sweep_expired(self, now: datetime, ttl_seconds: int) -> list[dict]:
-        """الردود المعلّقة التي تجاوزت المهلة بلا حوالة → تُسقَط. **الردود ذات المرجع** المنتهية تُرجَع
-        للتصعيد (⚠️): رسالة ثانية بمرجع صريح لم تصل أُولاها = فشل ربط يستوجب تنبيهًا لا هدرزةً صامتة
-        (Fix 1ب). الردود عديمة‑المرجع («بلس» شاردة) تبقى هدرزةً صامتة. يُرجع قائمة المنتهية ذات المرجع."""
+        """الردود المعلّقة التي تجاوزت المهلة بلا حوالة → تُسقَط. تُرجَع للتصعيد (⚠️) حالتان:
+        (١) **ذات المرجع** (Fix 1ب): رسالة ثانية بمرجع صريح لم تصل أُولاها. (٢) 🔴 (X1918)
+        **تكملةٌ كاملةٌ يتيمةٌ** بلا مرجع لكن تحمل هويةَ زبون (كود/اسم) — حُفِظت لأنها وصلت قبل
+        صفقتها ولم تصلها؛ إسقاطُها صامتةً خسارةٌ. أمّا الأجزاء المجرّدة («بلس»/«صافي» بلا هوية)
+        فتبقى هدرزةً صامتة. المُعرِّف = المرجع إن وُجد، وإلّا اسم/كود الزبون."""
         horizon = _naive_utc(now) - timedelta(seconds=ttl_seconds)
         expired_refd: list[dict] = []
         async for d in self.col.find({"consumed": False}):
             if _naive_utc(d["received_at"]) < horizon:
                 await self.col.update_one({"_id": d["_id"]}, {"$set": {"consumed": True}})
-                ref = ((d.get("leg") or {}).get("reference_number") or "").strip()
-                if ref:
-                    log.warning("رد معلّق بمرجع %s (%s) تجاوز %ss بلا وصول رسالته الأولى → تصعيد ⚠️",
-                                ref, d.get("message_key"), ttl_seconds)
-                    expired_refd.append({"reference_number": ref, "message_key": d.get("message_key"),
+                leg = d.get("leg") or {}
+                ref = (leg.get("reference_number") or "").strip()
+                cust = (leg.get("customer_name") or "").strip() or (leg.get("customer_code") or "").strip()
+                label = ref or cust
+                if ref or cust:                      # ذات مرجع، أو تكملة كاملة بهويّة (X1918)
+                    log.warning("رد معلّق %r (%s) تجاوز %ss بلا وصول رسالته الأولى → تصعيد ⚠️",
+                                label, d.get("message_key"), ttl_seconds)
+                    expired_refd.append({"reference_number": label, "message_key": d.get("message_key"),
                                          "chat_jid": d.get("chat_jid")})
                 else:
                     log.info("رد معلّق %s تجاوز %ss بلا حوالة → أُسقِط كهدرزة",

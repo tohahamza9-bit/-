@@ -108,7 +108,7 @@ def normalize_payment(s: Optional[str]) -> Optional[str]:
     if not s:
         return None
     compact = normalize_ar(s).replace(" ", "")
-    if any(k in compact for k in ("فودافون", "فودفون", "فدفون", "فدافون", "فودا", "واتس")):
+    if any(k in compact for k in ("فودافون", "فودفون", "فدفون", "فدافون", "فودا", "واتس", "قداقون")):
         return "فودافون كاش"
     if "انستا" in compact:
         return "إنستا باي"

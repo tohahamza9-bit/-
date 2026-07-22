@@ -1563,6 +1563,27 @@ class Pipeline:
                     cands = await self.queue.pending_candidates_for_sender(
                         raw.chat_jid, raw.sender_jid, now, txt_ref,
                         frag=frag2, message_key=raw.message_key)
+                    # 🔴 (X1918) تكملةٌ كاملةٌ يتيمةٌ وصلت **قبل** صفقتها — لا مرشّح إطلاقًا.
+                    #   كان هذا المسار يُسقِطها صامتةً (بخلاف الجزء المجرّد الذي يحفظه absorb_fragment):
+                    #   في دفعةٍ واحدة الثانية، تُعالَج التكملة قبل ميلاد صفقتها المؤجَّلة للذكاء (~5ث)،
+                    #   فتضيع. الحلّ: احفظها ردًّا معلّقًا كالجزء المجرّد؛ يسحبها _pull_pending_reply
+                    #   لحظة ميلاد الصفقة (نفس النبضة، بلا انتظار). حرّاس السحب (مرجع ملزِم/توافق
+                    #   عملة/استحواذ ذرّي) تحمي من الالتصاق الخاطئ. الالتباس (>1) يبقى للتحكيم أدناه.
+                    #   شرطان يمنعان ابتلاع الضجيج: (١) **كودُ زبون** (المرساة §1.1) — «زد» بلا كود
+                    #   لا يُحفَظ؛ (٢) **بلا مرجع صريح** — رسالةٌ بمرجعٍ فشل ربطُه تُنبَّه للمالك فورًا
+                    #   (لا تُحفَظ صامتةً)، وذلك في مسار has_ref أدناه.
+                    if not cands and not txt_ref and frag2.customer_code:
+                        if txt_ref and not frag2.reference_number:
+                            frag2.reference_number = txt_ref
+                        # 🔴 المُرسِل لازم للسحب لاحقًا (claim_fifo_for_sender يطابق المُرسِل).
+                        frag2.sender_jid = raw.sender_jid
+                        frag2.source_message_key = raw.message_key
+                        await self.db.pending_replies.add(
+                            message_key=raw.message_key, chat_jid=raw.chat_jid or "",
+                            leg=frag2, received_at=now)
+                        log.info("(X1918) تكملة كاملة يتيمة %s بلا صفقة معلّقة — حُفِظت ردًّا "
+                                 "معلّقًا (تُسحَب عند ميلاد صفقتها)", raw.message_key)
+                        return None
                     # (العرض 2-A) إقصاءٌ صارم بالمحتوى في نقطة التحكيم: >1 ⇒ تعليق+تصعيد بلا تخمين الأقدم.
                     target = await self._choose_link_target(
                         raw, cands, treasuries, suppliers, now,
@@ -1699,6 +1720,13 @@ class Pipeline:
             await self.db.deals.upsert(deal)
             log.info("(X1242) صفقة %s وُلدت بمرجع %s مستعمَلٍ سلفًا — تُستبعَد من ترشّح "
                      "التكملات عديمة المرجع", deal.deal_id, leg.reference_number)
+            # 🔴 (X1918) إعادة إرسالٍ بمرجعٍ مستعمَل تُنشئ صفقةً يتيمةً تُصعَّد لاحقًا بلا فائدة —
+            #   نُبلِّغ المُرسِل صراحةً كي لا يكرّر: التكملة تُرسَل **بلا مرجع** فتلتصق بأُولاها.
+            await self.bus.reply_central(
+                f"⚠️ المرجع {leg.reference_number} مُستخدَمٌ بالفعل — إن أردت تكملةً "
+                f"(زبون/سعر/خزينة) أرسِلها **بدون مرجع** لتُربَط تلقائيًّا.",
+                raw.message_key, is_alert=True,
+            )
         # افتح خانة مُرسِل إن بقيت الصفقة تنتظر طرفًا ثانيًا (§7.3): الرسالة الثانية من نفس المُرسِل
         # خلال النافذة ستملؤها حتمًا. SI لا تفتح خانة (لا تنتظر ثانيًا §4.5) — والحالة WAITING تمنعها.
         if (deal is not None and deal.status == Status.WAITING_SECOND_LEG
