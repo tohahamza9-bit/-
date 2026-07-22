@@ -18,7 +18,9 @@ from core.queue.service import is_treasury_only_reply, is_treasury_second_reply
 
 _T_WALID = TreasuryRef(code="51", name="وليد تونس العاصمة",
                        type=TreasuryType.SELL_ONLY, currency=Currency.TND)
-_T_MOHAMED = TreasuryRef(code="61", name="محمد حمامات",
+# الكود 79 هو الحيّ (القاعدة + SEED_TREASURIES + test_structural_treasury)؛ «61» كان سهوًا
+# مطبعيًّا لا وجود له في أيّ خزينة — وُحِّد كي لا يمشي اسمٌ واحد بكودين.
+_T_MOHAMED = TreasuryRef(code="79", name="محمد حمامات",
                          type=TreasuryType.SELL_ONLY, currency=Currency.TND)
 
 

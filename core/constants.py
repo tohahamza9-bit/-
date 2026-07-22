@@ -88,7 +88,11 @@ SEED_TREASURIES: list[dict] = [
     {"code": "69", "name": "عصام سوسة", "currency": "TND", "type": "sell_only", "aliases": ["عصام"]},
     {"code": "59", "name": "جمال سوسة", "currency": "TND", "type": "sell_only", "aliases": ["جمال"]},
     {"code": "78", "name": "محمود صفاقس", "currency": "TND", "type": "sell_only", "aliases": ["محمود"]},
-    {"code": "79", "name": "محمد حمامات", "currency": "TND", "type": "sell_only", "aliases": ["محمد"]},
+    # 🔴 «محمد الحمامات» alias صريح لازم لا زائد (بلاغ X1840): resolve_treasury يطبّع بـnormalize_ar
+    #    التي **لا تُسقِط «ال» داخل النصّ**، فـ«محمد الحمامات» ≠ الاسم «محمد حمامات» ولا يُحلّ.
+    #    الصيغتان العاريتان «الحمامات»/«حمامات» مُستبعَدتان عمدًا: مدينةٌ وحدها وجهةُ تسليم لا خزينة
+    #    (الذخيرة الذهبية A54، وtest_structural_treasury:42). راجع tools/seed_drift.py.
+    {"code": "79", "name": "محمد حمامات", "currency": "TND", "type": "sell_only", "aliases": ["محمد", "محمد الحمامات"]},
     # بيع وشراء (§4.4) — الأكواد معلّقة، تُستكمل من Dashboard
     {"code": "72", "name": "خصم 1%", "currency": "EGP", "type": "sell_and_buy", "aliases": ["خصم", "خصم1", "خصم 1", "خصم 1%", "خصم1%"]},  # الخزينة الافتراضية لـ SI مع مورد
     {"code": "85", "name": "فودافون بالخصم", "currency": "EGP", "type": "sell_and_buy", "aliases": ["فودافون بالخصم", "فودافون خصم"]},  # الخزينة الافتراضية لطرف مورد حوالة A الثانية
