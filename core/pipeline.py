@@ -2020,6 +2020,20 @@ class Pipeline:
                     log.warning("🔴 لا خزينة/مورد مجهول (non-SI) للصفقة %s — تصعيد لغرفة المسؤول",
                                 deal.deal_id)
                     return deal
+                # (P1) تعارض العملة: خزينةٌ محلولةٌ بكودٍ صحيح لكن بعملةٍ تخالف الحوالة.
+                # 🔴 يُعلَّق **ويُبلَّغ المسؤول** (لا المركزية وحدها): الصفقة تبدو سليمة تمامًا
+                #    للمُدخِل — كودٌ وخزينةٌ ومبلغٌ وسعر — والخطأ الوحيد أن الحساب بعملةٍ أخرى،
+                #    فلا يكشفه إلا من يراجع. تعليقٌ صامتٌ هنا يعني ضياعه في الطابور.
+                if any(self._currency_conflict(lg) for lg in (deal.sell_leg, deal.buy_leg)):
+                    deal.status = Status.HELD
+                    deal.mark = Mark.WARN
+                    await self.db.deals.upsert(deal)
+                    await self.matcher.apply_mark(deal, Mark.WARN)     # ⚠️ على المركزية (§8.3)
+                    await self.bus.notify_admin(
+                        f"⚠️ {self._ref(deal)} — {reason}\nلم تُكتَب؛ تحتاج تصحيح الخزينة أو العملة.",
+                        self._deal_key(deal), forward_key=self._deal_key(deal))
+                    log.warning("⚠️ تعارض عملة للصفقة %s — تعليق + تصعيد: %s", deal.deal_id, reason)
+                    return deal
                 deal.status = Status.HELD
                 deal.mark = Mark.MATCHED   # 🟡 «قيد المراجعة» — انتظار لا فشل (قرار المالك)
                 await self.db.deals.upsert(deal)
@@ -2148,6 +2162,22 @@ class Pipeline:
                             deal.deal_id, tname)
         await self.db.deals.upsert(deal)
 
+    @staticmethod
+    def _currency_conflict(leg: Optional[ParsedLeg]) -> bool:
+        """(P1) هل عملة الطرف تخالف عملة خزينته — وكلتاهما **معروفة**؟
+
+        🔴 خطر ماليّ: خزينةٌ تونسيّة على حوالةٍ مصريّة تُدخِل المال في حسابٍ بعملةٍ خاطئة.
+           لم يكن في الشيفرة كلّها أيّ تدقيق على هذا: العملة تُستنتَج **من** الخزينة ولا
+           تُقارَن **بها** (parser.py `inferred_from_treasury`، `_ai_rescue`، `_apply_fragment`).
+
+        لا يُطلِق كاذبًا: حين تُستنتَج العملة من الخزينة تتساويان بالبناء، فلا ينشأ التعارض
+        إلا إذا كانت العملة **صريحة** في النصّ وخالفت الخزينة. وأيّ طرفٍ مجهول العملة
+        (الحوالة أو الخزينة) يمرّ كما كان — لا نقسو على الغامض (§0).
+        """
+        return (leg is not None and leg.treasury is not None
+                and leg.currency is not None and leg.treasury.currency is not None
+                and leg.currency != leg.treasury.currency)
+
     def _trust_gate(self, deal: Deal) -> tuple[bool, Optional[str]]:
         """بوابة الثقة على الطرف/الأطراف (§8.2). يستخدم منطق A3."""
         from .matching.verify import trust_gate
@@ -2162,6 +2192,11 @@ class Pipeline:
                 return False, "لا خزينة محلولة — تعذّر تحديد الحساب"
             if leg.treasury.code is None:
                 return False, f"خزينة «{leg.treasury.name}» بلا كود MONEYADO (معلّق)"
+            # (P1) تطابق العملة — آخر فحصٍ قبل الكتابة (نقطة الاختناق الواحدة)
+            if self._currency_conflict(leg):
+                return False, (
+                    f"عملة الخزينة «{leg.treasury.currency.value}» ≠ عملة الحوالة "
+                    f"«{leg.currency.value}» — خزينة «{leg.treasury.name}» لا تصلح لهذه الحوالة")
         return True, None
 
     async def _set_mark(self, deal: Deal, mark: Mark) -> None:
