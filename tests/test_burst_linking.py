@@ -220,6 +220,58 @@ async def test_explicit_ref_still_reaches_reuse_born_deal(db):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# (2أ، 2026-07-23) توحيد استبعاد born_from_ref_reuse على مسار السطرين أيضًا
+# ═════════════════════════════════════════════════════════════════════════════
+async def test_reuse_born_deal_excluded_from_two_line_candidates(db):
+    """مسار السطرين (waiting_candidates_for_second) يستبعد الشَّرَك كنظيره في مسار الرد المفرد.
+
+    كان pending_candidates_for_sender يستبعده وهذا لا، فتبقى صفقةٌ كاملةٌ سلفًا مرشّحةً
+    فتنزاح روابط تكملات السطرين بواحد (توأمان بنفس المرجع، X1918)."""
+    from core.queue.service import QueueService
+    q = QueueService(db)
+    await db.deals.upsert(_deal("decoy", "X1566", 0, reuse=True))
+    await db.deals.upsert(_deal("real", "X1568", 1))
+    cands = await q.waiting_candidates_for_second(CENTRAL, NOW + timedelta(seconds=5))
+    assert [c.deal_id for c in cands] == ["real"], "الشَّرَك لم يُستبعَد في مسار السطرين"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (2ب، 2026-07-23) توأمان بنفس المرجع + تكملةٌ عديمةُ المرجع ⇒ تعليق+تصعيد لا FIFO
+# ═════════════════════════════════════════════════════════════════════════════
+def test_duplicate_ref_detector_unit():
+    """كاشف المرجع المكرّر: ≥٢ صفقات بنفس الرقم الإشاريّ → المرجع المكرّر؛ وإلّا None."""
+    from core.pipeline import Pipeline
+    twins = [_deal("a", "X1918", 0), _deal("b", "X1918", 1)]
+    assert Pipeline._duplicate_ref_in_candidates(twins) == "X1918"
+    distinct = [_deal("a", "X1918", 0), _deal("b", "X1919", 1)]
+    assert Pipeline._duplicate_ref_in_candidates(distinct) is None
+
+
+async def test_duplicate_ref_completion_is_held_not_fifo_guessed(db):
+    """تكملةٌ عديمةُ المرجع أمام توأمَين بنفس المرجع ⇒ لا تُربَط (تعليق+تصعيد)، لا تخمين الأقدم.
+
+    قبل 2ب كانت FIFO تنزل على الأقدم فيتضوّر التوأم الآخر ١٥د (X1918/X1634)."""
+    pipe = _pipe(db)                                   # بلا ذكاء ⇒ _ai_link_choice = None
+    twins = [_deal("older", "X1918", 0), _deal("newer", "X1918", 1)]
+    raw = RawMessage(message_key="c1", chat_jid=CENTRAL, sender_jid=S1,
+                     text="بلاس", received_at=NOW + timedelta(seconds=5))
+    target = await pipe._choose_link_target(
+        raw, twins, [], [], NOW + timedelta(seconds=5), stage="second_leg", frag=None)
+    assert target is None, "التكملة رُبطت بتوأمٍ رغم التباس المرجع المكرّر"
+
+
+async def test_distinct_ref_completion_still_fifo_links(db):
+    """ضمانة عدم الانحدار: مرشّحان بمرجعَين **مختلفَين** بلا تمييز محتوى ⇒ FIFO الأقدم (X850)."""
+    pipe = _pipe(db)
+    cands = [_deal("older", "X1918", 0), _deal("newer", "X1919", 1)]
+    raw = RawMessage(message_key="c2", chat_jid=CENTRAL, sender_jid=S1,
+                     text="بلاس", received_at=NOW + timedelta(seconds=5))
+    target = await pipe._choose_link_target(
+        raw, cands, [], [], NOW + timedelta(seconds=5), stage="second_leg", frag=None)
+    assert target is not None and target.deal_id == "older", "FIFO الحتميّ انكسر"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # (X1587) الموضع يحدّد النوع — سطر المورّد في الرسالة الثانية
 # ═════════════════════════════════════════════════════════════════════════════
 _X1587_1 = 'X1587\n+20 122 1225261\nنجوى\n1500 مصري\n\n650 عبدو طبيب6.08'

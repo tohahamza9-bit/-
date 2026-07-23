@@ -71,6 +71,7 @@ from .parsing.normalize import normalize_price
 from .parsing.parser import _has_reference, first_reference
 from .parsing.resolve import resolve_bold, resolve_supplier, resolve_treasury
 from .queue.commission import compute_commission, resolve_two_leg_treasury
+from .queue.grouping import _norm_ref
 from .queue.service import (
     QueueService,
     _as_naive_utc,
@@ -664,6 +665,23 @@ class Pipeline:
                 f"{self._ref(merged) or '؟'}. راجعها.", raw.message_key, forward_key=raw.message_key)
         return merged
 
+    @staticmethod
+    def _duplicate_ref_in_candidates(cands: list[Deal]) -> str | None:
+        """(2ب، 2026-07-23) هل تتقاسم صفقتان أو أكثر من المرشّحين **نفس الرقم الإشاريّ**؟
+
+        يُرجِع المرجع المكرّر (مطبَّعًا) أو None. تكملةٌ عديمةُ المرجع أمام توأمَين بنفس المرجع =
+        التباسٌ لا يحلّه ترتيبُ الوصول (FIFO كانت تُخمّن الأقدم فتُضوّر الآخر — X1918، X1634…).
+        """
+        from collections import Counter
+        refs = []
+        for c in cands:
+            leg = c.sell_leg or c.buy_leg
+            r = _norm_ref(leg.reference_number if leg else None)
+            if r:
+                refs.append(r)
+        dup = [r for r, n in Counter(refs).items() if n >= 2]
+        return dup[0] if dup else None
+
     async def _choose_link_target(self, raw: RawMessage, cands: list[Deal],
                                   treasuries: list, suppliers: list, now: datetime, *,
                                   text_ref: str | None = None, stage: str = "link",
@@ -714,6 +732,16 @@ class Pipeline:
                 raw.message_key, forward_key=raw.message_key)
             return chosen
         if _excluded == 0:
+            # (2ب) توأمان بنفس المرجع + تكملةٌ عديمةُ المرجع ⇒ التباسٌ لا يحلّه الترتيب: تعليق+تصعيد
+            #   بدل تخمين الأقدم (X1918/X1634: كانت تنزل على الأقدم فيتضوّر الآخر ١٥د).
+            _dup = self._duplicate_ref_in_candidates(cands)
+            if _dup is not None:
+                await self.bus.notify_admin(
+                    f"⚠️ تكملة بلا رقم إشاري + صفقتان تحملان نفس المرجع «{_dup}» — **لم تُربَط** "
+                    f"(التباس مرجعٍ مكرّر، بلا تخمين الأقدم). راجعها وحدّد الصفقة يدويًّا.",
+                    raw.message_key, forward_key=raw.message_key)
+                _log_link_decision(stage, raw.message_key, cands, None, "duplicate-ref-hold")
+                return None
             # (X850) المحتوى لم يميّز أحدًا (تكملاتٌ متتابعة عديمة التمييز) ⇒ FIFO الأقدم الحتميّ
             #   (ترتيب الوصول موثوقٌ عبر 1-A) — تسلسلٌ شرعيّ يُربَط ١:١ بلا تعليق ولا إيقاف إنتاجيّة.
             _log_link_decision(stage, raw.message_key, cands, cands[0], "fifo-deterministic")
@@ -1469,6 +1497,17 @@ class Pipeline:
                     return await self._link_two_line(raw, cands, choice.index, pairs, treasuries,
                                                      now, f"ai-auto:{choice.confidence:.2f}", notify=True)
                 if _excluded == 0:
+                    # (2ب) توأمان بنفس المرجع + تكملةٌ عديمةُ المرجع ⇒ التباسٌ لا يحلّه الترتيب:
+                    #   تعليق+تصعيد بدل تخمين الأقدم (X1918/X1634).
+                    _dup = self._duplicate_ref_in_candidates(cands)
+                    if _dup is not None:
+                        await self.bus.notify_admin(
+                            f"⚠️ تكملة بلا رقم إشاري + صفقتان تحملان نفس المرجع «{_dup}» — **لم تُربَط** "
+                            f"(التباس مرجعٍ مكرّر، بلا تخمين الأقدم). راجعها وحدّد الصفقة يدويًّا.",
+                            raw.message_key, forward_key=raw.message_key)
+                        _log_link_decision("second_pairs", raw.message_key, cands, None,
+                                           "duplicate-ref-hold")
+                        return None
                     # (X850) لا تمييز محتوائيّ (تكملاتٌ متتابعة عديمة التمييز) ⇒ FIFO الأقدم الحتميّ
                     #   (ترتيب الوصول موثوقٌ عبر 1-A) — تسلسلٌ شرعيّ يُربَط ١:١ بلا تعليق ولا إيقاف إنتاجيّة.
                     return await self._link_two_line(raw, cands, 0, pairs, treasuries, now,

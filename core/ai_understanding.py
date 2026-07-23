@@ -28,7 +28,7 @@ from typing import Any, Optional
 import httpx
 
 from core.models import Currency, SupplierRecord, TreasuryRecord
-from core.parsing.normalize import normalize_ar
+from core.parsing.normalize import expand_alf_amounts, normalize_ar
 from core.parsing.resolve import normalize_arabic_for_matching
 
 log = logging.getLogger(__name__)
@@ -38,8 +38,30 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # الحقول الجوهريّة: ثقة أيّ منها دون العتبة → تصعيد. (بقيّة الحقول تكميليّة لا تحجب.)
 ESSENTIAL_FIELDS = ("operation", "amount", "currency", "treasury")
 
-# صيغة «ألف/آلاف» (§3.5) — لقبول 32000 حين يكتب النصّ «32 ألف» (توسّع موثَّق لا اختراع).
-_ALF_WORDS = ("الف", "آلاف", "الاف")
+# ── أعداد مكتوبة بالحروف (1ب، 2026-07-23) ────────────────────────────────────
+# جداول **مغلقة** بالصيغة المطبَّعة (normalize_ar: أ→ا، ة→ه، ى→ي، ء يُحذَف ⇒ «مئة»→«ميه»).
+# تُستعمَل حصرًا في حارس _num_in_text (قبولٌ فقط: تشتقّ قيمةً موجودةً بالحروف لتُقارَن بمقترَح
+# النموذج) — **لا** تدخل مسار المفكِّك الحتميّ كي لا تُقرأ أسماءٌ فيها «خمسين» مبالغَ.
+_AR_ONES = {
+    "واحد": 1, "واحده": 1, "احد": 1, "اثنين": 2, "اثنان": 2, "اتنين": 2,
+    "ثلاثه": 3, "ثلاث": 3, "تلاته": 3, "تلات": 3, "اربعه": 4, "اربع": 4,
+    "خمسه": 5, "خمس": 5, "سته": 6, "ست": 6, "سبعه": 7, "سبع": 7,
+    "ثمانيه": 8, "ثمان": 8, "تمانيه": 8, "تمان": 8, "تسعه": 9, "تسع": 9,
+    "عشره": 10, "عشر": 10,
+}
+_AR_TENS = {
+    "عشرين": 20, "ثلاثين": 30, "تلاتين": 30, "اربعين": 40, "خمسين": 50,
+    "ستين": 60, "سبعين": 70, "ثمانين": 80, "تمانين": 80, "تسعين": 90,
+}
+_AR_HUNDREDS = {
+    "ميه": 100, "مايه": 100, "مئه": 100, "ميتين": 200, "ثلاثميه": 300,
+    "اربعميه": 400, "خمسميه": 500, "ستميه": 600, "سبعميه": 700,
+    "ثمانميه": 800, "تسعميه": 900,
+}
+# مُعامِلات الضرب المكتوبة + المثنّى (مليونين=2م، الفين=2000) الذي لا رأس رقميّ له.
+_AR_MULT = {"الف": 1000, "الاف": 1000, "مليون": 1_000_000, "ملايين": 1_000_000}
+_AR_DUAL = {"مليونين": 2_000_000, "الفين": 2000}
+_AR_NUM_WORD = set(_AR_ONES) | set(_AR_TENS) | set(_AR_HUNDREDS) | set(_AR_MULT) | {"و"}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -269,30 +291,90 @@ def _loads_lenient(content: str) -> Any:
 # ═════════════════════════════════════════════════════════════════════════════
 # (2) التحقّق الحتميّ — الخط الأحمر. الكود هو الحَكَم، لا النموذج.
 # ═════════════════════════════════════════════════════════════════════════════
+def _spelled_word_amounts(norm: str) -> set[int]:
+    """(1ب) القيم المشتقّة من أعدادٍ **مكتوبة بالحروف** في نصٍّ مطبَّع: «خمسين الف»→50000،
+    «مليون»→1000000، «مئه وخمسين الف»→150000، «مليونين»→2000000. اشتقاقٌ حتميّ لا اختراع.
+
+    يمسح مقاطع كلمات-الأعداد المتّصلة (مع «و») ويُقيّمها بالقواعد الكلاسيكيّة: المئات+العشرات+
+    الآحاد تُجمَع، ثمّ يُطبَّق مُعامِل الضرب (ألف/مليون) على ما سبقه (أو 1 إن لم يسبقه رأس)."""
+    # واو العطف تُكتب ملتصقةً بالعربيّة («وخمسين» لا «و خمسين») — نفصلها إن كان ما بعدها عددًا،
+    # مع إبقاء «واحد» (عددٌ يبدأ بواو) كما هو.
+    words: list[str] = []
+    for tok in norm.split():
+        if (tok not in _AR_NUM_WORD and tok not in _AR_DUAL and tok.startswith("و")
+                and (tok[1:] in _AR_NUM_WORD or tok[1:] in _AR_DUAL)):
+            words.append("و")
+            words.append(tok[1:])
+        else:
+            words.append(tok)
+    values: set[int] = set()
+    i = 0
+    while i < len(words):
+        if words[i] in _AR_DUAL:            # مثنّى قائم بذاته (مليونين/الفين)
+            values.add(_AR_DUAL[words[i]])
+            i += 1
+            continue
+        if words[i] not in _AR_NUM_WORD or words[i] == "و":
+            i += 1
+            continue
+        # مقطعٌ متّصل من كلمات الأعداد
+        j = i
+        total = 0          # مجموع المضروبات المنتهية (… ألف/مليون)
+        current = 0        # الجزء الجاري (مئات+عشرات+آحاد قبل مُعامِل)
+        matched = False
+        while j < len(words) and words[j] in _AR_NUM_WORD:
+            w = words[j]
+            if w == "و":
+                j += 1
+                continue
+            if w in _AR_HUNDREDS:
+                current += _AR_HUNDREDS[w]
+            elif w in _AR_TENS:
+                current += _AR_TENS[w]
+            elif w in _AR_ONES:
+                current += _AR_ONES[w]
+            elif w in _AR_MULT:
+                total += (current or 1) * _AR_MULT[w]
+                current = 0
+            matched = True
+            j += 1
+        if matched:
+            v = total + current
+            if v > 0:
+                values.add(v)
+        i = max(j, i + 1)
+    return values
+
+
 def _num_in_text(value: float, text: str) -> bool:
     """هل الرقم موجود **فعلًا** في نصّ الرسالة؟ (منع الأرقام المخترعة §0)
 
-    يُقارَن على النصّ بعد تطبيع الأرقام العربيّة-الهنديّة، متجاهلًا فواصل الآلاف. يُقبل أيضًا
-    توسّع «ألف» الموثَّق (§3.5): «32 ألف» ⇒ 32000.
+    يُقارَن على النصّ بعد تطبيع الأرقام العربيّة-الهنديّة، متجاهلًا فواصل الآلاف. ويُقبل الاشتقاق
+    الحتميّ الموثَّق (§3.5، 2026-07-23): «32 ألف»→32000، «2 مليون»→2000000 (عبر expand_alf_amounts
+    المُوحَّد)، و«خمسين الف»/«مليون» المكتوبة بالحروف (_spelled_word_amounts). لا اشتقاق ماليّ.
     """
     norm = normalize_ar(text) or ""
+    # (1أ) توسّع «عدد + ألف/مليون» بنفس دالّة المفكِّك الحتميّ — توحيدٌ للمسارين.
+    expanded, _ = expand_alf_amounts(norm)
     # 🔴 مطابقة **رقميّة تامّة** لا سلسلةً جزئيّة: «100» يجب ألّا يُقبَل لأن النصّ فيه «1000».
-    #    نستخرج كل الأعداد الواردة في النصّ ونقارن قيمها عدديًّا.
+    #    نستخرج كل الأعداد الواردة (بعد التوسّع) ونقارن قيمها عدديًّا.
     tokens: set[float] = set()
-    for m in re.finditer(r"\d[\d,٬]*(?:\.\d+)?", norm):
+    for m in re.finditer(r"\d[\d,٬]*(?:\.\d+)?", expanded):
         try:
             tokens.add(float(m.group(0).replace(",", "").replace("٬", "")))
         except ValueError:
             continue
     if any(abs(value - t) < 1e-9 for t in tokens):
         return True
-    # توسّع «ألف» الموثَّق (§3.5): 32000 مقبول إن كان النصّ «32 ألف» — توسّع لا اختراع.
+    # عددٌ عشريّ + مُعامِل مكتوب («1.5 مليون») — لا يلتقطه expand (يشترط رأسًا صحيحًا).
+    for m in re.finditer(
+            r"(?<![.,،٫٬\d])(\d+(?:\.\d+)?)\s*(الف|الاف|مليون|ملايين)(?![ء-ي])", norm):
+        mult = _AR_MULT.get(m.group(2))
+        if mult and abs(value - float(m.group(1)) * mult) < 1e-9:
+            return True
+    # (1ب) أعدادٌ مكتوبةٌ بالحروف: «خمسين الف»→50000 — اشتقاقٌ حتميّ موثَّق لا اختراع.
     if float(value).is_integer():
-        iv = int(value)
-        if iv % 1000 == 0 and iv >= 1000:
-            head = iv // 1000
-            if any(re.search(rf"(?<!\d){head}(?!\d)\s*{w}", norm) for w in _ALF_WORDS):
-                return True
+        return any(abs(value - v) < 1e-9 for v in _spelled_word_amounts(norm))
     return False
 
 

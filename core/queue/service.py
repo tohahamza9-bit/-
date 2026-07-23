@@ -510,9 +510,14 @@ class QueueService:
         if not chat_jid:
             return []
         horizon = _as_naive_utc(now) - timedelta(seconds=SECOND_MESSAGE_LINK_SECONDS)
+        # 🔴 (2أ، 2026-07-23) استبعاد المولودة من إعادة استخدام مرجع (X1242) هنا **أيضًا** — كان
+        #    pending_candidates_for_sender يستبعدها بينما هذا المسار (السطرين) لا، فتبقى صفقةٌ
+        #    كاملةٌ سلفًا مرشّحةً فتنزاح روابط التكملات عديمة المرجع بواحد. المرجع الصريح يبلغها
+        #    فوق الاستبعاد عبر bind_by_reference في نقطة التحكيم.
         return [
             d for d in await self.db.deals.waiting_in_room(chat_jid)
             if d.sell_leg is not None and d.buy_leg is None and d.sell_leg.supplier is None
+            and not d.born_from_ref_reuse
             and _as_naive_utc(d.created_at) >= horizon
         ]
 

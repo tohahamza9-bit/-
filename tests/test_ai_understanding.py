@@ -341,6 +341,28 @@ def test_number_in_text_accepts_alf_expansion():
     assert _num_in_text(5.7, "السعر 5.72") is False
 
 
+def test_number_in_text_million_and_word_amounts():
+    """(1أ+1ب، 2026-07-23) توحيد expand + «مليون» + الأعداد المكتوبة بالحروف — اشتقاقٌ لا اختراع."""
+    from core.ai_understanding import _num_in_text
+    # (1أ) «مليون» — كانت مرفوضةً لغيابها عن قائمة كلمات التوسّع.
+    assert _num_in_text(2_000_000, "مبلغ 2 مليون") is True
+    assert _num_in_text(1_500_000, "قيمة 1.5 مليون جنيه") is True   # رأس عشريّ
+    assert _num_in_text(1_000_000, "مليون جنيه") is True            # مُعامِل قائم بذاته
+    assert _num_in_text(2_000_000, "مليونين") is True               # مثنّى
+    # (1ب) رؤوسٌ مكتوبةٌ بالحروف.
+    assert _num_in_text(50_000, "خمسين الف") is True
+    assert _num_in_text(30_000, "ثلاثين الف جنيه") is True
+    assert _num_in_text(25_000, "خمسه وعشرين الف") is True          # واو عطف ملتصقة
+    assert _num_in_text(150_000, "مئه وخمسين الف") is True
+    assert _num_in_text(200_000, "مئتين الف") is True
+    assert _num_in_text(2_000, "الفين") is True
+    # 🔴 الاختراع يبقى مرفوضًا: رقمٌ لا أصل له، أو مشتقٌّ ماليًّا (1ج غير مُفعَّلة).
+    assert _num_in_text(99_999, "حوالة 50000") is False
+    assert _num_in_text(31_000, "مبلغ 30 الف") is False
+    assert _num_in_text(28_420, "28.136مصري وسعر 6.03") is False    # اشتقاق ماليّ مرفوض عمدًا
+    assert _num_in_text(5_000, "لا رقم هنا") is False
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # توسعة X1325: الرسالة الأولى الفاشلة تفكيكًا — تصحيح كلمة العملة ثم إعادة تفكيك
 # ═══════════════════════════════════════════════════════════════════════════
